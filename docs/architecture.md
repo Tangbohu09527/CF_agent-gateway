@@ -19,17 +19,19 @@ Entry points -> Gateway -> Hermes
 6. The provider router selects a registered AI provider.
 7. Hermes executes skills and orchestration outside this service.
 
-Only the HTTP service foundation, configuration, logging, database engine
-factory, and health endpoint are implemented during initialization.
+The HTTP service foundation and Message Store are implemented. Adapters, access
+control, context construction, task processing, providers, and Hermes
+integration remain outside the current phase.
 
 ## Package boundaries
 
-| Package | Responsibility | Initialization status |
+| Package | Responsibility | Implementation status |
 | --- | --- | --- |
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
 | `adapters` | Message entry-point adapters | Reserved |
-| `message.model` | Canonical message model | Reserved |
-| `message.store` | Message persistence boundary | Reserved |
+| `message.models` | Conversation, message, and attachment metadata ORM models | Implemented |
+| `message.schemas` | Message API input and output contracts | Implemented |
+| `message.store` | Idempotent message persistence and queries | Implemented |
 | `access` | Authentication and authorization | Reserved |
 | `context` | Context construction | Reserved |
 | `task.model` | Task model | Reserved |
@@ -42,3 +44,8 @@ SQLAlchemy 2.x provides the persistence boundary. SQLite is the phase-one
 database and PostgreSQL is supported by using a
 `postgresql+psycopg://...` database URL. Domain packages must not depend on a
 specific SQL dialect. Database-specific schema changes belong in `migrations/`.
+
+The current schema uses a unique `event_id` to enforce message idempotency and
+a unique `(source, conversation_id)` pair for conversations. Messages reference
+that pair without assuming channel identifiers are globally unique. Attachment
+rows contain metadata only; file bytes remain outside the database.

@@ -1,1 +1,0 @@
-"""Message-store boundary."""

@@ -2,7 +2,7 @@
 
 Enterprise AI Message Gateway.
 
-> Status: initialization phase.
+> Status: Message Store foundation implemented.
 
 CF_agent-gateway is the message and control plane between enterprise message
 entry points and Hermes.
@@ -42,18 +42,32 @@ CF_agent-gateway does not provide:
 
 ## Current scope
 
-The initialization phase contains only the service foundation:
+The service foundation and Message Store are implemented:
 
 - YAML configuration loading
 - JSON structured logging
 - FastAPI application lifecycle
 - SQLAlchemy engine configuration
+- SQLAlchemy models for conversations, messages, and attachment metadata
+- SQLite schema initialization and session management
+- Idempotent message creation by unique `event_id`
+- Message and conversation-message query APIs
 - `GET /health`
 - Container build and Compose service
 
-Message adapters, Hermes integration, AI providers, persistence models,
-authorization, context construction, and task processing are intentionally not
-implemented.
+Message adapters, Hermes integration, AI providers, authorization, context
+construction, and task processing are intentionally not implemented.
+
+## Message API
+
+- `POST /internal/messages` stores a normalized message event and returns its ID.
+- `GET /messages/{id}` returns a message and its attachment metadata.
+- `GET /conversations/{conversation_id}/messages` returns messages ordered by
+  event timestamp.
+
+Submitting an existing `event_id` is idempotent: the existing message ID is
+returned and no duplicate message or attachment records are created. Attachment
+content is not stored; only metadata and a storage path are persisted.
 
 ## Technology baseline
 

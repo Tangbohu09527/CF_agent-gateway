@@ -7,7 +7,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from cf_agent_gateway.config import Settings
-from cf_agent_gateway.database import create_database_engine
+from cf_agent_gateway.database import (
+    create_database_engine,
+    create_database_session_factory,
+    initialize_database,
+)
 from cf_agent_gateway.gateway.routes import router
 from cf_agent_gateway.logging import configure_logging
 
@@ -20,12 +24,14 @@ def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_database_engine(settings.database.url)
-        app.state.database_engine = engine
-        logger.info(
-            "gateway started",
-            extra={"fields": {"host": settings.server.host, "port": settings.server.port}},
-        )
         try:
+            initialize_database(engine)
+            app.state.database_engine = engine
+            app.state.database_session_factory = create_database_session_factory(engine)
+            logger.info(
+                "gateway started",
+                extra={"fields": {"host": settings.server.host, "port": settings.server.port}},
+            )
             yield
         finally:
             engine.dispose()
