@@ -1,0 +1,1 @@
+"""Canonical message model boundary."""

@@ -1,0 +1,1 @@
+"""Inbound message adapter boundary."""
