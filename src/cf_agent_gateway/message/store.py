@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from cf_agent_gateway.message.errors import ConversationTypeConflictError
 from cf_agent_gateway.message.models import Attachment, Conversation, Message
 from cf_agent_gateway.message.schemas import MessageEvent
 
@@ -13,16 +14,7 @@ class MessageStore:
         self._session = session
 
     def create(self, event: MessageEvent) -> tuple[Message, bool]:
-        existing = self._get_by_event_id(event.event_id)
-        if existing is not None:
-            return existing, False
-
-        existing = self._get_by_source_message(
-            source=event.source,
-            source_account_id=event.source_account_id,
-            conversation_id=event.conversation_id,
-            source_message_id=event.source_message_id,
-        )
+        existing = self._get_existing_message(event)
         if existing is not None:
             return existing, False
 
@@ -31,6 +23,7 @@ class MessageStore:
             source_account_id=event.source_account_id,
             conversation_id=event.conversation_id,
         )
+        attempted_conversation_create = conversation is None
         if conversation is None:
             conversation = Conversation(
                 source=event.source,
@@ -41,10 +34,52 @@ class MessageStore:
             )
             self._session.add(conversation)
         else:
-            conversation.conversation_type = event.conversation_type
-            conversation.conversation_name = event.conversation_name
+            self._validate_conversation_type(conversation, event)
+            if event.conversation_name is not None:
+                conversation.conversation_name = event.conversation_name
 
-        message = Message(
+        message = self._build_message(event)
+        self._session.add(message)
+
+        try:
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self._get_existing_message(event)
+            if existing is not None:
+                return existing, False
+            if not attempted_conversation_create:
+                raise
+
+            # Another transaction may have committed the conversation before this insert.
+            conversation = self._get_conversation(
+                source=event.source,
+                source_account_id=event.source_account_id,
+                conversation_id=event.conversation_id,
+            )
+            if conversation is None:
+                raise
+            self._validate_conversation_type(conversation, event)
+            return self._retry_message_insert(event)
+
+        return message, True
+
+    def _retry_message_insert(self, event: MessageEvent) -> tuple[Message, bool]:
+        message = self._build_message(event)
+        self._session.add(message)
+        try:
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self._get_existing_message(event)
+            if existing is not None:
+                return existing, False
+            raise
+        return message, True
+
+    @staticmethod
+    def _build_message(event: MessageEvent) -> Message:
+        return Message(
             event_id=event.event_id,
             source=event.source,
             source_account_id=event.source_account_id,
@@ -71,26 +106,17 @@ class MessageStore:
                 for metadata in event.attachments
             ],
         )
-        self._session.add(message)
 
-        try:
-            self._session.commit()
-        except IntegrityError:
-            self._session.rollback()
-            existing = self._get_by_event_id(event.event_id)
-            if existing is not None:
-                return existing, False
-            existing = self._get_by_source_message(
+    @staticmethod
+    def _validate_conversation_type(conversation: Conversation, event: MessageEvent) -> None:
+        if conversation.conversation_type != event.conversation_type:
+            raise ConversationTypeConflictError(
                 source=event.source,
                 source_account_id=event.source_account_id,
                 conversation_id=event.conversation_id,
-                source_message_id=event.source_message_id,
-            )
-            if existing is not None:
-                return existing, False
-            raise
-
-        return message, True
+                existing_type=conversation.conversation_type,
+                requested_type=event.conversation_type,
+            ) from None
 
     def get(self, message_id: int) -> Message | None:
         statement = (
@@ -122,6 +148,17 @@ class MessageStore:
             .options(selectinload(Message.attachments))
         )
         return self._session.scalar(statement)
+
+    def _get_existing_message(self, event: MessageEvent) -> Message | None:
+        existing = self._get_by_event_id(event.event_id)
+        if existing is not None:
+            return existing
+        return self._get_by_source_message(
+            source=event.source,
+            source_account_id=event.source_account_id,
+            conversation_id=event.conversation_id,
+            source_message_id=event.source_message_id,
+        )
 
     def _get_by_source_message(
         self,

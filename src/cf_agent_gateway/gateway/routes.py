@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.database import get_database_session
+from cf_agent_gateway.message.errors import ConversationTypeConflictError
 from cf_agent_gateway.message.schemas import MessageCreated, MessageEvent, MessageResponse
 from cf_agent_gateway.message.store import MessageStore
 
@@ -34,7 +35,20 @@ def create_message(
     response: Response,
     session: DatabaseSession,
 ) -> MessageCreated:
-    message, created = MessageStore(session).create(event)
+    try:
+        message, created = MessageStore(session).create(event)
+    except ConversationTypeConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": error.code,
+                "source": error.source,
+                "source_account_id": error.source_account_id,
+                "conversation_id": error.conversation_id,
+                "existing_type": error.existing_type,
+                "requested_type": error.requested_type,
+            },
+        ) from error
     if not created:
         response.status_code = status.HTTP_200_OK
     return MessageCreated(id=message.id)

@@ -1,7 +1,13 @@
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy import ForeignKeyConstraint, UniqueConstraint, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
+from cf_agent_gateway.message.errors import ConversationTypeConflictError
 from cf_agent_gateway.message.models import Conversation, Message
+from cf_agent_gateway.message.schemas import MessageEvent
+from cf_agent_gateway.message.store import MessageStore
 
 
 def message_event(event_id: str = "event-001", **overrides: object) -> dict[str, object]:
@@ -45,6 +51,22 @@ def conversation_messages_path(
     return (
         f"/sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages"
     )
+
+
+def database_session_factory(client: TestClient) -> sessionmaker[Session]:
+    return client.app.state.database_session_factory
+
+
+def parsed_message_event(event_id: str = "event-001", **overrides: object) -> MessageEvent:
+    return MessageEvent.model_validate(message_event(event_id, **overrides))
+
+
+def conversation_snapshot(client: TestClient) -> tuple[str, str | None, int]:
+    with database_session_factory(client)() as session:
+        conversation = session.scalar(select(Conversation))
+        assert conversation is not None
+        message_count = session.scalar(select(func.count()).select_from(Message))
+        return conversation.conversation_type, conversation.conversation_name, message_count
 
 
 def test_create_message_saves_and_returns_source_envelope(client: TestClient) -> None:
@@ -269,3 +291,296 @@ def test_message_model_uses_account_scoped_constraints() -> None:
         "conversations.source_account_id",
         "conversations.conversation_id",
     )
+
+
+def test_group_conversation_rejects_private_message_without_modification(
+    client: TestClient,
+) -> None:
+    created = client.post("/internal/messages", json=message_event())
+    conflict = client.post(
+        "/internal/messages",
+        json=message_event(
+            "event-002",
+            source_message_id="source-message-002",
+            conversation_type="private",
+            is_mentioned=None,
+            conversation_name="Must not replace the group name",
+        ),
+    )
+
+    assert created.status_code == 201
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == {
+        "code": "conversation_type_conflict",
+        "source": "test-channel",
+        "source_account_id": "bot-001",
+        "conversation_id": "conversation-001",
+        "existing_type": "group",
+        "requested_type": "private",
+    }
+    assert conversation_snapshot(client) == ("group", "Gateway development", 1)
+
+
+def test_private_conversation_rejects_group_message(client: TestClient) -> None:
+    private_event = message_event(conversation_type="private", is_mentioned=None)
+    created = client.post("/internal/messages", json=private_event)
+    conflict = client.post(
+        "/internal/messages",
+        json=message_event(
+            "event-002",
+            source_message_id="source-message-002",
+            conversation_name="Must not replace the private name",
+        ),
+    )
+
+    assert created.status_code == 201
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "conversation_type_conflict"
+    assert conflict.json()["detail"]["existing_type"] == "private"
+    assert conflict.json()["detail"]["requested_type"] == "group"
+    assert conversation_snapshot(client) == ("private", "Gateway development", 1)
+
+
+def test_missing_conversation_name_preserves_existing_name(client: TestClient) -> None:
+    first = client.post("/internal/messages", json=message_event())
+    second = client.post(
+        "/internal/messages",
+        json=message_event(
+            "event-002",
+            source_message_id="source-message-002",
+            conversation_name=None,
+        ),
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert conversation_snapshot(client) == ("group", "Gateway development", 2)
+
+
+def test_non_null_conversation_name_updates_display_name(client: TestClient) -> None:
+    first = client.post("/internal/messages", json=message_event())
+    second = client.post(
+        "/internal/messages",
+        json=message_event(
+            "event-002",
+            source_message_id="source-message-002",
+            conversation_name="Renamed conversation",
+        ),
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert conversation_snapshot(client) == ("group", "Renamed conversation", 2)
+
+
+def test_concurrent_conversation_creation_recovers_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = database_session_factory(client)
+    with factory() as first_session:
+        first, first_created = MessageStore(first_session).create(parsed_message_event())
+
+    with factory() as second_session:
+        store = MessageStore(second_session)
+        get_conversation = store._get_conversation
+        conversation_lookups = 0
+
+        def stale_then_current_conversation(**scope: str) -> Conversation | None:
+            nonlocal conversation_lookups
+            conversation_lookups += 1
+            if conversation_lookups == 1:
+                return None
+            return get_conversation(**scope)
+
+        monkeypatch.setattr(store, "_get_conversation", stale_then_current_conversation)
+        second, second_created = store.create(
+            parsed_message_event(
+                "event-002",
+                source_message_id="source-message-002",
+                conversation_name="Concurrent rename must not win",
+                content="Second physical message",
+            )
+        )
+
+    assert first_created is True
+    assert second_created is True
+    assert first.id != second.id
+    assert conversation_lookups == 2
+    assert conversation_snapshot(client) == ("group", "Gateway development", 2)
+    with factory() as verification_session:
+        conversation_count = verification_session.scalar(
+            select(func.count()).select_from(Conversation)
+        )
+        assert conversation_count == 1
+
+    messages = client.get(conversation_messages_path()).json()
+    assert [message["event_id"] for message in messages] == ["event-001", "event-002"]
+    assert messages[0]["content"] == "Store this message"
+    assert messages[0]["attachments"][0]["filename"] == "design.txt"
+    assert messages[1]["content"] == "Second physical message"
+
+
+def test_retry_path_keeps_duplicate_event_id_idempotent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = database_session_factory(client)
+    with factory() as first_session:
+        existing, _ = MessageStore(first_session).create(parsed_message_event())
+
+    with factory() as retry_session:
+        store = MessageStore(retry_session)
+        get_existing_message = store._get_existing_message
+        get_conversation = store._get_conversation
+        existing_lookups = 0
+        conversation_lookups = 0
+
+        def temporarily_hidden_message(event: MessageEvent) -> Message | None:
+            nonlocal existing_lookups
+            existing_lookups += 1
+            if existing_lookups <= 2:
+                return None
+            return get_existing_message(event)
+
+        def stale_then_current_conversation(**scope: str) -> Conversation | None:
+            nonlocal conversation_lookups
+            conversation_lookups += 1
+            if conversation_lookups == 1:
+                return None
+            return get_conversation(**scope)
+
+        monkeypatch.setattr(store, "_get_existing_message", temporarily_hidden_message)
+        monkeypatch.setattr(store, "_get_conversation", stale_then_current_conversation)
+        duplicate, created = store.create(
+            parsed_message_event(source_message_id="different-source-message")
+        )
+
+    assert created is False
+    assert duplicate.id == existing.id
+    assert existing_lookups == 3
+    assert conversation_lookups == 2
+    assert conversation_snapshot(client) == ("group", "Gateway development", 1)
+
+
+def test_retry_path_keeps_duplicate_source_message_id_idempotent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = database_session_factory(client)
+    with factory() as first_session:
+        existing, _ = MessageStore(first_session).create(parsed_message_event())
+
+    with factory() as retry_session:
+        store = MessageStore(retry_session)
+        get_existing_message = store._get_existing_message
+        get_conversation = store._get_conversation
+        existing_lookups = 0
+        conversation_lookups = 0
+
+        def temporarily_hidden_message(event: MessageEvent) -> Message | None:
+            nonlocal existing_lookups
+            existing_lookups += 1
+            if existing_lookups <= 2:
+                return None
+            return get_existing_message(event)
+
+        def stale_then_current_conversation(**scope: str) -> Conversation | None:
+            nonlocal conversation_lookups
+            conversation_lookups += 1
+            if conversation_lookups == 1:
+                return None
+            return get_conversation(**scope)
+
+        monkeypatch.setattr(store, "_get_existing_message", temporarily_hidden_message)
+        monkeypatch.setattr(store, "_get_conversation", stale_then_current_conversation)
+        duplicate, created = store.create(parsed_message_event("event-002"))
+
+    assert created is False
+    assert duplicate.id == existing.id
+    assert existing_lookups == 3
+    assert conversation_lookups == 2
+    assert conversation_snapshot(client) == ("group", "Gateway development", 1)
+
+
+def test_conversation_race_rejects_type_conflict(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = database_session_factory(client)
+    with factory() as first_session:
+        MessageStore(first_session).create(parsed_message_event())
+
+    with factory() as conflicting_session:
+        store = MessageStore(conflicting_session)
+        get_conversation = store._get_conversation
+        conversation_lookups = 0
+
+        def stale_then_current_conversation(**scope: str) -> Conversation | None:
+            nonlocal conversation_lookups
+            conversation_lookups += 1
+            if conversation_lookups == 1:
+                return None
+            return get_conversation(**scope)
+
+        monkeypatch.setattr(store, "_get_conversation", stale_then_current_conversation)
+        with pytest.raises(ConversationTypeConflictError) as exc_info:
+            store.create(
+                parsed_message_event(
+                    "event-002",
+                    source_message_id="source-message-002",
+                    conversation_type="private",
+                    is_mentioned=None,
+                )
+            )
+
+    error = exc_info.value
+    assert error.code == "conversation_type_conflict"
+    assert error.source == "test-channel"
+    assert error.source_account_id == "bot-001"
+    assert error.conversation_id == "conversation-001"
+    assert error.existing_type == "group"
+    assert error.requested_type == "private"
+    assert conversation_lookups == 2
+    assert conversation_snapshot(client) == ("group", "Gateway development", 1)
+
+
+def test_unknown_integrity_error_during_retry_is_not_swallowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = database_session_factory(client)
+    with factory() as first_session:
+        MessageStore(first_session).create(parsed_message_event())
+
+    unknown_error = IntegrityError("INSERT INTO messages", {}, RuntimeError("unknown"))
+    with factory() as retry_session:
+        store = MessageStore(retry_session)
+        get_conversation = store._get_conversation
+        commit = retry_session.commit
+        conversation_lookups = 0
+        commit_attempts = 0
+
+        def stale_then_current_conversation(**scope: str) -> Conversation | None:
+            nonlocal conversation_lookups
+            conversation_lookups += 1
+            if conversation_lookups == 1:
+                return None
+            return get_conversation(**scope)
+
+        def fail_unknown_on_retry() -> None:
+            nonlocal commit_attempts
+            commit_attempts += 1
+            if commit_attempts == 2:
+                raise unknown_error
+            commit()
+
+        monkeypatch.setattr(store, "_get_conversation", stale_then_current_conversation)
+        monkeypatch.setattr(retry_session, "commit", fail_unknown_on_retry)
+        with pytest.raises(IntegrityError) as exc_info:
+            store.create(
+                parsed_message_event(
+                    "event-002",
+                    source_message_id="source-message-002",
+                )
+            )
+
+    assert exc_info.value is unknown_error
+    assert conversation_lookups == 2
+    assert commit_attempts == 2
+    assert conversation_snapshot(client) == ("group", "Gateway development", 1)
