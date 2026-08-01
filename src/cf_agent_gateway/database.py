@@ -33,7 +33,12 @@ def initialize_database(engine: Engine) -> None:
     if engine.dialect.name == "sqlite" and engine.url.database not in {None, "", ":memory:"}:
         Path(engine.url.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
-    import_module("cf_agent_gateway.message.models")
+    for model_module in (
+        "cf_agent_gateway.message.models",
+        "cf_agent_gateway.identity.models",
+        "cf_agent_gateway.workspace.models",
+    ):
+        import_module(model_module)
     Base.metadata.create_all(engine)
 
 
