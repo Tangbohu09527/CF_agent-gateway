@@ -4,10 +4,12 @@ from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import BigInteger, DateTime, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from cf_agent_gateway.database import Base
+
+MAX_CHECKPOINT_LOCAL_ID = 2**63 - 1
 
 
 class BootstrapMode(StrEnum):
@@ -72,6 +74,10 @@ class WechatSyncCheckpoint(Base):
             "source_account_id",
             "conversation_id",
             name="uq_wechat_sync_checkpoint_account_conversation",
+        ),
+        CheckConstraint(
+            "last_local_id >= 0",
+            name="ck_wechat_sync_checkpoint_nonnegative_local_id",
         ),
     )
 

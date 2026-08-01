@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from cf_agent_gateway.adapters.wechat.errors import WechatAdapterError
@@ -14,6 +14,7 @@ from cf_agent_gateway.adapters.wechat.polling_errors import (
     WechatPollingError,
 )
 from cf_agent_gateway.adapters.wechat.polling_models import (
+    MAX_CHECKPOINT_LOCAL_ID,
     BootstrapMode,
     ChatPollResult,
     PollFailure,
@@ -22,8 +23,6 @@ from cf_agent_gateway.adapters.wechat.polling_models import (
 )
 from cf_agent_gateway.adapters.wechat.polling_store import WechatSyncCheckpointStore
 from cf_agent_gateway.adapters.wechat.raw_models import AgentWechatAuthStatus, RawWechatMessage
-
-MAX_BIGINT = 2**63 - 1
 
 
 class WechatPollingClient(Protocol):
@@ -35,11 +34,22 @@ class WechatPollingClient(Protocol):
 
 
 class NormalizedMessageSink(Protocol):
+    """Receive messages under an at-least-once delivery contract.
+
+    Implementations must be idempotent: a successful handle followed by a failed
+    checkpoint write can redeliver the same message. Future durable sinks can use
+    ``event_id`` or the source physical-message identity as their uniqueness key.
+    """
+
     def handle(self, message: NormalizedWechatMessage) -> None: ...
 
 
 class WechatPollingService:
-    """Run one finite agent-wechat polling cycle with durable high-water marks."""
+    """Run one finite polling cycle with durable, at-least-once delivery.
+
+    V1 assumes one active poller per source account. Initialization races still
+    treat the checkpoint returned by the store as authoritative.
+    """
 
     def __init__(
         self,
@@ -160,42 +170,23 @@ class WechatPollingService:
 
         messages_seen = len(raw_messages)
         try:
-            ordered_messages = sorted(
-                ((_numeric_local_id(message), message) for message in raw_messages),
-                key=lambda item: item[0],
-            )
-        except Exception as error:
-            validation_failure = _failure(
-                PollFailureStage.VALIDATE_MESSAGE,
-                error,
+            ordered_messages = _validated_ordered_messages(
+                raw_messages,
                 conversation_id=conversation_id,
             )
-            try:
-                _, bootstrapped = self._checkpoint_store.initialize(
-                    source_account_id=source_account_id,
-                    conversation_id=conversation_id,
-                    last_local_id=0,
-                )
-            except Exception as checkpoint_error:
-                checkpoint_failure = _failure(
-                    PollFailureStage.CHECKPOINT,
-                    checkpoint_error,
-                    conversation_id=conversation_id,
-                )
-                return ChatPollResult(
-                    conversation_id=conversation_id,
-                    conversation_name=conversation_name,
-                    succeeded=False,
-                    messages_seen=messages_seen,
-                    failures=[validation_failure, checkpoint_failure],
-                )
+        except Exception as error:
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
                 succeeded=False,
                 messages_seen=messages_seen,
-                bootstrapped=bootstrapped,
-                failures=[validation_failure],
+                failures=[
+                    _failure(
+                        PollFailureStage.VALIDATE_MESSAGE,
+                        error,
+                        conversation_id=conversation_id,
+                    )
+                ],
             )
 
         try:
@@ -220,11 +211,16 @@ class WechatPollingService:
 
         bootstrapped = False
         if checkpoint is None:
+            initial_local_id = (
+                ordered_messages[-1][0]
+                if self._bootstrap_mode is BootstrapMode.LATEST and ordered_messages
+                else 0
+            )
             try:
                 checkpoint, bootstrapped = self._checkpoint_store.initialize(
                     source_account_id=source_account_id,
                     conversation_id=conversation_id,
-                    last_local_id=0,
+                    last_local_id=initial_local_id,
                 )
             except Exception as error:
                 return ChatPollResult(
@@ -240,9 +236,17 @@ class WechatPollingService:
                         )
                     ],
                 )
+            if bootstrapped and self._bootstrap_mode is BootstrapMode.LATEST:
+                return ChatPollResult(
+                    conversation_id=conversation_id,
+                    conversation_name=conversation_name,
+                    succeeded=True,
+                    messages_seen=messages_seen,
+                    messages_skipped_by_checkpoint=messages_seen,
+                    bootstrapped=True,
+                )
 
         current_local_id = checkpoint.last_local_id
-        skip_initial_history = bootstrapped and self._bootstrap_mode is BootstrapMode.LATEST
         messages_processed = 0
         messages_skipped = 0
         for local_id, raw_message in ordered_messages:
@@ -275,27 +279,27 @@ class WechatPollingService:
                     failures=[failure],
                 )
 
-            if not skip_initial_history:
-                try:
-                    self._sink.handle(normalized)
-                except Exception as error:
-                    failure = _failure(
-                        PollFailureStage.SINK,
-                        error,
-                        conversation_id=conversation_id,
-                        local_id=local_id,
-                    )
-                    return ChatPollResult(
-                        conversation_id=conversation_id,
-                        conversation_name=conversation_name,
-                        succeeded=False,
-                        messages_seen=messages_seen,
-                        messages_processed=messages_processed,
-                        messages_skipped_by_checkpoint=messages_skipped,
-                        bootstrapped=bootstrapped,
-                        failures=[failure],
-                    )
+            try:
+                self._sink.handle(normalized)
+            except Exception as error:
+                failure = _failure(
+                    PollFailureStage.SINK,
+                    error,
+                    conversation_id=conversation_id,
+                    local_id=local_id,
+                )
+                return ChatPollResult(
+                    conversation_id=conversation_id,
+                    conversation_name=conversation_name,
+                    succeeded=False,
+                    messages_seen=messages_seen,
+                    messages_processed=messages_processed,
+                    messages_skipped_by_checkpoint=messages_skipped,
+                    bootstrapped=bootstrapped,
+                    failures=[failure],
+                )
 
+            # A failed checkpoint write deliberately permits redelivery on the next poll.
             try:
                 checkpoint = self._checkpoint_store.advance(
                     source_account_id=source_account_id,
@@ -321,10 +325,7 @@ class WechatPollingService:
                 )
 
             current_local_id = checkpoint.last_local_id
-            if skip_initial_history:
-                messages_skipped += 1
-            else:
-                messages_processed += 1
+            messages_processed += 1
 
         return ChatPollResult(
             conversation_id=conversation_id,
@@ -367,9 +368,29 @@ def _numeric_local_id(message: RawWechatMessage | Mapping[str, Any]) -> int:
         local_id = int(normalized)
     else:
         raise WechatLocalIdError()
-    if not 0 < local_id <= MAX_BIGINT:
+    if not 0 < local_id <= MAX_CHECKPOINT_LOCAL_ID:
         raise WechatLocalIdError()
     return local_id
+
+
+def _validated_ordered_messages(
+    raw_messages: Sequence[RawWechatMessage | Mapping[str, Any]],
+    *,
+    conversation_id: str,
+) -> list[tuple[int, RawWechatMessage | Mapping[str, Any]]]:
+    ordered_messages: list[tuple[int, RawWechatMessage | Mapping[str, Any]]] = []
+    for message in raw_messages:
+        message_chat_id = (
+            message.chat_id
+            if isinstance(message, RawWechatMessage)
+            else message.get("chatId")
+            if isinstance(message, Mapping)
+            else None
+        )
+        if _nonempty_string(message_chat_id) != conversation_id:
+            raise WechatConversationMismatchError()
+        ordered_messages.append((_numeric_local_id(message), message))
+    return sorted(ordered_messages, key=lambda item: item[0])
 
 
 def _normalize_for_chat(

@@ -4,16 +4,21 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from sqlalchemy import BigInteger, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, UniqueConstraint
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from cf_agent_gateway.adapters.wechat import polling_service as polling_service_module
 from cf_agent_gateway.adapters.wechat.normalized_models import (
     NormalizedWechatMessage,
     WechatMessageType,
     WechatSenderType,
 )
-from cf_agent_gateway.adapters.wechat.polling_errors import InvalidBootstrapModeError
+from cf_agent_gateway.adapters.wechat.polling_errors import (
+    InvalidBootstrapModeError,
+    WechatCheckpointValueError,
+)
 from cf_agent_gateway.adapters.wechat.polling_models import (
     PollFailureStage,
     WechatSyncCheckpoint,
@@ -95,6 +100,81 @@ class RecordingSink:
             self.fail_counts[message.source_message_id] = remaining - 1
             raise RuntimeError("controlled fake sink failure")
         self.handled.append(message)
+
+
+class TrackingCheckpointStore(WechatSyncCheckpointStore):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        fail_advance_once: bool = False,
+    ) -> None:
+        super().__init__(session)
+        self.fail_advance_once = fail_advance_once
+        self.initialize_calls: list[int] = []
+        self.advance_calls: list[int] = []
+
+    def initialize(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        last_local_id: int,
+    ) -> tuple[WechatSyncCheckpoint, bool]:
+        self.initialize_calls.append(last_local_id)
+        return super().initialize(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            last_local_id=last_local_id,
+        )
+
+    def advance(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        last_local_id: int,
+    ) -> WechatSyncCheckpoint:
+        self.advance_calls.append(last_local_id)
+        if self.fail_advance_once:
+            self.fail_advance_once = False
+            raise RuntimeError("controlled checkpoint advance failure")
+        return super().advance(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            last_local_id=last_local_id,
+        )
+
+
+class InitializeRaceCheckpointStore(TrackingCheckpointStore):
+    def __init__(self, session: Session) -> None:
+        super().__init__(session)
+        self.hide_first_get = True
+
+    def get(self, *, source_account_id: str, conversation_id: str) -> WechatSyncCheckpoint | None:
+        if self.hide_first_get:
+            self.hide_first_get = False
+            return None
+        return super().get(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+        )
+
+    def initialize(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        last_local_id: int,
+    ) -> tuple[WechatSyncCheckpoint, bool]:
+        self.initialize_calls.append(last_local_id)
+        existing = WechatSyncCheckpointStore.get(
+            self,
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+        )
+        assert existing is not None
+        return existing, False
 
 
 @pytest.fixture
@@ -259,9 +339,33 @@ def test_latest_is_default_and_does_not_replay_visible_history(
     assert result.chat_results[0].bootstrapped is True
 
 
-def test_latest_does_not_bootstrap_past_an_unnormalizable_message(
+def test_latest_only_delivers_messages_above_atomic_bootstrap_watermark(
     checkpoint_store: WechatSyncCheckpointStore,
 ) -> None:
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(2), raw_message(1)]})
+    sink = RecordingSink()
+    service = WechatPollingService(client, checkpoint_store, sink)
+
+    first = service.poll_once()
+    client.messages[CHAT_ID] = [raw_message(3), raw_message(2), raw_message(1)]
+    second = service.poll_once()
+
+    assert first.messages_skipped_by_checkpoint == 2
+    assert second.messages_processed == 1
+    assert second.messages_skipped_by_checkpoint == 2
+    assert source_ids(sink.handled) == ["3"]
+    assert checkpoint(checkpoint_store).last_local_id == 3  # type: ignore[union-attr]
+
+
+def test_latest_bootstrap_does_not_normalize_visible_history(
+    checkpoint_store: WechatSyncCheckpointStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("latest bootstrap must not normalize visible history")
+
+    monkeypatch.setattr(polling_service_module, "normalize_wechat_message", fail_if_called)
     invalid = raw_message(2)
     invalid.pop("sender")
     client = FakeWechatClient(messages={CHAT_ID: [raw_message(3), invalid, raw_message(1)]})
@@ -269,19 +373,67 @@ def test_latest_does_not_bootstrap_past_an_unnormalizable_message(
 
     result = WechatPollingService(client, checkpoint_store, sink).poll_once()
 
-    assert result.chats_failed == 1
-    assert result.failures[0].stage is PollFailureStage.NORMALIZE
-    assert result.failures[0].local_id == 2
     stored = checkpoint(checkpoint_store)
-    assert stored is not None and stored.last_local_id == 1
+    assert result.chats_succeeded == 1
+    assert result.messages_skipped_by_checkpoint == 3
+    assert stored is not None and stored.last_local_id == 3
     assert sink.attempts == []
 
-    client.messages[CHAT_ID] = [raw_message(3), raw_message(2), raw_message(1)]
-    retry = WechatPollingService(client, checkpoint_store, sink).poll_once()
 
-    assert retry.messages_processed == 2
-    assert source_ids(sink.handled) == ["2", "3"]
-    assert checkpoint(checkpoint_store).last_local_id == 3  # type: ignore[union-attr]
+def test_latest_bootstrap_initializes_once_at_max_without_advancing(
+    session: Session,
+) -> None:
+    store = TrackingCheckpointStore(session)
+    client = FakeWechatClient(
+        messages={CHAT_ID: [raw_message("10"), raw_message(2), raw_message(3)]}
+    )
+    sink = RecordingSink()
+
+    result = WechatPollingService(client, store, sink).poll_once()
+
+    assert result.chats_succeeded == 1
+    assert result.messages_skipped_by_checkpoint == 3
+    assert store.initialize_calls == [10]
+    assert store.advance_calls == []
+    assert checkpoint(store).last_local_id == 10  # type: ignore[union-attr]
+    assert sink.attempts == []
+
+
+def test_latest_bootstrap_with_missing_sender_skips_history(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    history = raw_message(7)
+    history.pop("sender")
+    client = FakeWechatClient(messages={CHAT_ID: [history]})
+    sink = RecordingSink()
+
+    result = WechatPollingService(client, checkpoint_store, sink).poll_once()
+
+    assert result.chats_succeeded == 1
+    assert result.messages_skipped_by_checkpoint == 1
+    assert checkpoint(checkpoint_store).last_local_id == 7  # type: ignore[union-attr]
+    assert sink.attempts == []
+
+
+def test_latest_initialize_race_uses_existing_checkpoint_as_authority(session: Session) -> None:
+    seed_store = WechatSyncCheckpointStore(session)
+    existing, _ = seed_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=2,
+    )
+    store = InitializeRaceCheckpointStore(session)
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(3), raw_message(2), raw_message(1)]})
+    sink = RecordingSink()
+
+    result = WechatPollingService(client, store, sink).poll_once()
+
+    assert store.initialize_calls == [3]
+    assert result.bootstrapped_chats == 0
+    assert result.messages_processed == 1
+    assert result.messages_skipped_by_checkpoint == 2
+    assert source_ids(sink.handled) == ["3"]
+    assert existing.last_local_id == 3
 
 
 def test_backfill_replays_visible_history_in_order(
@@ -507,7 +659,7 @@ def test_invalid_local_id_does_not_advance_checkpoint(
     assert result.failures[0].stage is PollFailureStage.VALIDATE_MESSAGE
 
 
-def test_corrected_local_id_retries_after_first_poll_validation_failure(
+def test_corrected_local_id_preserves_latest_bootstrap_after_validation_failure(
     checkpoint_store: WechatSyncCheckpointStore,
 ) -> None:
     client = FakeWechatClient(messages={CHAT_ID: [raw_message("not-a-number")]})
@@ -517,14 +669,68 @@ def test_corrected_local_id_retries_after_first_poll_validation_failure(
     first = service.poll_once()
     stored = checkpoint(checkpoint_store)
     assert first.chats_failed == 1
-    assert stored is not None and stored.last_local_id == 0
+    assert stored is None
+    assert sink.attempts == []
 
-    client.messages[CHAT_ID] = [raw_message(1)]
+    client.messages[CHAT_ID] = [raw_message(2), raw_message(1)]
     second = service.poll_once()
 
-    assert second.messages_processed == 1
-    assert checkpoint(checkpoint_store).last_local_id == 1  # type: ignore[union-attr]
-    assert source_ids(sink.handled) == ["1"]
+    assert second.messages_processed == 0
+    assert second.messages_skipped_by_checkpoint == 2
+    assert checkpoint(checkpoint_store).last_local_id == 2  # type: ignore[union-attr]
+    assert sink.attempts == []
+
+
+def test_latest_chat_id_mismatch_does_not_create_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(1, chat_id="wxid_other")]})
+    sink = RecordingSink()
+
+    result = WechatPollingService(client, checkpoint_store, sink).poll_once()
+
+    assert result.chats_failed == 1
+    assert result.failures[0].stage is PollFailureStage.VALIDATE_MESSAGE
+    assert result.failures[0].code == "wechat_conversation_mismatch"
+    assert checkpoint(checkpoint_store) is None
+    assert sink.attempts == []
+
+
+def test_latest_initialize_failure_leaves_no_partial_checkpoint(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = TrackingCheckpointStore(session)
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(3), raw_message(2), raw_message(1)]})
+    sink = RecordingSink()
+    original_commit = session.commit
+    commit_attempts = 0
+
+    def fail_commit() -> None:
+        nonlocal commit_attempts
+        commit_attempts += 1
+        if commit_attempts == 1:
+            raise RuntimeError("controlled checkpoint initialize failure")
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+
+    result = WechatPollingService(client, store, sink).poll_once()
+
+    assert result.chats_failed == 1
+    assert result.failures[0].stage is PollFailureStage.CHECKPOINT
+    assert store.initialize_calls == [3]
+    assert store.advance_calls == []
+    assert checkpoint(store) is None
+    assert sink.attempts == []
+
+    retry = WechatPollingService(client, store, sink).poll_once()
+
+    assert retry.chats_succeeded == 1
+    assert retry.messages_skipped_by_checkpoint == 3
+    assert store.initialize_calls == [3, 3]
+    assert checkpoint(store).last_local_id == 3  # type: ignore[union-attr]
+    assert sink.attempts == []
 
 
 def test_checkpoint_store_never_moves_backward(
@@ -544,6 +750,48 @@ def test_checkpoint_store_never_moves_backward(
 
     assert returned.last_local_id == 10
     assert checkpoint(checkpoint_store).last_local_id == 10  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("invalid_local_id", [-1, 2**63])
+@pytest.mark.parametrize("operation", ["initialize", "advance"])
+def test_checkpoint_store_rejects_values_outside_big_integer_range(
+    checkpoint_store: WechatSyncCheckpointStore,
+    operation: str,
+    invalid_local_id: int,
+) -> None:
+    method = getattr(checkpoint_store, operation)
+
+    with pytest.raises(WechatCheckpointValueError):
+        method(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            last_local_id=invalid_local_id,
+        )
+
+    assert checkpoint(checkpoint_store) is None
+
+
+def test_checkpoint_failure_after_sink_success_allows_redelivery(session: Session) -> None:
+    store = TrackingCheckpointStore(session, fail_advance_once=True)
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(2), raw_message(1)]})
+    sink = RecordingSink()
+    service = WechatPollingService(client, store, sink, bootstrap_mode="backfill")
+
+    first = service.poll_once()
+    after_failure = checkpoint(store)
+
+    assert first.chats_failed == 1
+    assert first.messages_processed == 0
+    assert first.failures[0].stage is PollFailureStage.CHECKPOINT
+    assert first.failures[0].local_id == 1
+    assert after_failure is not None and after_failure.last_local_id == 0
+
+    second = service.poll_once()
+
+    assert second.chats_succeeded == 1
+    assert source_ids(sink.attempts) == ["1", "1", "2"]
+    assert source_ids(sink.handled) == ["1", "1", "2"]
+    assert checkpoint(store).last_local_id == 2  # type: ignore[union-attr]
 
 
 def test_processed_checkpoint_is_visible_in_a_new_database_session(engine: Engine) -> None:
@@ -707,6 +955,28 @@ def test_checkpoint_schema_uses_big_integer_and_account_chat_unique_key() -> Non
         if isinstance(constraint, UniqueConstraint)
     }
     assert ("source_account_id", "conversation_id") in unique_column_sets
+    check_constraints = {
+        str(constraint.sqltext)
+        for constraint in WechatSyncCheckpoint.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "last_local_id >= 0" in check_constraints
+
+
+def test_database_constraint_rejects_negative_checkpoint(session: Session) -> None:
+    session.add(
+        WechatSyncCheckpoint(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            last_local_id=-1,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+    assert checkpoint(WechatSyncCheckpointStore(session)) is None
 
 
 def test_invalid_bootstrap_mode_is_rejected_without_polling(
