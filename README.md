@@ -52,11 +52,12 @@ The service foundation and Message Store are implemented:
 - SQLite schema initialization and session management
 - Idempotent message creation by unique `event_id` and source-message identity
 - Message and account-scoped conversation-message query APIs
+- WeChat normalization and explicit Message Store event conversion
 - `GET /health`
 - Container build and Compose service
 
-Message adapters, Hermes integration, AI providers, authorization, context
-construction, and task processing are intentionally not implemented.
+WeChat polling, Hermes integration, AI providers, authorization orchestration,
+context construction, and task processing are intentionally not implemented.
 
 ## Message API
 
@@ -79,6 +80,14 @@ Private messages store `is_mentioned` as `null`. Group messages store an explici
 boolean; a missing adapter value is normalized to `false` before persistence. The
 Message Store never infers mention state from message content. `is_self=true` marks a
 message sent by the current bot account, and these messages are still persisted.
+
+Each message also records `sender_type`, the channel's `raw_type`, canonical local and
+server IDs when available, and whether `source_message_id` is a local-ID fallback.
+Human messages require a `sender_id`. System messages may omit it and are still stored;
+the gateway does not substitute a bot account or display name as their sender identity.
+Verified reply summaries are stored as JSON in `reply_context`. A summary does not imply
+a resolved Gateway message relationship, so `reply_to_message_id` remains `null` until
+stable relationship parsing is available.
 
 ### Development database schema
 

@@ -9,6 +9,7 @@ from cf_agent_gateway.adapters.wechat.errors import (
     WechatTimeoutError,
     WechatTransportError,
 )
+from cf_agent_gateway.adapters.wechat.message_event import wechat_message_to_event
 from cf_agent_gateway.adapters.wechat.normalized_models import (
     NormalizedWechatMessage,
     WechatConversationType,
@@ -44,4 +45,5 @@ __all__ = [
     "WechatSenderType",
     "build_wechat_event_id",
     "normalize_wechat_message",
+    "wechat_message_to_event",
 ]

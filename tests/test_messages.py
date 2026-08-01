@@ -1,6 +1,8 @@
+from datetime import datetime
+
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import ForeignKeyConstraint, UniqueConstraint, func, select
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -21,11 +23,24 @@ def message_event(event_id: str = "event-001", **overrides: object) -> dict[str,
         "is_mentioned": True,
         "is_self": False,
         "conversation_name": "Gateway development",
+        "sender_type": "human",
         "sender_id": "user-001",
         "sender_name": "Test User",
         "message_type": "text",
+        "raw_type": 1,
         "content": "Store this message",
         "timestamp": "2026-07-31T10:00:00+08:00",
+        "source_local_id": "local-001",
+        "source_server_id": "server-001",
+        "source_message_id_is_fallback": False,
+        "reply_context": {
+            "source_local_id": "reply-local-001",
+            "source_server_id": "reply-server-001",
+            "sender_id": "user-002",
+            "sender_name": "Reply Author",
+            "raw_type": 1,
+            "content": "Original message",
+        },
         "reply_to_message_id": None,
         "attachments": [
             {
@@ -84,6 +99,20 @@ def test_create_message_saves_and_returns_source_envelope(client: TestClient) ->
     assert body["conversation_type"] == "group"
     assert body["is_mentioned"] is True
     assert body["is_self"] is False
+    assert body["sender_type"] == "human"
+    assert body["raw_type"] == 1
+    assert body["source_local_id"] == "local-001"
+    assert body["source_server_id"] == "server-001"
+    assert body["source_message_id_is_fallback"] is False
+    assert body["reply_context"] == {
+        "source_local_id": "reply-local-001",
+        "source_server_id": "reply-server-001",
+        "sender_id": "user-002",
+        "sender_name": "Reply Author",
+        "raw_type": 1,
+        "content": "Original message",
+    }
+    assert body["reply_to_message_id"] is None
 
 
 def test_get_message_and_scoped_conversation_messages(client: TestClient) -> None:
@@ -100,6 +129,9 @@ def test_get_message_and_scoped_conversation_messages(client: TestClient) -> Non
     conversation_response = client.get(conversation_messages_path())
     assert conversation_response.status_code == 200
     assert [message["id"] for message in conversation_response.json()] == [message_id]
+    assert conversation_response.json()[0]["sender_type"] == "human"
+    assert conversation_response.json()[0]["raw_type"] == 1
+    assert conversation_response.json()[0]["reply_context"]["content"] == "Original message"
 
 
 def test_same_conversation_id_does_not_conflict_across_accounts(client: TestClient) -> None:
@@ -217,6 +249,113 @@ def test_private_message_rejects_non_null_mention(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_human_message_requires_sender_id(client: TestClient) -> None:
+    response = client.post("/internal/messages", json=message_event(sender_id=None))
+
+    assert response.status_code == 422
+    assert "sender_id is required for human senders" in response.text
+
+
+def test_system_message_allows_null_sender_id(client: TestClient) -> None:
+    created = client.post(
+        "/internal/messages",
+        json=message_event(
+            sender_type="system",
+            sender_id=None,
+            sender_name=None,
+            message_type="system",
+            raw_type=10000,
+        ),
+    )
+
+    assert created.status_code == 201
+    body = client.get(f"/messages/{created.json()['id']}").json()
+    assert body["sender_type"] == "system"
+    assert body["sender_id"] is None
+
+
+def test_sender_type_rejects_unknown_value(client: TestClient) -> None:
+    response = client.post(
+        "/internal/messages",
+        json=message_event(sender_type="bot"),
+    )
+
+    assert response.status_code == 422
+
+
+def test_optional_source_fields_default_for_other_adapters(client: TestClient) -> None:
+    event = message_event()
+    del event["sender_type"]
+    for field in (
+        "raw_type",
+        "source_local_id",
+        "source_server_id",
+        "source_message_id_is_fallback",
+        "reply_context",
+    ):
+        del event[field]
+
+    created = client.post("/internal/messages", json=event)
+
+    assert created.status_code == 201
+    body = client.get(f"/messages/{created.json()['id']}").json()
+    assert body["sender_type"] == "human"
+    assert body["raw_type"] is None
+    assert body["source_local_id"] is None
+    assert body["source_server_id"] is None
+    assert body["source_message_id_is_fallback"] is False
+    assert body["reply_context"] is None
+
+
+@pytest.mark.parametrize("sender_id", [None, "", "   "])
+def test_database_rejects_human_message_without_sender_id(
+    client: TestClient, sender_id: str | None
+) -> None:
+    with database_session_factory(client)() as session:
+        session.add(
+            Conversation(
+                source="test-channel",
+                source_account_id="bot-001",
+                conversation_id="conversation-001",
+                conversation_type="group",
+            )
+        )
+        session.add(
+            Message(
+                event_id="event-001",
+                source="test-channel",
+                source_account_id="bot-001",
+                source_message_id="source-message-001",
+                conversation_id="conversation-001",
+                conversation_type="group",
+                is_mentioned=False,
+                is_self=False,
+                sender_type="human",
+                sender_id=sender_id,
+                sender_name=None,
+                message_type="text",
+                raw_type=1,
+                content="invalid",
+                timestamp=datetime.fromisoformat("2026-07-31T10:00:00+08:00"),
+                source_local_id="local-001",
+                source_server_id="server-001",
+                source_message_id_is_fallback=False,
+                reply_context=None,
+                reply_to_message_id=None,
+            )
+        )
+
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+@pytest.mark.parametrize("raw_type", [True, "1"])
+def test_raw_type_rejects_coercion(client: TestClient, raw_type: object) -> None:
+    response = client.post("/internal/messages", json=message_event(raw_type=raw_type))
+
+    assert response.status_code == 422
+
+
 def test_self_message_is_still_saved(client: TestClient) -> None:
     created = client.post("/internal/messages", json=message_event(is_self=True))
 
@@ -271,6 +410,11 @@ def test_message_model_uses_account_scoped_constraints() -> None:
         for constraint in Message.__table__.constraints
         if isinstance(constraint, ForeignKeyConstraint)
     ]
+    message_check_names = {
+        constraint.name
+        for constraint in Message.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
 
     assert ("source", "source_account_id", "conversation_id") in conversation_unique_keys
     assert ("event_id",) in message_unique_keys
@@ -291,6 +435,8 @@ def test_message_model_uses_account_scoped_constraints() -> None:
         "conversations.source_account_id",
         "conversations.conversation_id",
     )
+    assert "ck_message_sender_type" in message_check_names
+    assert "ck_message_human_sender_id" in message_check_names
 
 
 def test_group_conversation_rejects_private_message_without_modification(

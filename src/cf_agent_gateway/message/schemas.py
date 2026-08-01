@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, model_validator
+
+PreservedText = Annotated[str, StringConstraints(strip_whitespace=False)]
 
 
 class MessageSchema(BaseModel):
@@ -19,6 +21,15 @@ class AttachmentMetadata(MessageSchema):
     hash: str = Field(min_length=1, max_length=255)
 
 
+class ReplyContext(MessageSchema):
+    source_local_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_server_id: str | None = Field(default=None, min_length=1, max_length=255)
+    sender_id: str | None = Field(default=None, min_length=1, max_length=255)
+    sender_name: str | None = Field(default=None, min_length=1, max_length=255)
+    raw_type: StrictInt | None = None
+    content: PreservedText | None = None
+
+
 class MessageEvent(MessageSchema):
     event_id: str = Field(min_length=1, max_length=255)
     source: str = Field(min_length=1, max_length=64)
@@ -29,16 +40,24 @@ class MessageEvent(MessageSchema):
     is_mentioned: bool | None = None
     is_self: bool
     conversation_name: str | None = Field(default=None, max_length=255)
-    sender_id: str = Field(min_length=1, max_length=255)
+    sender_type: Literal["human", "system"] = "human"
+    sender_id: str | None = Field(default=None, min_length=1, max_length=255)
     sender_name: str | None = Field(default=None, max_length=255)
     message_type: str = Field(min_length=1, max_length=64)
-    content: str
+    raw_type: StrictInt | None = None
+    content: PreservedText
     timestamp: datetime
+    source_local_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_server_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_message_id_is_fallback: bool = False
+    reply_context: ReplyContext | None = None
     reply_to_message_id: str | None = Field(default=None, max_length=255)
     attachments: list[AttachmentMetadata] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def normalize_mention(self) -> Self:
+    def validate_envelope(self) -> Self:
+        if self.sender_type == "human" and self.sender_id is None:
+            raise ValueError("sender_id is required for human senders")
         if self.conversation_type == "private":
             if self.is_mentioned is not None:
                 raise ValueError("is_mentioned must be null for private conversations")
@@ -77,11 +96,17 @@ class MessageResponse(BaseModel):
     conversation_type: str
     is_mentioned: bool | None
     is_self: bool
-    sender_id: str
+    sender_type: Literal["human", "system"]
+    sender_id: str | None
     sender_name: str | None
     message_type: str
+    raw_type: int | None
     content: str
     timestamp: datetime
+    source_local_id: str | None
+    source_server_id: str | None
+    source_message_id_is_fallback: bool
+    reply_context: ReplyContext | None
     reply_to_message_id: str | None
     created_at: datetime
     attachments: list[AttachmentResponse]

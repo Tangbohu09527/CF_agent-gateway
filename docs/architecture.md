@@ -13,8 +13,8 @@ Entry points -> Gateway -> Hermes
 
 1. An adapter normalizes channel message facts, including the source account,
    conversation type, mention state, and whether the current bot account sent it.
-2. Access control authenticates the caller and authorizes the operation.
-3. The message store persists the normalized message.
+2. The message store persists the normalized message.
+3. Access control authenticates the caller and authorizes further execution.
 4. The context builder assembles bounded conversation context.
 5. The task queue schedules asynchronous work.
 6. The provider router selects a registered AI provider.
@@ -29,7 +29,7 @@ integration remain outside the current phase.
 | Package | Responsibility | Implementation status |
 | --- | --- | --- |
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
-| `adapters` | Message entry-point adapters | Reserved |
+| `adapters` | Message entry-point adapters | WeChat normalization and store bridge implemented |
 | `message.models` | Conversation, message, and attachment metadata ORM models | Implemented |
 | `message.schemas` | Message API input and output contracts | Implemented |
 | `message.store` | Idempotent message persistence and queries | Implemented |
@@ -59,12 +59,14 @@ either rule resolves to the existing physical message without overwriting it. Th
 account component prevents identical conversation and source-message IDs belonging to
 different bot accounts from conflicting.
 
-Each message persists `conversation_type`, structured `is_mentioned`, and `is_self`
-facts from its adapter envelope. Private-message mention state is `null`; group-message
-mention state is an explicit boolean and defaults to `false` when absent. The store
-does not inspect message content to infer mentions. Self-originated messages are saved
-with `is_self=true` rather than being discarded. Attachment rows contain metadata
-only; file bytes remain outside the database.
+Each message persists `conversation_type`, structured `is_mentioned`, `is_self`, sender
+kind, raw channel type, and available channel-local identifiers from its adapter
+envelope. Private-message mention state is `null`; group-message mention state is an
+explicit boolean and defaults to `false` when absent. The store does not inspect
+message content to infer mentions. Self-originated and senderless system messages are
+saved rather than discarded. Verified reply summaries are stored as JSON context, not
+as inferred message relationships. Attachment rows contain metadata only; file bytes
+remain outside the database.
 
 This is a development-time schema change. Until formal migrations exist, developers
 must back up and manually recreate older development databases before using the new

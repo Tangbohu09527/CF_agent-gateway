@@ -268,6 +268,8 @@ def test_private_message_normalization() -> None:
 
     assert normalized.source == "wechat"
     assert normalized.source_account_id == "wxid_bot"
+    assert normalized.source_local_id == "101"
+    assert normalized.source_server_id == "9001"
     assert normalized.conversation_id == "wxid_alice"
     assert normalized.conversation_type is WechatConversationType.PRIVATE
     assert normalized.conversation_name is None
@@ -421,6 +423,8 @@ def test_missing_server_id_uses_scoped_local_id_fallback() -> None:
     )
 
     assert first.source_message_id.startswith("local:v1:")
+    assert first.source_local_id == "101"
+    assert first.source_server_id is None
     assert first.source_message_id_is_fallback is True
     assert same.source_message_id == first.source_message_id
     assert other_chat.source_message_id != first.source_message_id
@@ -434,6 +438,19 @@ def test_unusable_server_id_falls_back_to_local_id(server_id: object) -> None:
     )
 
     assert normalized.source_message_id_is_fallback is True
+    assert normalized.source_local_id == "101"
+    assert normalized.source_server_id is None
+
+
+def test_source_ids_use_canonical_upstream_strings() -> None:
+    normalized = normalize_wechat_message(
+        raw_message(localId="  local-101  ", serverId="  server-9001  "),
+        source_account_id="wxid_bot",
+    )
+
+    assert normalized.source_local_id == "local-101"
+    assert normalized.source_server_id == "server-9001"
+    assert normalized.source_message_id == "server-9001"
 
 
 def test_missing_server_and_local_ids_is_a_normalization_error() -> None:

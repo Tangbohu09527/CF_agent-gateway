@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -10,9 +11,11 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -73,6 +76,14 @@ class Message(Base):
             "(conversation_type != 'group' OR is_mentioned IS NOT NULL)",
             name="ck_message_conversation_mention",
         ),
+        CheckConstraint(
+            "sender_type IN ('human', 'system')",
+            name="ck_message_sender_type",
+        ),
+        CheckConstraint(
+            "sender_type = 'system' OR (sender_id IS NOT NULL AND length(trim(sender_id)) > 0)",
+            name="ck_message_human_sender_id",
+        ),
         Index(
             "ix_message_conversation_timestamp",
             "source",
@@ -92,11 +103,21 @@ class Message(Base):
     conversation_type: Mapped[str] = mapped_column(String(64))
     is_mentioned: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_self: Mapped[bool] = mapped_column(Boolean)
-    sender_id: Mapped[str] = mapped_column(String(255))
+    sender_type: Mapped[str] = mapped_column(String(16))
+    sender_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     message_type: Mapped[str] = mapped_column(String(64))
+    raw_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str] = mapped_column(Text)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_local_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_server_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_message_id_is_fallback: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    reply_context: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     reply_to_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

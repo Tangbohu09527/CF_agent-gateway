@@ -37,9 +37,11 @@ def normalize_wechat_message(
     sender_id = (
         _optional_string(message.sender) if is_system else _required(message.sender, "sender")
     )
+    source_local_id = _usable_id(message.local_id)
+    source_server_id = _usable_id(message.server_id)
     source_message_id, is_fallback = _source_message_id(
-        server_id=message.server_id,
-        local_id=message.local_id,
+        server_id=source_server_id,
+        local_id=source_local_id,
         account_id=account_id,
         chat_id=chat_id,
     )
@@ -56,6 +58,8 @@ def normalize_wechat_message(
     return NormalizedWechatMessage(
         source_account_id=account_id,
         source_message_id=source_message_id,
+        source_local_id=source_local_id,
+        source_server_id=source_server_id,
         source_message_id_is_fallback=is_fallback,
         event_id=build_wechat_event_id(
             source_account_id=account_id,

@@ -45,6 +45,8 @@ class NormalizedWechatMessage(BaseModel):
     source: Literal["wechat"] = "wechat"
     source_account_id: str
     source_message_id: str
+    source_local_id: str | None = None
+    source_server_id: str | None = None
     source_message_id_is_fallback: bool
     event_id: str
     conversation_id: str

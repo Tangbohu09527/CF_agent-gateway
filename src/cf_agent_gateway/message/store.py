@@ -88,11 +88,21 @@ class MessageStore:
             conversation_type=event.conversation_type,
             is_mentioned=event.is_mentioned,
             is_self=event.is_self,
+            sender_type=event.sender_type,
             sender_id=event.sender_id,
             sender_name=event.sender_name,
             message_type=event.message_type,
+            raw_type=event.raw_type,
             content=event.content,
             timestamp=event.timestamp,
+            source_local_id=event.source_local_id,
+            source_server_id=event.source_server_id,
+            source_message_id_is_fallback=event.source_message_id_is_fallback,
+            reply_context=(
+                event.reply_context.model_dump(mode="json")
+                if event.reply_context is not None
+                else None
+            ),
             reply_to_message_id=event.reply_to_message_id,
             attachments=[
                 Attachment(
