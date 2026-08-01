@@ -1,4 +1,4 @@
-"""Pure access-control models and policy evaluation."""
+"""Access-control models, policy evaluation, and persisted policy services."""
 
 from cf_agent_gateway.access.enums import (
     ConversationType,
@@ -15,17 +15,41 @@ from cf_agent_gateway.access.models import (
     IdentityFacts,
     RequestFacts,
 )
+from cf_agent_gateway.access.policy_errors import (
+    AccessPolicyError,
+    GroupPolicyKeyRequiredError,
+    InvalidGatewayPolicyKeyError,
+    InvalidPolicyWindowError,
+)
+from cf_agent_gateway.access.policy_models import (
+    DEFAULT_GATEWAY_POLICY_KEY,
+    GatewayAccessPolicy,
+    GroupAccessPolicy,
+    UserAccessPolicy,
+)
+from cf_agent_gateway.access.policy_service import AccessPolicyService
+from cf_agent_gateway.access.policy_store import AccessPolicyStore
 
 __all__ = [
     "AuthorizationDecision",
+    "AccessPolicyError",
+    "AccessPolicyService",
+    "AccessPolicyStore",
     "ConversationFacts",
     "ConversationType",
     "Decision",
+    "DEFAULT_GATEWAY_POLICY_KEY",
+    "GatewayAccessPolicy",
     "GatewayPolicyFacts",
+    "GroupAccessPolicy",
+    "GroupPolicyKeyRequiredError",
     "IdentityFacts",
     "IdentityStatus",
+    "InvalidGatewayPolicyKeyError",
+    "InvalidPolicyWindowError",
     "ReasonCode",
     "RequestFacts",
     "RiskLevel",
+    "UserAccessPolicy",
     "evaluate_access",
 ]

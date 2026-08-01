@@ -37,6 +37,7 @@ def initialize_database(engine: Engine) -> None:
         "cf_agent_gateway.message.models",
         "cf_agent_gateway.identity.models",
         "cf_agent_gateway.workspace.models",
+        "cf_agent_gateway.access.policy_models",
     ):
         import_module(model_module)
     Base.metadata.create_all(engine)
