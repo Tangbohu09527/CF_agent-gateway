@@ -64,7 +64,7 @@ class AgentWechatClient:
         response = self._request("GET", "api/status/auth", operation=operation)
         payload = self._json(response, operation=operation)
         candidate = payload
-        if isinstance(payload, Mapping) and "loggedInUser" not in payload:
+        if isinstance(payload, Mapping) and "status" not in payload:
             candidate = payload.get("data")
         if not isinstance(candidate, Mapping):
             raise WechatResponseError(operation=operation)
