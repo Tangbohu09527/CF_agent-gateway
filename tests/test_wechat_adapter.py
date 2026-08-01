@@ -86,6 +86,18 @@ def test_get_auth_status_accepts_one_data_wrapper() -> None:
         assert client.get_auth_status().logged_in_user == "wxid_bot"
 
 
+def test_get_auth_status_accepts_logged_out_without_user() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "logged_out"})
+
+    with wechat_client(handler) as client:
+        status = client.get_auth_status()
+
+    assert status.status == "logged_out"
+    assert status.logged_in_user is None
+    assert status.source_account_id is None
+
+
 def test_bearer_token_is_not_exposed_by_api_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"

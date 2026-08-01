@@ -13,11 +13,11 @@ class RawWechatModel(BaseModel):
 
 
 class AgentWechatAuthStatus(RawWechatModel):
-    logged_in_user: str = Field(alias="loggedInUser", min_length=1)
+    logged_in_user: str | None = Field(default=None, alias="loggedInUser", min_length=1)
     status: Any
 
     @property
-    def source_account_id(self) -> str:
+    def source_account_id(self) -> str | None:
         return self.logged_in_user
 
 
