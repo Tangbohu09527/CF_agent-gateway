@@ -14,6 +14,7 @@ from cf_agent_gateway.adapters.wechat.normalized_models import (
     WechatConversationType,
     WechatMessageType,
     WechatReplySummary,
+    WechatSenderType,
 )
 from cf_agent_gateway.adapters.wechat.normalizer import (
     build_wechat_event_id,
@@ -21,12 +22,14 @@ from cf_agent_gateway.adapters.wechat.normalizer import (
 )
 from cf_agent_gateway.adapters.wechat.raw_models import (
     AgentWechatAuthStatus,
+    AgentWechatMedia,
     RawWechatMessage,
 )
 
 __all__ = [
     "AgentWechatAuthStatus",
     "AgentWechatClient",
+    "AgentWechatMedia",
     "NormalizedWechatMessage",
     "RawWechatMessage",
     "WechatAPIError",
@@ -38,6 +41,7 @@ __all__ = [
     "WechatResponseError",
     "WechatTimeoutError",
     "WechatTransportError",
+    "WechatSenderType",
     "build_wechat_event_id",
     "normalize_wechat_message",
 ]

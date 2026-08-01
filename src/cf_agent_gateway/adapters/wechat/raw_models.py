@@ -21,11 +21,21 @@ class AgentWechatAuthStatus(RawWechatModel):
         return self.logged_in_user
 
 
+class AgentWechatMedia(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    media_type: str
+    data: bytes | None
+    format: str | None
+    filename: str | None
+    supported: bool
+
+
 class RawWechatMessage(RawWechatModel):
     local_id: StrictInt | StrictStr | None = Field(default=None, alias="localId")
     server_id: StrictInt | StrictStr | None = Field(default=None, alias="serverId")
     chat_id: str = Field(alias="chatId", min_length=1)
-    sender: str = Field(min_length=1)
+    sender: str | None = None
     sender_name: str | None = Field(default=None, alias="senderName")
     type: StrictInt
     content: str

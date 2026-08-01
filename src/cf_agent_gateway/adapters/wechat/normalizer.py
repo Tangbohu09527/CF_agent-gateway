@@ -14,6 +14,7 @@ from cf_agent_gateway.adapters.wechat.normalized_models import (
     WechatConversationType,
     WechatMessageType,
     WechatReplySummary,
+    WechatSenderType,
 )
 from cf_agent_gateway.adapters.wechat.raw_models import RawWechatMessage
 
@@ -31,7 +32,11 @@ def normalize_wechat_message(
     message = _raw_message(raw)
     account_id = _required(source_account_id, "source_account_id")
     chat_id = _required(message.chat_id, "chatId")
-    sender_id = _required(message.sender, "sender")
+    is_system = message.type == 10000
+    sender_type = WechatSenderType.SYSTEM if is_system else WechatSenderType.HUMAN
+    sender_id = (
+        _optional_string(message.sender) if is_system else _required(message.sender, "sender")
+    )
     source_message_id, is_fallback = _source_message_id(
         server_id=message.server_id,
         local_id=message.local_id,
@@ -60,6 +65,7 @@ def normalize_wechat_message(
         conversation_id=chat_id,
         conversation_type=conversation_type,
         conversation_name=conversation_name,
+        sender_type=sender_type,
         sender_id=sender_id,
         sender_name=message.sender_name,
         message_type=_message_type(message, reply=reply),
@@ -119,6 +125,8 @@ def _source_message_id(
 def _message_type(
     message: RawWechatMessage, *, reply: WechatReplySummary | None
 ) -> WechatMessageType:
+    if message.type == 10000:
+        return WechatMessageType.SYSTEM
     if message.type == 1:
         return WechatMessageType.TEXT
     if message.type == 3:
@@ -182,7 +190,7 @@ def _usable_id(value: object) -> str | None:
     return normalized if normalized and normalized != "0" else None
 
 
-def _required(value: str, field_name: str) -> str:
+def _required(value: str | None, field_name: str) -> str:
     normalized = _optional_string(value)
     if normalized is None:
         raise WechatNormalizationError(f"{field_name} must not be empty")

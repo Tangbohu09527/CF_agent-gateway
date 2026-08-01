@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping
 from typing import Any, Self
 from urllib.parse import quote
@@ -15,6 +17,7 @@ from cf_agent_gateway.adapters.wechat.errors import (
 )
 from cf_agent_gateway.adapters.wechat.raw_models import (
     AgentWechatAuthStatus,
+    AgentWechatMedia,
     RawWechatMessage,
 )
 
@@ -90,12 +93,43 @@ class AgentWechatClient:
         except (TypeError, ValidationError):
             raise WechatResponseError(operation=operation) from None
 
-    def get_media(self, chat_id: str, local_id: str | int) -> bytes:
+    def get_media(self, chat_id: str, local_id: str | int) -> AgentWechatMedia:
         operation = "get_media"
         chat = _path_segment(chat_id, "chat_id")
         local = _path_segment(local_id, "local_id")
         response = self._request("GET", f"api/messages/{chat}/media/{local}", operation=operation)
-        return response.content
+        payload = self._json(response, operation=operation)
+        if not isinstance(payload, Mapping):
+            raise WechatResponseError(operation=operation)
+
+        media_type = payload.get("type")
+        if not isinstance(media_type, str) or not media_type.strip():
+            raise WechatResponseError(operation=operation)
+        media_format = _optional_response_string(payload, "format", operation=operation)
+        filename = _optional_response_string(payload, "filename", operation=operation)
+        if media_type == "unsupported":
+            return AgentWechatMedia(
+                media_type=media_type,
+                data=None,
+                format=media_format,
+                filename=filename,
+                supported=False,
+            )
+
+        encoded_data = payload.get("data")
+        if "data" not in payload or not isinstance(encoded_data, str):
+            raise WechatResponseError(operation=operation)
+        try:
+            data = base64.b64decode(encoded_data, validate=True)
+        except (binascii.Error, ValueError):
+            raise WechatResponseError(operation=operation) from None
+        return AgentWechatMedia(
+            media_type=media_type,
+            data=data,
+            format=media_format,
+            filename=filename,
+            supported=True,
+        )
 
     def send_text(self, chat_id: str, content: str) -> dict[str, Any] | None:
         operation = "send_text"
@@ -106,7 +140,7 @@ class AgentWechatClient:
             "POST",
             "api/messages/send",
             operation=operation,
-            json={"chatId": chat, "content": content},
+            json={"chatId": chat, "text": content},
         )
         if not response.content:
             return None
@@ -168,6 +202,17 @@ def _bearer_token(value: object) -> str:
     if any(not 0x21 <= ord(character) <= 0x7E for character in token):
         raise ValueError("token must contain only visible ASCII characters without whitespace")
     return token
+
+
+def _optional_response_string(
+    payload: Mapping[str, Any], key: str, *, operation: str
+) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WechatResponseError(operation=operation)
+    return value
 
 
 def _path_segment(value: str | int, field_name: str) -> str:

@@ -18,8 +18,14 @@ class WechatMessageType(StrEnum):
     FORWARD = "forward"
     IMAGE = "image"
     REPLY = "reply"
+    SYSTEM = "system"
     TEXT = "text"
     UNKNOWN = "unknown"
+
+
+class WechatSenderType(StrEnum):
+    HUMAN = "human"
+    SYSTEM = "system"
 
 
 class WechatReplySummary(BaseModel):
@@ -44,7 +50,8 @@ class NormalizedWechatMessage(BaseModel):
     conversation_id: str
     conversation_type: WechatConversationType
     conversation_name: str | None = None
-    sender_id: str
+    sender_type: WechatSenderType
+    sender_id: str | None
     sender_name: str | None = None
     message_type: WechatMessageType
     raw_type: int
