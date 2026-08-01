@@ -53,13 +53,19 @@ def get_message(message_id: int, session: DatabaseSession) -> MessageResponse:
 
 
 @router.get(
-    "/conversations/{conversation_id}/messages",
+    "/sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages",
     response_model=list[MessageResponse],
     tags=["messages"],
 )
 def get_conversation_messages(
+    source: str,
+    source_account_id: str,
     conversation_id: str,
     session: DatabaseSession,
 ) -> list[MessageResponse]:
-    messages = MessageStore(session).list_for_conversation(conversation_id)
+    messages = MessageStore(session).list_for_conversation(
+        source=source,
+        source_account_id=source_account_id,
+        conversation_id=conversation_id,
+    )
     return [MessageResponse.model_validate(message) for message in messages]

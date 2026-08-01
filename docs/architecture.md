@@ -11,7 +11,8 @@ Entry points -> Gateway -> Hermes
 
 ## Planned request flow
 
-1. An adapter normalizes an inbound channel message.
+1. An adapter normalizes channel message facts, including the source account,
+   conversation type, mention state, and whether the current bot account sent it.
 2. Access control authenticates the caller and authorizes the operation.
 3. The message store persists the normalized message.
 4. The context builder assembles bounded conversation context.
@@ -43,9 +44,29 @@ integration remain outside the current phase.
 SQLAlchemy 2.x provides the persistence boundary. SQLite is the phase-one
 database and PostgreSQL is supported by using a
 `postgresql+psycopg://...` database URL. Domain packages must not depend on a
-specific SQL dialect. Database-specific schema changes belong in `migrations/`.
+specific SQL dialect. Database-specific migrations will live in `migrations/`
+after a formal migration system is introduced.
 
-The current schema uses a unique `event_id` to enforce message idempotency and
-a unique `(source, conversation_id)` pair for conversations. Messages reference
-that pair without assuming channel identifiers are globally unique. Attachment
-rows contain metadata only; file bytes remain outside the database.
+Conversations are unique by `(source, source_account_id, conversation_id)`, and
+messages reference conversations through the same three-column scope. Conversation
+history is exposed only through the fully scoped
+`GET /sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages`
+route, so reused channel identifiers cannot cross bot-account boundaries.
+
+Messages retain a unique `event_id` and also enforce unique source-message identity by
+`(source, source_account_id, conversation_id, source_message_id)`. A duplicate under
+either rule resolves to the existing physical message without overwriting it. The
+account component prevents identical conversation and source-message IDs belonging to
+different bot accounts from conflicting.
+
+Each message persists `conversation_type`, structured `is_mentioned`, and `is_self`
+facts from its adapter envelope. Private-message mention state is `null`; group-message
+mention state is an explicit boolean and defaults to `false` when absent. The store
+does not inspect message content to infer mentions. Self-originated messages are saved
+with `is_self=true` rather than being discarded. Attachment rows contain metadata
+only; file bytes remain outside the database.
+
+This is a development-time schema change. Until formal migrations exist, developers
+must back up and manually recreate older development databases before using the new
+schema. The service never automatically deletes `gateway.db`, and production automatic
+migration has not been implemented.

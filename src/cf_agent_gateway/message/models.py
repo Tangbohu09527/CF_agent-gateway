@@ -4,6 +4,8 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -21,11 +23,17 @@ from cf_agent_gateway.database import Base
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
-        UniqueConstraint("source", "conversation_id", name="uq_conversation_source_id"),
+        UniqueConstraint(
+            "source",
+            "source_account_id",
+            "conversation_id",
+            name="uq_conversation_source_account_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source: Mapped[str] = mapped_column(String(64))
+    source_account_id: Mapped[str] = mapped_column(String(255))
     conversation_id: Mapped[str] = mapped_column(String(255))
     conversation_type: Mapped[str] = mapped_column(String(64))
     conversation_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -43,20 +51,47 @@ class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["source", "conversation_id"],
-            ["conversations.source", "conversations.conversation_id"],
+            ["source", "source_account_id", "conversation_id"],
+            [
+                "conversations.source",
+                "conversations.source_account_id",
+                "conversations.conversation_id",
+            ],
             name="fk_message_conversation",
             ondelete="CASCADE",
         ),
         UniqueConstraint("event_id", name="uq_message_event_id"),
-        Index("ix_message_conversation_timestamp", "conversation_id", "timestamp", "id"),
+        UniqueConstraint(
+            "source",
+            "source_account_id",
+            "conversation_id",
+            "source_message_id",
+            name="uq_message_source_account_conversation_message",
+        ),
+        CheckConstraint(
+            "(conversation_type != 'private' OR is_mentioned IS NULL) AND "
+            "(conversation_type != 'group' OR is_mentioned IS NOT NULL)",
+            name="ck_message_conversation_mention",
+        ),
+        Index(
+            "ix_message_conversation_timestamp",
+            "source",
+            "source_account_id",
+            "conversation_id",
+            "timestamp",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     event_id: Mapped[str] = mapped_column(String(255))
     source: Mapped[str] = mapped_column(String(64))
+    source_account_id: Mapped[str] = mapped_column(String(255))
     source_message_id: Mapped[str] = mapped_column(String(255))
     conversation_id: Mapped[str] = mapped_column(String(255))
+    conversation_type: Mapped[str] = mapped_column(String(64))
+    is_mentioned: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_self: Mapped[bool] = mapped_column(Boolean)
     sender_id: Mapped[str] = mapped_column(String(255))
     sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     message_type: Mapped[str] = mapped_column(String(64))

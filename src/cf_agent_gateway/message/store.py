@@ -17,10 +17,24 @@ class MessageStore:
         if existing is not None:
             return existing, False
 
-        conversation = self._get_conversation(event.source, event.conversation_id)
+        existing = self._get_by_source_message(
+            source=event.source,
+            source_account_id=event.source_account_id,
+            conversation_id=event.conversation_id,
+            source_message_id=event.source_message_id,
+        )
+        if existing is not None:
+            return existing, False
+
+        conversation = self._get_conversation(
+            source=event.source,
+            source_account_id=event.source_account_id,
+            conversation_id=event.conversation_id,
+        )
         if conversation is None:
             conversation = Conversation(
                 source=event.source,
+                source_account_id=event.source_account_id,
                 conversation_id=event.conversation_id,
                 conversation_type=event.conversation_type,
                 conversation_name=event.conversation_name,
@@ -33,8 +47,12 @@ class MessageStore:
         message = Message(
             event_id=event.event_id,
             source=event.source,
+            source_account_id=event.source_account_id,
             source_message_id=event.source_message_id,
             conversation_id=event.conversation_id,
+            conversation_type=event.conversation_type,
+            is_mentioned=event.is_mentioned,
+            is_self=event.is_self,
             sender_id=event.sender_id,
             sender_name=event.sender_name,
             message_type=event.message_type,
@@ -62,6 +80,14 @@ class MessageStore:
             existing = self._get_by_event_id(event.event_id)
             if existing is not None:
                 return existing, False
+            existing = self._get_by_source_message(
+                source=event.source,
+                source_account_id=event.source_account_id,
+                conversation_id=event.conversation_id,
+                source_message_id=event.source_message_id,
+            )
+            if existing is not None:
+                return existing, False
             raise
 
         return message, True
@@ -74,10 +100,16 @@ class MessageStore:
         )
         return self._session.scalar(statement)
 
-    def list_for_conversation(self, conversation_id: str) -> list[Message]:
+    def list_for_conversation(
+        self, *, source: str, source_account_id: str, conversation_id: str
+    ) -> list[Message]:
         statement = (
             select(Message)
-            .where(Message.conversation_id == conversation_id)
+            .where(
+                Message.source == source,
+                Message.source_account_id == source_account_id,
+                Message.conversation_id == conversation_id,
+            )
             .options(selectinload(Message.attachments))
             .order_by(Message.timestamp, Message.id)
         )
@@ -91,9 +123,32 @@ class MessageStore:
         )
         return self._session.scalar(statement)
 
-    def _get_conversation(self, source: str, conversation_id: str) -> Conversation | None:
+    def _get_by_source_message(
+        self,
+        *,
+        source: str,
+        source_account_id: str,
+        conversation_id: str,
+        source_message_id: str,
+    ) -> Message | None:
+        statement = (
+            select(Message)
+            .where(
+                Message.source == source,
+                Message.source_account_id == source_account_id,
+                Message.conversation_id == conversation_id,
+                Message.source_message_id == source_message_id,
+            )
+            .options(selectinload(Message.attachments))
+        )
+        return self._session.scalar(statement)
+
+    def _get_conversation(
+        self, *, source: str, source_account_id: str, conversation_id: str
+    ) -> Conversation | None:
         statement = select(Conversation).where(
             Conversation.source == source,
+            Conversation.source_account_id == source_account_id,
             Conversation.conversation_id == conversation_id,
         )
         return self._session.scalar(statement)

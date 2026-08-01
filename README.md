@@ -50,8 +50,8 @@ The service foundation and Message Store are implemented:
 - SQLAlchemy engine configuration
 - SQLAlchemy models for conversations, messages, and attachment metadata
 - SQLite schema initialization and session management
-- Idempotent message creation by unique `event_id`
-- Message and conversation-message query APIs
+- Idempotent message creation by unique `event_id` and source-message identity
+- Message and account-scoped conversation-message query APIs
 - `GET /health`
 - Container build and Compose service
 
@@ -60,14 +60,35 @@ construction, and task processing are intentionally not implemented.
 
 ## Message API
 
-- `POST /internal/messages` stores a normalized message event and returns its ID.
-- `GET /messages/{id}` returns a message and its attachment metadata.
-- `GET /conversations/{conversation_id}/messages` returns messages ordered by
-  event timestamp.
+- `POST /internal/messages` stores a normalized message event and returns its ID. The
+  source envelope includes `source_account_id`, `conversation_type`, `is_mentioned`,
+  and `is_self`.
+- `GET /messages/{id}` returns a message, its source envelope, and its attachment
+  metadata.
+- `GET /sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages`
+  returns messages ordered by event timestamp within one source account.
 
-Submitting an existing `event_id` is idempotent: the existing message ID is
-returned and no duplicate message or attachment records are created. Attachment
-content is not stored; only metadata and a storage path are persisted.
+Submitting an existing `event_id` is idempotent. The source-message identity
+`(source, source_account_id, conversation_id, source_message_id)` is independently
+idempotent, so the same physical message with a different `event_id` also returns the
+existing message ID. Identical conversation or source-message IDs under different
+source accounts do not conflict. Duplicate submissions do not overwrite the stored
+message or create duplicate attachment records.
+
+Private messages store `is_mentioned` as `null`. Group messages store an explicit
+boolean; a missing adapter value is normalized to `false` before persistence. The
+Message Store never infers mention state from message content. `is_self=true` marks a
+message sent by the current bot account, and these messages are still persisted.
+
+### Development database schema
+
+This is a development-time schema change, and a formal migration system is not yet
+available. Developers using an older development database must back it up and
+manually recreate it before using this schema. The service does not automatically
+migrate or delete `gateway.db`; production automatic migration has not been
+implemented.
+
+Attachment content is not stored; only metadata and a storage path are persisted.
 
 ## Technology baseline
 
@@ -109,6 +130,8 @@ Expected response:
 ```bash
 pytest
 ruff check .
+ruff format --check .
+git diff --check
 ```
 
 ## Docker
