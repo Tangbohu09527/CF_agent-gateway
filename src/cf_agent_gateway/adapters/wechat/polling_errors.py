@@ -35,6 +35,13 @@ class WechatCheckpointNotFoundError(WechatPollingError):
         super().__init__("WeChat sync checkpoint does not exist")
 
 
+class WechatCheckpointValueError(WechatPollingError, ValueError):
+    code = "wechat_checkpoint_value_error"
+
+    def __init__(self) -> None:
+        super().__init__("checkpoint last_local_id must fit the non-negative BigInteger range")
+
+
 class WechatConversationMismatchError(WechatPollingError):
     code = "wechat_conversation_mismatch"
 

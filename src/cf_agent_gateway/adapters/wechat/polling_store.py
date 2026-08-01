@@ -4,8 +4,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from cf_agent_gateway.adapters.wechat.polling_errors import WechatCheckpointNotFoundError
-from cf_agent_gateway.adapters.wechat.polling_models import WechatSyncCheckpoint
+from cf_agent_gateway.adapters.wechat.polling_errors import (
+    WechatCheckpointNotFoundError,
+    WechatCheckpointValueError,
+)
+from cf_agent_gateway.adapters.wechat.polling_models import (
+    MAX_CHECKPOINT_LOCAL_ID,
+    WechatSyncCheckpoint,
+)
 
 
 class WechatSyncCheckpointStore:
@@ -26,6 +32,7 @@ class WechatSyncCheckpointStore:
         conversation_id: str,
         last_local_id: int,
     ) -> tuple[WechatSyncCheckpoint, bool]:
+        last_local_id = _validated_checkpoint_local_id(last_local_id)
         existing = self.get(
             source_account_id=source_account_id,
             conversation_id=conversation_id,
@@ -62,6 +69,7 @@ class WechatSyncCheckpointStore:
         conversation_id: str,
         last_local_id: int,
     ) -> WechatSyncCheckpoint:
+        last_local_id = _validated_checkpoint_local_id(last_local_id)
         statement = (
             update(WechatSyncCheckpoint)
             .where(
@@ -102,3 +110,11 @@ class WechatSyncCheckpointStore:
 
 
 WechatCheckpointStore = WechatSyncCheckpointStore
+
+
+def _validated_checkpoint_local_id(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WechatCheckpointValueError()
+    if not 0 <= value <= MAX_CHECKPOINT_LOCAL_ID:
+        raise WechatCheckpointValueError()
+    return value
