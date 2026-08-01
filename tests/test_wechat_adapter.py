@@ -15,6 +15,7 @@ from cf_agent_gateway.adapters.wechat import (
     WechatMessageType,
     WechatNormalizationError,
     WechatResponseError,
+    WechatSenderType,
     WechatTimeoutError,
     normalize_wechat_message,
 )
@@ -34,6 +35,20 @@ def raw_message(**overrides: Any) -> dict[str, Any]:
         "content": "hello",
         "timestamp": "2026-08-01T10:15:00+08:00",
     }
+    message.update(overrides)
+    return message
+
+
+def raw_system_message(**overrides: Any) -> dict[str, Any]:
+    message = raw_message(
+        localId=102,
+        serverId=9002,
+        chatId="team@chatroom",
+        type=10000,
+        content="You were invited to the group chat",
+    )
+    message.pop("sender")
+    message.pop("senderName")
     message.update(overrides)
     return message
 
@@ -114,22 +129,110 @@ def test_list_chats_and_messages_parse_supported_payloads() -> None:
     assert messages[0].server_id == 9001
 
 
-def test_get_media_returns_raw_attachment_bytes() -> None:
+def test_get_media_decodes_verified_txt_response_and_preserves_metadata() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.raw_path == b"/api/messages/team%2Fone/media/local%231"
-        return httpx.Response(200, content=b"attachment-data")
+        return httpx.Response(
+            200,
+            json={
+                "type": "file",
+                "data": "YWdlbnQtd2VjaGF0IGZpbGUgdGVzdA==",
+                "format": "txt",
+                "filename": "test.txt",
+            },
+        )
 
     with wechat_client(handler) as client:
         media = client.get_media("team/one", "local#1")
 
-    assert media == b"attachment-data"
+    assert media.media_type == "file"
+    assert media.data == b"agent-wechat file test"
+    assert media.format == "txt"
+    assert media.filename == "test.txt"
+    assert media.supported is True
+
+
+def test_get_media_decodes_verified_zip_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "type": "file",
+                "data": "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==",
+                "format": "zip",
+                "filename": "archive.zip",
+            },
+        )
+
+    with wechat_client(handler) as client:
+        media = client.get_media("wxid_alice", 101)
+
+    assert media.data == b"PK\x05\x06" + (b"\x00" * 18)
+    assert media.format == "zip"
+    assert media.filename == "archive.zip"
+    assert media.supported is True
+
+
+def test_get_media_returns_controlled_unsupported_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"type": "unsupported", "format": "", "filename": ""},
+        )
+
+    with wechat_client(handler) as client:
+        media = client.get_media("wxid_alice", 101)
+
+    assert media.media_type == "unsupported"
+    assert media.data is None
+    assert media.format == ""
+    assert media.filename == ""
+    assert media.supported is False
+
+
+def test_get_media_rejects_supported_response_without_data() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"type": "file", "format": "txt", "filename": "test.txt"},
+        )
+
+    with wechat_client(handler) as client, pytest.raises(WechatResponseError) as caught:
+        client.get_media("wxid_alice", 101)
+
+    assert caught.value.code == "wechat_response_error"
+    assert caught.value.operation == "get_media"
+
+
+def test_get_media_rejects_invalid_base64_without_leaking_data() -> None:
+    invalid_data = "sensitive-invalid-base64!!!"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "type": "file",
+                "data": invalid_data,
+                "format": "txt",
+                "filename": "test.txt",
+            },
+        )
+
+    with wechat_client(handler) as client, pytest.raises(WechatResponseError) as caught:
+        client.get_media("wxid_alice", 101)
+
+    assert invalid_data not in str(caught.value)
+    assert invalid_data not in repr(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_send_text_uses_verified_endpoint_and_payload() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/messages/send"
-        assert json.loads(request.content) == {"chatId": "wxid_alice", "content": "hello"}
+        payload = json.loads(request.content)
+        assert payload == {"chatId": "wxid_alice", "text": "hello"}
+        assert "content" not in payload
         return httpx.Response(200, json={"success": True, "localId": 102})
 
     with wechat_client(handler) as client:
@@ -170,6 +273,7 @@ def test_private_message_normalization() -> None:
     assert normalized.conversation_name is None
     assert normalized.sender_id == "wxid_alice"
     assert normalized.sender_name == "Alice"
+    assert normalized.sender_type is WechatSenderType.HUMAN
     assert normalized.message_type is WechatMessageType.TEXT
     assert normalized.raw_type == 1
     assert normalized.content == "hello"
@@ -247,6 +351,53 @@ def test_is_self_true_is_preserved() -> None:
     normalized = normalize_wechat_message(raw_message(isSelf=True), source_account_id="wxid_bot")
 
     assert normalized.is_self is True
+
+
+def test_mixed_message_list_reads_and_normalizes_senderless_system_message() -> None:
+    system_message = raw_system_message()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/messages/team@chatroom"
+        return httpx.Response(
+            200,
+            json={
+                "messages": [
+                    raw_message(chatId="team@chatroom"),
+                    system_message,
+                ]
+            },
+        )
+
+    with wechat_client(handler) as client:
+        messages = client.list_messages("team@chatroom")
+
+    assert len(messages) == 2
+    assert messages[1].sender is None
+    normalized = normalize_wechat_message(messages[1], source_account_id="wxid_bot")
+    assert normalized.message_type is WechatMessageType.SYSTEM
+    assert normalized.sender_type is WechatSenderType.SYSTEM
+    assert normalized.sender_id is None
+    assert normalized.sender_name is None
+    assert normalized.content == "You were invited to the group chat"
+    assert normalized.is_mentioned is False
+    assert normalized.is_self is False
+
+
+def test_system_message_preserves_explicit_is_self_true() -> None:
+    normalized = normalize_wechat_message(
+        raw_system_message(isSelf=True), source_account_id="wxid_bot"
+    )
+
+    assert normalized.sender_type is WechatSenderType.SYSTEM
+    assert normalized.is_self is True
+
+
+def test_normal_message_without_sender_is_rejected_during_normalization() -> None:
+    message = raw_message()
+    message.pop("sender")
+
+    with pytest.raises(WechatNormalizationError, match="sender"):
+        normalize_wechat_message(message, source_account_id="wxid_bot")
 
 
 def test_server_id_is_the_stable_source_message_id() -> None:
