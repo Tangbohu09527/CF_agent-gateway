@@ -7,7 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from cf_agent_gateway.workspace.errors import ThreadConflictError
+from cf_agent_gateway.workspace.errors import (
+    HermesThreadConflictError,
+    ThreadConflictError,
+    ThreadSourceBindingConflictError,
+)
 from cf_agent_gateway.workspace.models import (
     AIThread,
     EmployeeWorkspace,
@@ -82,6 +86,10 @@ class WorkspaceStore:
         )
         return self._session.scalar(statement)
 
+    def get_thread_by_hermes_thread_id(self, hermes_thread_id: str) -> AIThread | None:
+        statement = select(AIThread).where(AIThread.hermes_thread_id == hermes_thread_id)
+        return self._session.scalar(statement)
+
     def ensure_source_binding(
         self,
         *,
@@ -92,14 +100,13 @@ class WorkspaceStore:
         sender_id: str | None,
     ) -> tuple[ThreadSourceBinding, bool]:
         existing = self.get_source_binding(
-            ai_thread_id=ai_thread_id,
             platform=platform,
             account_id=account_id,
             physical_conversation_id=physical_conversation_id,
             sender_id=sender_id,
         )
         if existing is not None:
-            return existing, False
+            return self._compatible_source_binding_or_raise(existing, ai_thread_id), False
 
         binding = ThreadSourceBinding(
             id=str(uuid4()),
@@ -115,28 +122,25 @@ class WorkspaceStore:
         except IntegrityError:
             self._session.rollback()
             existing = self.get_source_binding(
-                ai_thread_id=ai_thread_id,
                 platform=platform,
                 account_id=account_id,
                 physical_conversation_id=physical_conversation_id,
                 sender_id=sender_id,
             )
             if existing is not None:
-                return existing, False
+                return self._compatible_source_binding_or_raise(existing, ai_thread_id), False
             raise
         return binding, True
 
     def get_source_binding(
         self,
         *,
-        ai_thread_id: str,
         platform: str,
         account_id: str,
         physical_conversation_id: str,
         sender_id: str | None,
     ) -> ThreadSourceBinding | None:
         statement = select(ThreadSourceBinding).where(
-            ThreadSourceBinding.ai_thread_id == ai_thread_id,
             ThreadSourceBinding.platform == platform,
             ThreadSourceBinding.account_id == account_id,
             ThreadSourceBinding.physical_conversation_id == physical_conversation_id,
@@ -145,8 +149,30 @@ class WorkspaceStore:
         return self._session.scalar(statement)
 
     def bind_hermes_thread(self, thread: AIThread, hermes_thread_id: str | None) -> AIThread:
+        ai_thread_id = thread.id
+        if hermes_thread_id is not None:
+            existing = self.get_thread_by_hermes_thread_id(hermes_thread_id)
+            if existing is not None:
+                return self._compatible_hermes_thread_or_raise(
+                    existing,
+                    requested_ai_thread_id=ai_thread_id,
+                    hermes_thread_id=hermes_thread_id,
+                )
+
         thread.hermes_thread_id = hermes_thread_id
-        self._session.commit()
+        try:
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            if hermes_thread_id is not None:
+                existing = self.get_thread_by_hermes_thread_id(hermes_thread_id)
+                if existing is not None:
+                    return self._compatible_hermes_thread_or_raise(
+                        existing,
+                        requested_ai_thread_id=ai_thread_id,
+                        hermes_thread_id=hermes_thread_id,
+                    )
+            raise
         return thread
 
     def touch_workspace(self, workspace: EmployeeWorkspace) -> EmployeeWorkspace:
@@ -164,3 +190,30 @@ class WorkspaceStore:
         if thread.thread_type is not thread_type:
             raise ThreadConflictError(thread.workspace_id, thread.thread_key)
         return thread
+
+    @staticmethod
+    def _compatible_hermes_thread_or_raise(
+        thread: AIThread, *, requested_ai_thread_id: str, hermes_thread_id: str
+    ) -> AIThread:
+        if thread.id != requested_ai_thread_id:
+            raise HermesThreadConflictError(
+                hermes_thread_id=hermes_thread_id,
+                existing_ai_thread_id=thread.id,
+                requested_ai_thread_id=requested_ai_thread_id,
+            )
+        return thread
+
+    @staticmethod
+    def _compatible_source_binding_or_raise(
+        binding: ThreadSourceBinding, requested_ai_thread_id: str
+    ) -> ThreadSourceBinding:
+        if binding.ai_thread_id != requested_ai_thread_id:
+            raise ThreadSourceBindingConflictError(
+                platform=binding.platform,
+                account_id=binding.account_id,
+                physical_conversation_id=binding.physical_conversation_id,
+                sender_id=binding.sender_id,
+                existing_ai_thread_id=binding.ai_thread_id,
+                requested_ai_thread_id=requested_ai_thread_id,
+            )
+        return binding

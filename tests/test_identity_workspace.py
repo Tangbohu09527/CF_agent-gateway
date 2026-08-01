@@ -25,7 +25,12 @@ from cf_agent_gateway.identity.models import (
 )
 from cf_agent_gateway.identity.schemas import IdentityResolutionStatus
 from cf_agent_gateway.identity.service import IdentityService
-from cf_agent_gateway.workspace.errors import ThreadUnavailableError, WorkspaceUnavailableError
+from cf_agent_gateway.workspace.errors import (
+    HermesThreadConflictError,
+    ThreadSourceBindingConflictError,
+    ThreadUnavailableError,
+    WorkspaceUnavailableError,
+)
 from cf_agent_gateway.workspace.models import (
     AIThread,
     EmployeeWorkspace,
@@ -34,6 +39,7 @@ from cf_agent_gateway.workspace.models import (
     WorkspaceStatus,
 )
 from cf_agent_gateway.workspace.service import WorkspaceService
+from cf_agent_gateway.workspace.store import WorkspaceStore
 from cf_agent_gateway.workspace.thread_keys import (
     build_group_thread_key,
     build_private_thread_key,
@@ -319,24 +325,147 @@ def test_private_thread_does_not_depend_on_sender_id(
         assert same_chat.id == first.id
 
 
-def test_hermes_thread_can_be_rebound_without_changing_ai_thread_id(
+def test_hermes_thread_binding_is_unique_idempotent_and_rebindable(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
         identity = create_identity(session)
         service = WorkspaceService(session)
-        thread = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
-        assert thread.hermes_thread_id is None
+        first = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
+        second = service.ensure_thread_for_authorized_request(
+            **thread_request(identity.id, sender_id="wxid-002")
+        )
+        assert first.hermes_thread_id is None
+        assert second.hermes_thread_id is None
 
-        first_id = thread.id
-        assert service.bind_hermes_thread(first_id, "hermes-001").hermes_thread_id == "hermes-001"
-        rebound = service.bind_hermes_thread(first_id, "hermes-002")
-        cleared = service.bind_hermes_thread(first_id, None)
+        bound = service.bind_hermes_thread(first.id, "hermes-001")
+        duplicate = service.bind_hermes_thread(first.id, "hermes-001")
+        assert duplicate.id == bound.id
+        with pytest.raises(HermesThreadConflictError) as exc_info:
+            service.bind_hermes_thread(second.id, "hermes-001")
 
-        assert rebound.id == first_id
-        assert cleared.id == first_id
+        assert exc_info.value.code == "hermes_thread_conflict"
+        assert exc_info.value.existing_ai_thread_id == first.id
+        assert exc_info.value.requested_ai_thread_id == second.id
+
+        rebound = service.bind_hermes_thread(first.id, "hermes-002")
+        cleared = service.bind_hermes_thread(first.id, None)
+        assert rebound.id == first.id
+        assert cleared.id == first.id
         assert cleared.hermes_thread_id is None
-        assert session.scalar(select(func.count()).select_from(AIThread)) == 1
+
+        recreated = service.bind_hermes_thread(first.id, "hermes-003")
+        assert recreated.id == first.id
+        assert recreated.hermes_thread_id == "hermes-003"
+        assert second.hermes_thread_id is None
+        assert session.scalar(select(func.count()).select_from(AIThread)) == 2
+
+
+def test_source_fact_binding_is_idempotent_and_unique(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        identity = create_identity(session)
+        service = WorkspaceService(session)
+        first = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
+        second = service.ensure_thread_for_authorized_request(
+            **thread_request(identity.id, sender_id="wxid-002")
+        )
+        store = WorkspaceStore(session)
+        source_fact = {
+            "platform": "wechat",
+            "account_id": "bot-001",
+            "physical_conversation_id": "group-001",
+            "sender_id": "wxid-001",
+        }
+
+        existing, created = store.ensure_source_binding(
+            ai_thread_id=first.id,
+            **source_fact,
+        )
+
+        assert not created
+        assert existing.ai_thread_id == first.id
+        with pytest.raises(ThreadSourceBindingConflictError) as exc_info:
+            store.ensure_source_binding(ai_thread_id=second.id, **source_fact)
+        assert exc_info.value.code == "thread_source_binding_conflict"
+        assert exc_info.value.existing_ai_thread_id == first.id
+        assert exc_info.value.requested_ai_thread_id == second.id
+
+
+def test_binding_integrity_error_recovery_preserves_existing_bindings(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with session_factory() as session:
+        identity = create_identity(session)
+        service = WorkspaceService(session)
+        first = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
+        second = service.ensure_thread_for_authorized_request(
+            **thread_request(identity.id, sender_id="wxid-002")
+        )
+        service.bind_hermes_thread(first.id, "hermes-shared")
+        store = WorkspaceStore(session)
+
+        original_hermes_lookup = store.get_thread_by_hermes_thread_id
+        hermes_lookup_count = 0
+
+        def miss_first_hermes_lookup(hermes_thread_id: str) -> AIThread | None:
+            nonlocal hermes_lookup_count
+            hermes_lookup_count += 1
+            if hermes_lookup_count == 1:
+                return None
+            return original_hermes_lookup(hermes_thread_id)
+
+        monkeypatch.setattr(
+            store,
+            "get_thread_by_hermes_thread_id",
+            miss_first_hermes_lookup,
+        )
+        with pytest.raises(HermesThreadConflictError):
+            store.bind_hermes_thread(second, "hermes-shared")
+        assert hermes_lookup_count == 2
+
+        original_source_lookup = store.get_source_binding
+        source_lookup_count = 0
+
+        def miss_first_source_lookup(
+            *,
+            platform: str,
+            account_id: str,
+            physical_conversation_id: str,
+            sender_id: str | None,
+        ) -> ThreadSourceBinding | None:
+            nonlocal source_lookup_count
+            source_lookup_count += 1
+            if source_lookup_count == 1:
+                return None
+            return original_source_lookup(
+                platform=platform,
+                account_id=account_id,
+                physical_conversation_id=physical_conversation_id,
+                sender_id=sender_id,
+            )
+
+        monkeypatch.setattr(store, "get_source_binding", miss_first_source_lookup)
+        with pytest.raises(ThreadSourceBindingConflictError):
+            store.ensure_source_binding(
+                ai_thread_id=second.id,
+                platform="wechat",
+                account_id="bot-001",
+                physical_conversation_id="group-001",
+                sender_id="wxid-001",
+            )
+        assert source_lookup_count == 2
+
+        assert store.get_thread_by_hermes_thread_id("hermes-shared").id == first.id
+        source_binding = store.get_source_binding(
+            platform="wechat",
+            account_id="bot-001",
+            physical_conversation_id="group-001",
+            sender_id="wxid-001",
+        )
+        assert source_binding is not None
+        assert source_binding.ai_thread_id == first.id
 
 
 def test_disabled_workspace_and_thread_are_not_executable(

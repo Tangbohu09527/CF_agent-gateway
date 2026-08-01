@@ -57,3 +57,41 @@ class ThreadConflictError(WorkspaceError):
         self.workspace_id = workspace_id
         self.thread_key = thread_key
         super().__init__("thread key is already assigned to an incompatible thread")
+
+
+class HermesThreadConflictError(WorkspaceError):
+    code = "hermes_thread_conflict"
+
+    def __init__(
+        self,
+        *,
+        hermes_thread_id: str,
+        existing_ai_thread_id: str,
+        requested_ai_thread_id: str,
+    ) -> None:
+        self.hermes_thread_id = hermes_thread_id
+        self.existing_ai_thread_id = existing_ai_thread_id
+        self.requested_ai_thread_id = requested_ai_thread_id
+        super().__init__("Hermes runtime thread is already bound to another AI thread")
+
+
+class ThreadSourceBindingConflictError(WorkspaceError):
+    code = "thread_source_binding_conflict"
+
+    def __init__(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        physical_conversation_id: str,
+        sender_id: str | None,
+        existing_ai_thread_id: str,
+        requested_ai_thread_id: str,
+    ) -> None:
+        self.platform = platform
+        self.account_id = account_id
+        self.physical_conversation_id = physical_conversation_id
+        self.sender_id = sender_id
+        self.existing_ai_thread_id = existing_ai_thread_id
+        self.requested_ai_thread_id = requested_ai_thread_id
+        super().__init__("source conversation is already bound to another AI thread")

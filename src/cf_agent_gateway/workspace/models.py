@@ -66,6 +66,7 @@ class AIThread(Base):
     __tablename__ = "ai_threads"
     __table_args__ = (
         UniqueConstraint("workspace_id", "thread_key", name="uq_ai_thread_workspace_key"),
+        UniqueConstraint("hermes_thread_id", name="uq_ai_thread_hermes_thread_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -107,12 +108,11 @@ class ThreadSourceBinding(Base):
     __tablename__ = "thread_source_bindings"
     __table_args__ = (
         UniqueConstraint(
-            "ai_thread_id",
             "platform",
             "account_id",
             "physical_conversation_id",
             "sender_id",
-            name="uq_thread_source_binding",
+            name="uq_thread_source_fact",
         ),
     )
 
