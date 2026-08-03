@@ -74,6 +74,16 @@ class HermesDispatchError(HermesError):
         super().__init__(f"Hermes message dispatch rejected: {reason}")
 
 
+class HermesDeliveryError(HermesError):
+    """An assistant response cannot be routed to its source conversation."""
+
+    code = "hermes_delivery_error"
+
+    def __init__(self, *, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Hermes response delivery rejected: {reason}")
+
+
 def _http_error_category(status_code: int) -> str:
     if status_code in {401, 403}:
         return "authentication"

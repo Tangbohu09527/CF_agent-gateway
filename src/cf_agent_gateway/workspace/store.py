@@ -148,6 +148,12 @@ class WorkspaceStore:
         )
         return self._session.scalar(statement)
 
+    def list_source_bindings_for_thread(self, ai_thread_id: str) -> list[ThreadSourceBinding]:
+        statement = select(ThreadSourceBinding).where(
+            ThreadSourceBinding.ai_thread_id == ai_thread_id
+        )
+        return list(self._session.scalars(statement))
+
     def bind_hermes_thread(self, thread: AIThread, hermes_thread_id: str | None) -> AIThread:
         ai_thread_id = thread.id
         if hermes_thread_id is not None:

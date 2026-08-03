@@ -30,7 +30,12 @@ The implemented one-cycle WeChat path is:
    messages create or reuse an employee Workspace and AIThread. No Task is created.
 8. When Hermes is enabled, the dispatch service reloads the persisted message and verifies
    its source binding, AIThread, Workspace, and enterprise identity before calling
-   `HermesClient.chat`. The assistant content is not sent back to WeChat.
+   `HermesClient.chat`.
+9. `HermesResponseRelay` can decorate the existing dispatcher without changing its
+   protocol. On success, `HermesResponseHandler` reloads the source message, validates its
+   local AIThread and exact `ThreadSourceBinding`, verifies the injected sender's source
+   account, and sends the assistant text to the bound conversation. The polling runtime
+   does not yet assemble this outbound dependency.
 
 Delivery from polling to the sink is at least once. A sink or checkpoint failure can
 cause redelivery; Message Store idempotency and admission reuse make storage retry safe.
@@ -38,15 +43,15 @@ Hermes dispatch currently has no durable outbox or upstream idempotency key, so 
 after an ambiguous external result can call Hermes more than once.
 
 The next planned stages are Context Builder, Task Queue, provider routing, AI Provider
-execution, durable dispatch state, and result delivery. None of these stages is currently
-implemented beyond the direct Hermes dispatch foundation.
+execution, durable dispatch state, and production outbound assembly. None of these stages
+is currently implemented beyond the direct Hermes request/response foundation.
 
 ## Package boundaries
 
 | Package | Responsibility | Implementation status |
 | --- | --- | --- |
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
-| `adapters.wechat` | agent-wechat client, normalization, finite polling | Implemented |
+| `adapters.wechat` | agent-wechat client, normalization, polling, outbound protocol | Implemented |
 | `adapters.wechat.polling_store` | Durable account/conversation checkpoints | Implemented |
 | `runtime` | One-cycle WeChat dependency assembly and resource cleanup | Implemented |
 | `ingestion` | Persist-first admission and polling-compatible sinks | Implemented |
@@ -57,7 +62,7 @@ implemented beyond the direct Hermes dispatch foundation.
 | `access` | Persisted policy management and authorization evaluation | Implemented |
 | `admission` | Identity/access orchestration and admission outcomes | Implemented |
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
-| `hermes` | OpenAI-compatible client and allowed-message dispatch | Implemented |
+| `hermes` | OpenAI-compatible client, dispatch, and response routing | Implemented |
 | `context` | Context construction | Reserved |
 | `task.model` | Task model | Reserved |
 | `task.queue` | Task scheduling and delivery | Reserved |

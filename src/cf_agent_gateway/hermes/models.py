@@ -43,3 +43,10 @@ class HermesDispatchOutcome:
     workspace_id: str
     ai_thread_id: str
     assistant_content: str
+
+
+@dataclass(frozen=True, slots=True)
+class HermesResponseDeliveryOutcome:
+    message_id: int
+    ai_thread_id: str
+    conversation_id: str

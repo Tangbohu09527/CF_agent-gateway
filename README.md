@@ -2,7 +2,7 @@
 
 Enterprise AI Message Gateway.
 
-> Status: finite WeChat polling through allowed-message Hermes dispatch is implemented.
+> Status: Hermes dispatch and injectable WeChat response delivery are implemented.
 
 CF_agent-gateway is the message and control plane between enterprise message
 entry points and Hermes.
@@ -29,7 +29,8 @@ Hermes
 These are the gateway's intended responsibilities. The current implementation
 accepts and persists messages, applies identity and access policy, provisions
 authorized workspaces and AI threads, and can dispatch allowed message content to
-Hermes. Context construction, task queuing, and provider routing remain future work.
+Hermes and route successful assistant responses through an abstract WeChat sender.
+Context construction, task queuing, and provider routing remain future work.
 
 ## Non-goals
 
@@ -44,7 +45,7 @@ CF_agent-gateway does not provide:
 ## Current scope
 
 The service foundation, WeChat ingestion path, admission path, and basic Hermes
-dispatch path are implemented:
+request/response path are implemented:
 
 - YAML configuration loading
 - JSON structured logging
@@ -61,6 +62,7 @@ dispatch path are implemented:
 - Workspace and AI-thread creation or reuse for authorized messages
 - OpenAI-compatible `HermesClient` with environment-backed API-key configuration
 - Active Workspace/AIThread validation and allowed-message dispatch to Hermes
+- `HermesResponseRelay` routing through `ThreadSourceBinding` to a `WechatMessageSender`
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle WeChat runtime assembly and the `poll_once` command-line entry point
 - `GET /health`
@@ -68,11 +70,13 @@ dispatch path are implemented:
 
 The runtime saves self-originated, system, and unauthorized messages without dispatching
 them. It does not automatically create identity mappings, allowlists, or access policies.
-Hermes assistant content is returned only as an internal dispatch outcome; no WeChat reply
-or Skill execution is connected.
+The response relay implements the existing dispatcher protocol, and its handler verifies
+that the injected sender is scoped to the binding's source account. It is tested with a
+fake sender; the polling runtime does not yet assemble a concrete outbound sender. Skill
+execution is not connected.
 
 Periodic background scheduling, the Task Queue, Context Builder, durable dispatch/outbox
-state, AI Providers, result delivery, and production deployment verification are not
+state, AI Providers, production outbound wiring, and deployment verification are not
 implemented. The one-cycle CLI is not a resident polling service.
 
 ## Message API

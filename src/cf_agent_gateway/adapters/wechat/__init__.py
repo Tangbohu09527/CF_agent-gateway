@@ -21,6 +21,7 @@ from cf_agent_gateway.adapters.wechat.normalizer import (
     build_wechat_event_id,
     normalize_wechat_message,
 )
+from cf_agent_gateway.adapters.wechat.outbound import WechatMessageSender
 from cf_agent_gateway.adapters.wechat.polling_errors import (
     InvalidBootstrapModeError,
     WechatChatIdentityError,
@@ -78,6 +79,7 @@ __all__ = [
     "WechatCheckpointStore",
     "WechatLocalIdError",
     "WechatMessageType",
+    "WechatMessageSender",
     "WechatNormalizationError",
     "WechatPollingClient",
     "WechatPollingError",
