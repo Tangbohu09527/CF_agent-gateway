@@ -14,7 +14,10 @@ from cf_agent_gateway.ingestion.service import (
     DefaultAdmissionRequestResolver,
     MessageAdmissionService,
 )
-from cf_agent_gateway.ingestion.sink import MessageStoreAdmissionSink
+from cf_agent_gateway.ingestion.sink import (
+    MessageStoreAdmissionSink,
+    SessionFactoryMessageStoreAdmissionSink,
+)
 
 __all__ = [
     "AdmissionRequestResolver",
@@ -23,6 +26,7 @@ __all__ = [
     "MessageIngestionError",
     "MessageIngestionOutcome",
     "MessageStoreAdmissionSink",
+    "SessionFactoryMessageStoreAdmissionSink",
     "PersistedAttachmentSnapshot",
     "PersistedMessageSnapshot",
     "PersistedMessageNotFoundError",

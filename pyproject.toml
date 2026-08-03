@@ -17,6 +17,9 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1.0",
 ]
 
+[project.scripts]
+cf-agent-gateway-wechat-poll-once = "cf_agent_gateway.wechat_poll_once:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9.0",

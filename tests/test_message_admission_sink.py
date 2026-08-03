@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from cf_agent_gateway.access import AccessPolicyService, ReasonCode, RequestFacts, RiskLevel
 from cf_agent_gateway.adapters.wechat import (
@@ -34,6 +34,7 @@ from cf_agent_gateway.ingestion import (
     MessageStoreAdmissionSink,
     PersistedMessageNotFoundError,
     PersistedMessageSnapshot,
+    SessionFactoryMessageStoreAdmissionSink,
 )
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
@@ -362,6 +363,140 @@ def test_retry_of_message_after_admission_failure_can_succeed(session: Session) 
     assert outcome.workspace_id is not None
     assert outcome.ai_thread_id is not None
     assert_resource_counts(session, messages=1, workspaces=1, threads=1)
+
+
+class _TrackingSession(Session):
+    created: list[_TrackingSession] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.rollback_calls = 0
+        self.close_calls = 0
+        self.created.append(self)
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+        super().rollback()
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+
+class _FailOnceResolver:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def resolve(self, message: PersistedMessageSnapshot) -> RequestFacts:
+        del message
+        self.calls += 1
+        if self.calls == 1:
+            raise _AdmissionFailure("controlled resolver failure")
+        return RequestFacts(
+            requested_scope=frozenset(),
+            requested_skill_ids=frozenset(),
+            risk_level=RiskLevel.NORMAL,
+        )
+
+
+class _CleanupFailingSession(_TrackingSession):
+    def rollback(self) -> None:
+        super().rollback()
+        raise RuntimeError("controlled rollback cleanup failure")
+
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("controlled close cleanup failure")
+
+
+def test_session_factory_sink_uses_and_closes_a_fresh_session_per_message() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    initialize_database(engine)
+    _TrackingSession.created = []
+    factory = sessionmaker(
+        bind=engine,
+        class_=_TrackingSession,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    sink = SessionFactoryMessageStoreAdmissionSink(factory)
+    try:
+        sink.handle(normalized_message())
+        sink.handle(
+            normalized_message(
+                event_id="wechat:event-002",
+                source_message_id="server-002",
+                source_local_id="local-002",
+                source_server_id="server-002",
+            )
+        )
+
+        assert len(_TrackingSession.created) == 2
+        assert _TrackingSession.created[0] is not _TrackingSession.created[1]
+        assert [item.close_calls for item in _TrackingSession.created] == [1, 1]
+        assert [item.rollback_calls for item in _TrackingSession.created] == [0, 0]
+    finally:
+        engine.dispose()
+
+
+def test_session_factory_sink_rolls_back_closes_and_retries_committed_message() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    initialize_database(engine)
+    _TrackingSession.created = []
+    factory = sessionmaker(
+        bind=engine,
+        class_=_TrackingSession,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    resolver = _FailOnceResolver()
+    sink = SessionFactoryMessageStoreAdmissionSink(factory, resolver)
+    message = normalized_message()
+    try:
+        with pytest.raises(_AdmissionFailure, match="controlled resolver failure"):
+            sink.handle(message)
+
+        failed_session = _TrackingSession.created[0]
+        assert failed_session.rollback_calls == 1
+        assert failed_session.close_calls == 1
+        with Session(engine) as verification_session:
+            persisted = verification_session.scalar(select(Message))
+            assert persisted is not None
+            persisted_message_id = persisted.id
+
+        retry = sink.process(message)
+
+        assert len(_TrackingSession.created) == 2
+        assert _TrackingSession.created[1] is not failed_session
+        assert _TrackingSession.created[1].close_calls == 1
+        assert retry.message_created is False
+        assert retry.message_id == persisted_message_id
+        with Session(engine) as verification_session:
+            assert verification_session.scalar(select(func.count()).select_from(Message)) == 1
+    finally:
+        engine.dispose()
+
+
+def test_session_factory_sink_preserves_processing_error_when_cleanup_fails() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    initialize_database(engine)
+    _TrackingSession.created = []
+    factory = sessionmaker(
+        bind=engine,
+        class_=_CleanupFailingSession,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    sink = SessionFactoryMessageStoreAdmissionSink(factory, _FailOnceResolver())
+    try:
+        with pytest.raises(_AdmissionFailure, match="controlled resolver failure"):
+            sink.handle(normalized_message())
+
+        failed_session = _TrackingSession.created[0]
+        assert failed_session.rollback_calls == 1
+        assert failed_session.close_calls == 1
+    finally:
+        engine.dispose()
 
 
 class _RecordingResolver:

@@ -9,35 +9,69 @@ entry points and Hermes; it is neither a channel-specific bot nor an AI runtime.
 Entry points -> Gateway -> Hermes
 ```
 
-## Planned request flow
+## Request flow and status
 
-1. An adapter normalizes channel message facts, including the source account,
-   conversation type, mention state, and whether the current bot account sent it.
-2. The message store persists the normalized message.
-3. Access control authenticates the caller and authorizes further execution.
-4. The context builder assembles bounded conversation context.
-5. The task queue schedules asynchronous work.
-6. The provider router selects a registered AI provider.
-7. Hermes executes skills and orchestration outside this service.
+The implemented one-cycle WeChat path is:
 
-The HTTP service foundation and Message Store are implemented. Adapters, access
-control, context construction, task processing, providers, and Hermes
-integration remain outside the current phase.
+1. Runtime configuration enables WeChat and names the environment variable that
+   contains the agent-wechat token.
+2. `AgentWechatClient` checks authentication and reads visible chats and messages.
+3. `WechatPollingService` applies the durable checkpoint. A first `latest` poll
+   atomically checkpoints visible history; `backfill` processes history by ascending
+   `localId`. Later polls deliver only messages above the checkpoint.
+4. The adapter normalizes channel facts, including source account, conversation type,
+   mention state, and whether the current account sent the message.
+5. The per-message admission sink opens an isolated database session. The Message
+   Store commits the message before admission, with idempotency by both `event_id` and
+   physical source-message identity.
+6. Self-originated and system messages remain stored and stop before identity mapping.
+   Other messages pass through identity resolution and access policy evaluation.
+7. Unauthorized messages remain stored without a Workspace or AIThread. Authorized
+   messages create or reuse an employee Workspace and AIThread. No Task is created.
+
+Delivery from polling to the sink is at least once. A sink or checkpoint failure can
+cause redelivery; Message Store idempotency and admission reuse make retry safe.
+
+The next planned stages are Context Builder, Task Queue, provider routing, AI Provider
+execution, Hermes integration, and result delivery. None of these stages is currently
+implemented.
 
 ## Package boundaries
 
 | Package | Responsibility | Implementation status |
 | --- | --- | --- |
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
-| `adapters` | Message entry-point adapters | WeChat normalization and store bridge implemented |
+| `adapters.wechat` | agent-wechat client, normalization, finite polling | Implemented |
+| `adapters.wechat.polling_store` | Durable account/conversation checkpoints | Implemented |
+| `runtime` | One-cycle WeChat dependency assembly and resource cleanup | Implemented |
+| `ingestion` | Persist-first admission and polling-compatible sinks | Implemented |
 | `message.models` | Conversation, message, and attachment metadata ORM models | Implemented |
 | `message.schemas` | Message API input and output contracts | Implemented |
 | `message.store` | Idempotent message persistence and queries | Implemented |
-| `access` | Authentication and authorization | Reserved |
+| `identity` | Enterprise identities and source identity mappings | Implemented |
+| `access` | Persisted policy management and authorization evaluation | Implemented |
+| `admission` | Identity/access orchestration and admission outcomes | Implemented |
+| `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
 | `context` | Context construction | Reserved |
 | `task.model` | Task model | Reserved |
 | `task.queue` | Task scheduling and delivery | Reserved |
 | `provider.router` | Provider registry and routing | Reserved |
+
+## WeChat runtime boundary
+
+`run_wechat_poll_once` performs one finite cycle. It validates that WeChat is enabled,
+reads the token from the environment variable named by `wechat.token_env`, initializes
+the database, creates a dedicated checkpoint session, and uses a fresh admission
+session for each delivered message. It then assembles the client, checkpoint store,
+sink, and polling service in that order.
+
+The client, checkpoint session, and database engine are closed after the cycle,
+including failure paths. Runtime and CLI output is restricted to aggregate status and
+failure codes; tokens, authorization headers, full message bodies, cookies, and Base64
+file data are outside the output boundary.
+
+There is no loop, scheduler, FastAPI background worker, service manager integration,
+or task queue. Production deployment of the polling path has not been verified.
 
 ## Persistence direction
 
