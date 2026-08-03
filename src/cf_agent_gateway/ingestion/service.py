@@ -9,7 +9,8 @@ from cf_agent_gateway.adapters.wechat import (
     NormalizedWechatMessage,
     wechat_message_to_event,
 )
-from cf_agent_gateway.admission import AdmissionCandidate, AdmissionOrchestrator
+from cf_agent_gateway.admission import AdmissionCandidate, AdmissionOrchestrator, AdmissionReason
+from cf_agent_gateway.hermes import HermesDispatcher
 from cf_agent_gateway.ingestion.errors import PersistedMessageNotFoundError
 from cf_agent_gateway.ingestion.models import (
     MessageIngestionOutcome,
@@ -52,6 +53,7 @@ class MessageAdmissionService:
         *,
         message_store: MessageStore | None = None,
         admission_orchestrator: AdmissionOrchestrator | None = None,
+        hermes_dispatcher: HermesDispatcher | None = None,
     ) -> None:
         self._session = session
         self._message_store = message_store if message_store is not None else MessageStore(session)
@@ -63,6 +65,7 @@ class MessageAdmissionService:
             if admission_orchestrator is not None
             else AdmissionOrchestrator(session)
         )
+        self._hermes_dispatcher = hermes_dispatcher
 
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         event = wechat_message_to_event(message)
@@ -102,6 +105,13 @@ class MessageAdmissionService:
             risk_level=request.risk_level,
         )
         admission = self._admission_orchestrator.admit(candidate)
+        hermes_dispatch = None
+        if (
+            admission.admitted
+            and admission.reason is AdmissionReason.ALLOWED
+            and self._hermes_dispatcher is not None
+        ):
+            hermes_dispatch = self._hermes_dispatcher.dispatch(admission)
         return MessageIngestionOutcome(
             message_id=message_id,
             message_created=message_created,
@@ -109,6 +119,7 @@ class MessageAdmissionService:
             should_create_task=admission.should_create_task,
             workspace_id=admission.workspace_id,
             ai_thread_id=admission.ai_thread_id,
+            hermes_dispatch=hermes_dispatch,
         )
 
     @staticmethod

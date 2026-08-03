@@ -2,7 +2,7 @@
 
 Enterprise AI Message Gateway.
 
-> Status: finite WeChat polling through persisted message admission is implemented.
+> Status: finite WeChat polling through allowed-message Hermes dispatch is implemented.
 
 CF_agent-gateway is the message and control plane between enterprise message
 entry points and Hermes.
@@ -27,9 +27,9 @@ Hermes
 - AI Provider Registry
 
 These are the gateway's intended responsibilities. The current implementation
-accepts and persists messages, applies identity and access policy, and provisions
-authorized workspaces and AI threads. Context construction, task queuing, provider
-routing, and AI execution remain future work.
+accepts and persists messages, applies identity and access policy, provisions
+authorized workspaces and AI threads, and can dispatch allowed message content to
+Hermes. Context construction, task queuing, and provider routing remain future work.
 
 ## Non-goals
 
@@ -43,7 +43,8 @@ CF_agent-gateway does not provide:
 
 ## Current scope
 
-The service foundation, WeChat ingestion path, and admission path are implemented:
+The service foundation, WeChat ingestion path, admission path, and basic Hermes
+dispatch path are implemented:
 
 - YAML configuration loading
 - JSON structured logging
@@ -58,17 +59,20 @@ The service foundation, WeChat ingestion path, and admission path are implemente
 - Durable per-account, per-conversation polling checkpoints and at-least-once delivery
 - Persist-first message admission, including identity and access-policy evaluation
 - Workspace and AI-thread creation or reuse for authorized messages
+- OpenAI-compatible `HermesClient` with environment-backed API-key configuration
+- Active Workspace/AIThread validation and allowed-message dispatch to Hermes
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle WeChat runtime assembly and the `poll_once` command-line entry point
 - `GET /health`
 - Container build and Compose service
 
-The runtime saves self-originated, system, and unauthorized messages without creating
-execution work. It does not automatically create identity mappings, allowlists, or
-access policies.
+The runtime saves self-originated, system, and unauthorized messages without dispatching
+them. It does not automatically create identity mappings, allowlists, or access policies.
+Hermes assistant content is returned only as an internal dispatch outcome; no WeChat reply
+or Skill execution is connected.
 
-Periodic background scheduling, the Task Queue, Context Builder, Hermes integration,
-AI Providers, result delivery, and production deployment verification are not
+Periodic background scheduling, the Task Queue, Context Builder, durable dispatch/outbox
+state, AI Providers, result delivery, and production deployment verification are not
 implemented. The one-cycle CLI is not a resident polling service.
 
 ## Message API
@@ -153,11 +157,17 @@ the name of the token environment variable in `wechat.token_env`; it must never 
 the token itself. With the default `token_env`, set `CF_AGENT_WECHAT_TOKEN` in the
 process environment. A missing or empty variable fails closed.
 
+To dispatch allowed messages, also set `hermes.enabled: true`, configure
+`hermes.base_url`, and set the environment variable named by `hermes.api_key_env`
+(`HERMES_API_KEY` by default). The API key must not be stored in YAML. When Hermes is
+disabled, polling continues through admission without dispatch.
+
 Linux or macOS:
 
 ```bash
 export CF_GATEWAY_CONFIG=config/config.yaml
 export CF_AGENT_WECHAT_TOKEN='<agent-wechat-token>'
+export HERMES_API_KEY='<hermes-api-key>'
 python -m cf_agent_gateway.wechat_poll_once
 ```
 
@@ -166,6 +176,7 @@ Windows PowerShell:
 ```powershell
 $env:CF_GATEWAY_CONFIG = "config/config.yaml"
 $env:CF_AGENT_WECHAT_TOKEN = "<agent-wechat-token>"
+$env:HERMES_API_KEY = "<hermes-api-key>"
 python -m cf_agent_gateway.wechat_poll_once
 ```
 

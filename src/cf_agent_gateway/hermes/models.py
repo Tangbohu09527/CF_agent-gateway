@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
@@ -34,3 +35,11 @@ class HermesChatCompletionChoice(HermesResponseModel):
 
 class HermesChatCompletionResponse(HermesResponseModel):
     choices: list[HermesChatCompletionChoice] = Field(min_length=1)
+
+
+@dataclass(frozen=True, slots=True)
+class HermesDispatchOutcome:
+    message_id: int
+    workspace_id: str
+    ai_thread_id: str
+    assistant_content: str

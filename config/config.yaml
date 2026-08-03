@@ -1,4 +1,4 @@
-server:
+﻿server:
   host: "0.0.0.0"
   port: 8080
 
@@ -17,5 +17,6 @@ wechat:
 hermes:
   enabled: false
   base_url: ""
+  # Store only the environment variable name here, never the API key.
   api_key_env: "HERMES_API_KEY"
   model: "hermes-agent"

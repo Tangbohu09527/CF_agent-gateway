@@ -1,6 +1,25 @@
 from __future__ import annotations
 
 
+class HermesRuntimeError(RuntimeError):
+    code = "hermes_runtime_error"
+
+
+class HermesAPIKeyEnvironmentError(HermesRuntimeError):
+    code = "hermes_api_key_environment_missing"
+
+    def __init__(self, environment_variable: str) -> None:
+        self.environment_variable = environment_variable
+        super().__init__(f"missing Hermes API key environment variable: {environment_variable}")
+
+
+class HermesClientInitializationError(HermesRuntimeError):
+    code = "hermes_client_initialization_failed"
+
+    def __init__(self) -> None:
+        super().__init__("cannot initialize the Hermes client")
+
+
 class WechatRuntimeError(RuntimeError):
     code = "wechat_runtime_error"
 

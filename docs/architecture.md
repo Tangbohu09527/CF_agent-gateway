@@ -28,13 +28,18 @@ The implemented one-cycle WeChat path is:
    Other messages pass through identity resolution and access policy evaluation.
 7. Unauthorized messages remain stored without a Workspace or AIThread. Authorized
    messages create or reuse an employee Workspace and AIThread. No Task is created.
+8. When Hermes is enabled, the dispatch service reloads the persisted message and verifies
+   its source binding, AIThread, Workspace, and enterprise identity before calling
+   `HermesClient.chat`. The assistant content is not sent back to WeChat.
 
 Delivery from polling to the sink is at least once. A sink or checkpoint failure can
-cause redelivery; Message Store idempotency and admission reuse make retry safe.
+cause redelivery; Message Store idempotency and admission reuse make storage retry safe.
+Hermes dispatch currently has no durable outbox or upstream idempotency key, so a retry
+after an ambiguous external result can call Hermes more than once.
 
 The next planned stages are Context Builder, Task Queue, provider routing, AI Provider
-execution, Hermes integration, and result delivery. None of these stages is currently
-implemented.
+execution, durable dispatch state, and result delivery. None of these stages is currently
+implemented beyond the direct Hermes dispatch foundation.
 
 ## Package boundaries
 
@@ -52,6 +57,7 @@ implemented.
 | `access` | Persisted policy management and authorization evaluation | Implemented |
 | `admission` | Identity/access orchestration and admission outcomes | Implemented |
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
+| `hermes` | OpenAI-compatible client and allowed-message dispatch | Implemented |
 | `context` | Context construction | Reserved |
 | `task.model` | Task model | Reserved |
 | `task.queue` | Task scheduling and delivery | Reserved |
@@ -60,15 +66,15 @@ implemented.
 ## WeChat runtime boundary
 
 `run_wechat_poll_once` performs one finite cycle. It validates that WeChat is enabled,
-reads the token from the environment variable named by `wechat.token_env`, initializes
-the database, creates a dedicated checkpoint session, and uses a fresh admission
-session for each delivered message. It then assembles the client, checkpoint store,
-sink, and polling service in that order.
+reads the token from the environment variable named by `wechat.token_env`, and, when
+enabled, reads the Hermes API key from the variable named by `hermes.api_key_env`. It
+initializes the database, creates a dedicated checkpoint session, and uses a fresh
+admission/dispatch session for each delivered message.
 
-The client, checkpoint session, and database engine are closed after the cycle,
-including failure paths. Runtime and CLI output is restricted to aggregate status and
-failure codes; tokens, authorization headers, full message bodies, cookies, and Base64
-file data are outside the output boundary.
+The channel client, optional Hermes client, checkpoint session, and database engine are
+closed after the cycle, including failure paths. Runtime and CLI output is restricted to
+aggregate status and failure codes; tokens, authorization headers, full message bodies,
+cookies, and Base64 file data are outside the output boundary.
 
 There is no loop, scheduler, FastAPI background worker, service manager integration,
 or task queue. Production deployment of the polling path has not been verified.

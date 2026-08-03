@@ -64,6 +64,16 @@ class HermesResponseError(HermesError):
         super().__init__(f"Hermes API operation {operation!r} returned an invalid response")
 
 
+class HermesDispatchError(HermesError):
+    """A message cannot be dispatched through its admitted AI thread."""
+
+    code = "hermes_dispatch_error"
+
+    def __init__(self, *, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Hermes message dispatch rejected: {reason}")
+
+
 def _http_error_category(status_code: int) -> str:
     if status_code in {401, 403}:
         return "authentication"

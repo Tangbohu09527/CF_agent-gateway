@@ -7,6 +7,7 @@ from datetime import datetime
 from types import MappingProxyType
 
 from cf_agent_gateway.admission import AdmissionOutcome
+from cf_agent_gateway.hermes import HermesDispatchOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,3 +66,4 @@ class MessageIngestionOutcome:
     should_create_task: bool
     workspace_id: str | None
     ai_thread_id: str | None
+    hermes_dispatch: HermesDispatchOutcome | None = None

@@ -5,6 +5,7 @@ from cf_agent_gateway.hermes.errors import (
     HermesAPIError,
     HermesAPIKeyError,
     HermesConfigurationError,
+    HermesDispatchError,
     HermesError,
     HermesResponseError,
     HermesTimeoutError,
@@ -15,7 +16,13 @@ from cf_agent_gateway.hermes.models import (
     HermesChatCompletionChoice,
     HermesChatCompletionRequest,
     HermesChatCompletionResponse,
+    HermesDispatchOutcome,
     HermesUserMessage,
+)
+from cf_agent_gateway.hermes.service import (
+    HermesChatClient,
+    HermesDispatcher,
+    HermesDispatchService,
 )
 
 __all__ = [
@@ -23,11 +30,16 @@ __all__ = [
     "HermesAPIError",
     "HermesAPIKeyError",
     "HermesAssistantMessage",
+    "HermesChatClient",
     "HermesChatCompletionChoice",
     "HermesChatCompletionRequest",
     "HermesChatCompletionResponse",
     "HermesClient",
     "HermesConfigurationError",
+    "HermesDispatchError",
+    "HermesDispatcher",
+    "HermesDispatchOutcome",
+    "HermesDispatchService",
     "HermesError",
     "HermesResponseError",
     "HermesTimeoutError",
