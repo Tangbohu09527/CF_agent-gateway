@@ -73,11 +73,62 @@ class WechatSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class HermesSettings:
+    enabled: bool = False
+    base_url: str = ""
+    api_key_env: str = "HERMES_API_KEY"
+    model: str = "hermes-agent"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("hermes.enabled must be a boolean")
+
+        if not isinstance(self.base_url, str):
+            raise ValueError("hermes.base_url must be an HTTP or HTTPS URL")
+        base_url = self.base_url.strip()
+        if self.enabled and not base_url:
+            raise ValueError("hermes.base_url is required when Hermes is enabled")
+        if base_url:
+            if any(character.isspace() or ord(character) < 0x20 for character in base_url):
+                raise ValueError("hermes.base_url must be an HTTP or HTTPS URL")
+            try:
+                parsed_url = urlsplit(base_url)
+                port = parsed_url.port
+            except ValueError:
+                raise ValueError("hermes.base_url must be an HTTP or HTTPS URL") from None
+            if (
+                parsed_url.scheme.lower() not in {"http", "https"}
+                or parsed_url.hostname is None
+                or port == 0
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+                or bool(parsed_url.query)
+                or bool(parsed_url.fragment)
+            ):
+                raise ValueError("hermes.base_url must be an HTTP or HTTPS URL")
+
+        if not isinstance(self.api_key_env, str) or not self.api_key_env.strip():
+            raise ValueError("hermes.api_key_env must name an environment variable")
+        api_key_env = self.api_key_env.strip()
+        if "=" in api_key_env or "\x00" in api_key_env:
+            raise ValueError("hermes.api_key_env must name an environment variable")
+
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("hermes.model must not be empty")
+        model = self.model.strip()
+
+        object.__setattr__(self, "base_url", base_url)
+        object.__setattr__(self, "api_key_env", api_key_env)
+        object.__setattr__(self, "model", model)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
     wechat: WechatSettings = WechatSettings()
+    hermes: HermesSettings = HermesSettings()
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -96,6 +147,10 @@ def load_settings(path: str | Path) -> Settings:
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
     wechat = _mapping(raw, "wechat")
+    hermes = _mapping(raw, "hermes")
+
+    if "api_key" in hermes:
+        raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
 
     host = str(server.get("host", "0.0.0.0")).strip()
     port = int(server.get("port", 8080))
@@ -120,6 +175,12 @@ def load_settings(path: str | Path) -> Settings:
             base_url=wechat.get("base_url", "http://127.0.0.1:6174"),
             bootstrap_mode=wechat.get("bootstrap_mode", "latest"),
             token_env=wechat.get("token_env", "CF_AGENT_WECHAT_TOKEN"),
+        ),
+        hermes=HermesSettings(
+            enabled=hermes.get("enabled", False),
+            base_url=hermes.get("base_url", ""),
+            api_key_env=hermes.get("api_key_env", "HERMES_API_KEY"),
+            model=hermes.get("model", "hermes-agent"),
         ),
     )
 
