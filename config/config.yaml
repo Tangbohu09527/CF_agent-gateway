@@ -7,3 +7,9 @@ database:
 
 logging:
   level: "INFO"
+
+wechat:
+  enabled: false
+  base_url: "http://127.0.0.1:6174"
+  bootstrap_mode: "latest"
+  token_env: "CF_AGENT_WECHAT_TOKEN"

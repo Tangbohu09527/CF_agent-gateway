@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -24,10 +25,59 @@ class LoggingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class WechatSettings:
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:6174"
+    bootstrap_mode: Literal["latest", "backfill"] = "latest"
+    token_env: str = "CF_AGENT_WECHAT_TOKEN"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("wechat.enabled must be a boolean")
+
+        if not isinstance(self.base_url, str) or not self.base_url.strip():
+            raise ValueError("wechat.base_url must be a non-empty HTTP or HTTPS URL")
+        base_url = self.base_url.strip()
+        if any(character.isspace() or ord(character) < 0x20 for character in base_url):
+            raise ValueError("wechat.base_url must be a non-empty HTTP or HTTPS URL")
+        try:
+            parsed_url = urlsplit(base_url)
+            port = parsed_url.port
+        except ValueError:
+            raise ValueError("wechat.base_url must be a non-empty HTTP or HTTPS URL") from None
+        if (
+            parsed_url.scheme.lower() not in {"http", "https"}
+            or parsed_url.hostname is None
+            or port == 0
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or bool(parsed_url.query)
+            or bool(parsed_url.fragment)
+        ):
+            raise ValueError("wechat.base_url must be a non-empty HTTP or HTTPS URL")
+
+        if not isinstance(self.bootstrap_mode, str) or self.bootstrap_mode not in (
+            "latest",
+            "backfill",
+        ):
+            raise ValueError("wechat.bootstrap_mode must be latest or backfill")
+
+        if not isinstance(self.token_env, str) or not self.token_env.strip():
+            raise ValueError("wechat.token_env must name an environment variable")
+        token_env = self.token_env.strip()
+        if "=" in token_env or "\x00" in token_env:
+            raise ValueError("wechat.token_env must name an environment variable")
+
+        object.__setattr__(self, "base_url", base_url)
+        object.__setattr__(self, "token_env", token_env)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
+    wechat: WechatSettings = WechatSettings()
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -36,8 +86,8 @@ def load_settings(path: str | Path) -> Settings:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except OSError as exc:
         raise ValueError(f"cannot read configuration {config_path}: {exc}") from exc
-    except yaml.YAMLError as exc:
-        raise ValueError(f"cannot parse configuration {config_path}: {exc}") from exc
+    except yaml.YAMLError:
+        raise ValueError(f"cannot parse configuration {config_path}") from None
 
     if not isinstance(raw, dict):
         raise ValueError(f"configuration {config_path} must contain a YAML mapping")
@@ -45,6 +95,7 @@ def load_settings(path: str | Path) -> Settings:
     server = _mapping(raw, "server")
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
+    wechat = _mapping(raw, "wechat")
 
     host = str(server.get("host", "0.0.0.0")).strip()
     port = int(server.get("port", 8080))
@@ -64,6 +115,12 @@ def load_settings(path: str | Path) -> Settings:
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
+        wechat=WechatSettings(
+            enabled=wechat.get("enabled", False),
+            base_url=wechat.get("base_url", "http://127.0.0.1:6174"),
+            bootstrap_mode=wechat.get("bootstrap_mode", "latest"),
+            token_env=wechat.get("token_env", "CF_AGENT_WECHAT_TOKEN"),
+        ),
     )
 
 

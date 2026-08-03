@@ -2,7 +2,7 @@
 
 Enterprise AI Message Gateway.
 
-> Status: Message Store foundation implemented.
+> Status: finite WeChat polling through persisted message admission is implemented.
 
 CF_agent-gateway is the message and control plane between enterprise message
 entry points and Hermes.
@@ -26,9 +26,10 @@ Hermes
 - AI Router
 - AI Provider Registry
 
-The gateway accepts messages from multiple entry points, persists them, applies
-access policy, builds execution context, queues work, and routes requests to a
-registered AI provider.
+These are the gateway's intended responsibilities. The current implementation
+accepts and persists messages, applies identity and access policy, and provisions
+authorized workspaces and AI threads. Context construction, task queuing, provider
+routing, and AI execution remain future work.
 
 ## Non-goals
 
@@ -37,12 +38,12 @@ CF_agent-gateway does not provide:
 - AI inference
 - Skill execution
 - ERP business logic
-- A WeChat bot
+- A hosted WeChat bot or replacement for the external `agent-wechat` service
 - A Hermes implementation
 
 ## Current scope
 
-The service foundation and Message Store are implemented:
+The service foundation, WeChat ingestion path, and admission path are implemented:
 
 - YAML configuration loading
 - JSON structured logging
@@ -52,12 +53,23 @@ The service foundation and Message Store are implemented:
 - SQLite schema initialization and session management
 - Idempotent message creation by unique `event_id` and source-message identity
 - Message and account-scoped conversation-message query APIs
-- WeChat normalization and explicit Message Store event conversion
+- `AgentWechatClient`, WeChat normalization, and explicit Message Store event conversion
+- Finite WeChat polling with `latest` and `backfill` bootstrap modes
+- Durable per-account, per-conversation polling checkpoints and at-least-once delivery
+- Persist-first message admission, including identity and access-policy evaluation
+- Workspace and AI-thread creation or reuse for authorized messages
+- Message admission sinks for existing sessions and per-message isolated sessions
+- One-cycle WeChat runtime assembly and the `poll_once` command-line entry point
 - `GET /health`
 - Container build and Compose service
 
-WeChat polling, Hermes integration, AI providers, authorization orchestration,
-context construction, and task processing are intentionally not implemented.
+The runtime saves self-originated, system, and unauthorized messages without creating
+execution work. It does not automatically create identity mappings, allowlists, or
+access policies.
+
+Periodic background scheduling, the Task Queue, Context Builder, Hermes integration,
+AI Providers, result delivery, and production deployment verification are not
+implemented. The one-cycle CLI is not a resident polling service.
 
 ## Message API
 
@@ -107,9 +119,9 @@ Attachment content is not stored; only metadata and a storage path are persisted
 - SQLite for local and phase-one persistence
 - PostgreSQL support through Psycopg 3
 - YAML configuration
-- Docker deployment
+- Docker and Compose packaging
 
-## Run locally
+## Run the HTTP service locally
 
 ```bash
 python -m venv .venv
@@ -134,6 +146,41 @@ Expected response:
 {"status":"ok"}
 ```
 
+## Run one WeChat polling cycle
+
+Set `wechat.enabled: true` in the selected YAML configuration. The YAML stores only
+the name of the token environment variable in `wechat.token_env`; it must never store
+the token itself. With the default `token_env`, set `CF_AGENT_WECHAT_TOKEN` in the
+process environment. A missing or empty variable fails closed.
+
+Linux or macOS:
+
+```bash
+export CF_GATEWAY_CONFIG=config/config.yaml
+export CF_AGENT_WECHAT_TOKEN='<agent-wechat-token>'
+python -m cf_agent_gateway.wechat_poll_once
+```
+
+Windows PowerShell:
+
+```powershell
+$env:CF_GATEWAY_CONFIG = "config/config.yaml"
+$env:CF_AGENT_WECHAT_TOKEN = "<agent-wechat-token>"
+python -m cf_agent_gateway.wechat_poll_once
+```
+
+Replace the placeholder only in the local environment and do not commit the token.
+If `wechat.token_env` names a different variable, set that variable instead.
+`CF_GATEWAY_CONFIG` is optional and defaults to `config/config.yaml`.
+
+The command performs exactly one polling cycle and prints only aggregate, redacted
+result fields. It does not print tokens, authorization headers, message content,
+cookies, or file data. Exit codes are:
+
+- `0`: agent-wechat is logged in and no chat failed
+- `1`: configuration, network, storage, or chat processing failed
+- `2`: WeChat polling is disabled or agent-wechat is not logged in
+
 ## Test
 
 ```bash
@@ -149,5 +196,8 @@ git diff --check
 docker compose up --build
 ```
 
+Compose starts the HTTP service only. It does not schedule or continuously run the
+WeChat polling CLI.
+
 See [docs/architecture.md](docs/architecture.md) for module boundaries and the
-planned request flow.
+implemented and planned request flow.
