@@ -2,7 +2,8 @@
 
 Enterprise AI Message Gateway.
 
-> Status: Hermes dispatch and injectable WeChat response delivery are implemented.
+> Status: Resident WeChat polling, Hermes dispatch, and injectable response delivery are
+> implemented.
 
 CF_agent-gateway is the message and control plane between enterprise message
 entry points and Hermes.
@@ -65,6 +66,7 @@ request/response path are implemented:
 - `HermesResponseRelay` routing through `ThreadSourceBinding` to a `WechatMessageSender`
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle WeChat runtime assembly and the `poll_once` command-line entry point
+- Resident WeChat worker with configurable polling interval and graceful shutdown
 - `GET /health`
 - Container build and Compose service
 
@@ -75,9 +77,9 @@ that the injected sender is scoped to the binding's source account. It is tested
 fake sender; the polling runtime does not yet assemble a concrete outbound sender. Skill
 execution is not connected.
 
-Periodic background scheduling, the Task Queue, Context Builder, durable dispatch/outbox
-state, AI Providers, production outbound wiring, and deployment verification are not
-implemented. The one-cycle CLI is not a resident polling service.
+The Task Queue, Context Builder, durable dispatch/outbox state, AI Providers, production
+outbound wiring, service-manager integration, and deployment verification are not
+implemented. The resident worker is a standalone process and is not embedded in FastAPI.
 
 ## Message API
 
@@ -195,6 +197,29 @@ cookies, or file data. Exit codes are:
 - `0`: agent-wechat is logged in and no chat failed
 - `1`: configuration, network, storage, or chat processing failed
 - `2`: WeChat polling is disabled or agent-wechat is not logged in
+
+## Run the resident WeChat worker
+
+Use the same WeChat and optional Hermes environment variables described above, then set
+the delay between completed polling cycles in the selected configuration:
+
+```yaml
+runtime:
+  polling_interval_seconds: 3
+```
+
+Start the worker as a separate process:
+
+```bash
+python -m cf_agent_gateway.runtime.worker
+```
+
+The worker runs one polling cycle at a time, logs aggregate results, and waits for the
+configured interval before polling again. `Ctrl+C` and `SIGTERM` request a graceful stop;
+an in-progress synchronous polling cycle finishes its cleanup before the process exits.
+Transient cycle failures are logged with a redacted error code and retried after the same
+interval. Invalid configuration, a disabled WeChat runtime, or missing required credentials
+fails the process instead of retrying indefinitely.
 
 ## Test
 

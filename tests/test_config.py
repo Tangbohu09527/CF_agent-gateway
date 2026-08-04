@@ -1,8 +1,25 @@
 from pathlib import Path
+from threading import TIMEOUT_MAX
 
 import pytest
 
-from cf_agent_gateway.config import HermesSettings, WechatSettings, load_settings
+from cf_agent_gateway.config import (
+    HermesSettings,
+    RuntimeSettings,
+    WechatSettings,
+    load_settings,
+)
+
+
+def test_runtime_settings_defaults() -> None:
+    settings = RuntimeSettings()
+
+    assert settings.polling_interval_seconds == 3.0
+
+
+def test_runtime_settings_rejects_interval_above_platform_wait_limit() -> None:
+    with pytest.raises(ValueError, match="runtime.polling_interval_seconds"):
+        RuntimeSettings(polling_interval_seconds=TIMEOUT_MAX * 2)
 
 
 def test_wechat_settings_defaults() -> None:
@@ -23,12 +40,15 @@ def test_hermes_settings_defaults() -> None:
     assert settings.model == "hermes-agent"
 
 
-def test_legacy_yaml_without_wechat_settings_uses_safe_defaults(tmp_path: Path) -> None:
+def test_legacy_yaml_without_runtime_or_wechat_settings_uses_safe_defaults(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("logging:\n  level: INFO\n", encoding="utf-8")
 
     settings = load_settings(config_path)
 
+    assert settings.runtime == RuntimeSettings()
     assert settings.wechat == WechatSettings()
     assert settings.hermes == HermesSettings()
 
@@ -44,6 +64,8 @@ database:
   url: postgresql+psycopg://gateway:secret@db/gateway
 logging:
   level: debug
+runtime:
+  polling_interval_seconds: 1.5
 wechat:
   enabled: true
   base_url: https://agent-wechat.internal:6174
@@ -64,6 +86,7 @@ hermes:
     assert settings.server.port == 9090
     assert settings.database.url.startswith("postgresql+psycopg://")
     assert settings.logging.level == "DEBUG"
+    assert settings.runtime == RuntimeSettings(polling_interval_seconds=1.5)
     assert settings.wechat == WechatSettings(
         enabled=True,
         base_url="https://agent-wechat.internal:6174",
@@ -83,6 +106,32 @@ def test_load_settings_rejects_invalid_port(tmp_path: Path) -> None:
     config_path.write_text("server:\n  port: 70000\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="server.port"):
+        load_settings(config_path)
+
+
+@pytest.mark.parametrize(
+    "yaml_value",
+    ["true", "'3'", "0", "-1", ".nan", ".inf"],
+)
+def test_load_settings_rejects_invalid_polling_interval(
+    tmp_path: Path,
+    yaml_value: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"runtime:\n  polling_interval_seconds: {yaml_value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="runtime.polling_interval_seconds"):
+        load_settings(config_path)
+
+
+def test_load_settings_rejects_runtime_that_is_not_a_mapping(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("runtime: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="runtime must be a YAML mapping"):
         load_settings(config_path)
 
 

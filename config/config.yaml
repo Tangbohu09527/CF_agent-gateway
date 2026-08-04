@@ -8,6 +8,9 @@ database:
 logging:
   level: "INFO"
 
+runtime:
+  polling_interval_seconds: 3
+
 wechat:
   enabled: false
   base_url: "http://127.0.0.1:6174"

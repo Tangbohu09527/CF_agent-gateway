@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from threading import TIMEOUT_MAX
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
+
+_POLLING_INTERVAL_ERROR = (
+    "runtime.polling_interval_seconds must be within the supported positive timeout range"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +28,27 @@ class DatabaseSettings:
 @dataclass(frozen=True, slots=True)
 class LoggingSettings:
     level: str = "INFO"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSettings:
+    polling_interval_seconds: float = 3.0
+
+    def __post_init__(self) -> None:
+        interval = self.polling_interval_seconds
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+            raise ValueError(_POLLING_INTERVAL_ERROR)
+        try:
+            normalized_interval = float(interval)
+        except (OverflowError, ValueError):
+            raise ValueError(_POLLING_INTERVAL_ERROR) from None
+        if (
+            not math.isfinite(normalized_interval)
+            or normalized_interval <= 0
+            or normalized_interval > TIMEOUT_MAX
+        ):
+            raise ValueError(_POLLING_INTERVAL_ERROR)
+        object.__setattr__(self, "polling_interval_seconds", normalized_interval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +156,7 @@ class Settings:
     logging: LoggingSettings = LoggingSettings()
     wechat: WechatSettings = WechatSettings()
     hermes: HermesSettings = HermesSettings()
+    runtime: RuntimeSettings = RuntimeSettings()
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -146,6 +174,7 @@ def load_settings(path: str | Path) -> Settings:
     server = _mapping(raw, "server")
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
+    runtime = _mapping(raw, "runtime")
     wechat = _mapping(raw, "wechat")
     hermes = _mapping(raw, "hermes")
 
@@ -170,6 +199,9 @@ def load_settings(path: str | Path) -> Settings:
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
+        runtime=RuntimeSettings(
+            polling_interval_seconds=runtime.get("polling_interval_seconds", 3.0),
+        ),
         wechat=WechatSettings(
             enabled=wechat.get("enabled", False),
             base_url=wechat.get("base_url", "http://127.0.0.1:6174"),

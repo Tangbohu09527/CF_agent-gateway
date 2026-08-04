@@ -1,4 +1,4 @@
-"""Finite runtime assembly entry points."""
+"""Runtime assembly and lifecycle entry points."""
 
 from cf_agent_gateway.runtime.errors import (
     HermesAPIKeyEnvironmentError,

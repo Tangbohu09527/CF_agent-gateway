@@ -11,7 +11,7 @@ Entry points -> Gateway -> Hermes
 
 ## Request flow and status
 
-The implemented one-cycle WeChat path is:
+The implemented WeChat polling path is:
 
 1. Runtime configuration enables WeChat and names the environment variable that
    contains the agent-wechat token.
@@ -53,7 +53,7 @@ is currently implemented beyond the direct Hermes request/response foundation.
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
 | `adapters.wechat` | agent-wechat client, normalization, polling, outbound protocol | Implemented |
 | `adapters.wechat.polling_store` | Durable account/conversation checkpoints | Implemented |
-| `runtime` | One-cycle WeChat dependency assembly and resource cleanup | Implemented |
+| `runtime` | WeChat cycle assembly, resident scheduling, and cleanup | Implemented |
 | `ingestion` | Persist-first admission and polling-compatible sinks | Implemented |
 | `message.models` | Conversation, message, and attachment metadata ORM models | Implemented |
 | `message.schemas` | Message API input and output contracts | Implemented |
@@ -81,8 +81,15 @@ closed after the cycle, including failure paths. Runtime and CLI output is restr
 aggregate status and failure codes; tokens, authorization headers, full message bodies,
 cookies, and Base64 file data are outside the output boundary.
 
-There is no loop, scheduler, FastAPI background worker, service manager integration,
-or task queue. Production deployment of the polling path has not been verified.
+`runtime.worker` serially invokes that finite runtime, then waits for the configured
+`runtime.polling_interval_seconds` before the next cycle. A shared stop event makes the
+wait interruptible; the module CLI maps `SIGINT` and `SIGTERM` to that event. Poll cycles
+never overlap. Ordinary cycle failures are logged with a redacted code and retried, while
+permanent configuration errors stop the worker.
+
+The worker is a standalone process. There is no FastAPI background worker, service manager
+integration, or task queue, and production deployment of the polling path has not been
+verified.
 
 ## Persistence direction
 
