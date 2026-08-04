@@ -66,7 +66,11 @@ class AdmissionOrchestrator:
                 "allowed authorization decision has no enterprise identity"
             )
 
-        thread = WorkspaceService(self._session).ensure_thread_for_authorized_request(
+        workspace_service = WorkspaceService(self._session)
+        workspace = workspace_service.ensure_workspace_for_authorized_identity(
+            enterprise_identity_id
+        )
+        thread = workspace_service.ensure_thread_for_authorized_request(
             enterprise_identity_id=enterprise_identity_id,
             platform=candidate.source,
             account_id=candidate.source_account_id,
@@ -80,7 +84,7 @@ class AdmissionOrchestrator:
             should_create_task=True,
             reason=AdmissionReason.ALLOWED,
             enterprise_identity_id=enterprise_identity_id,
-            workspace_id=thread.workspace_id,
+            workspace_id=workspace.id,
             ai_thread_id=thread.id,
             authorization=authorization,
         )

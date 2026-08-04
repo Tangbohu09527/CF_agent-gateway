@@ -38,6 +38,12 @@ class HermesChatCompletionResponse(HermesResponseModel):
 
 
 @dataclass(frozen=True, slots=True)
+class HermesChatResult:
+    assistant_content: str
+    hermes_thread_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class HermesDispatchOutcome:
     message_id: int
     workspace_id: str

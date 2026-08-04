@@ -7,8 +7,10 @@ import httpx
 import pytest
 
 from cf_agent_gateway.hermes import (
+    HERMES_SESSION_HEADER,
     HermesAPIError,
     HermesAPIKeyError,
+    HermesChatResult,
     HermesClient,
     HermesResponseError,
     HermesTimeoutError,
@@ -18,6 +20,7 @@ BASE_URL = "https://hermes.test"
 API_KEY = "test-hermes-api-key"
 MODEL = "hermes-agent"
 USER_CONTENT = "Hello, Hermes"
+HERMES_THREAD_ID = "hermes-thread-001"
 
 
 def hermes_client(handler: Callable[[httpx.Request], httpx.Response]) -> HermesClient:
@@ -36,6 +39,7 @@ def test_chat_posts_expected_request_and_returns_assistant_content() -> None:
         assert request.headers["authorization"] == f"Bearer {API_KEY}"
         assert request.headers["accept"] == "application/json"
         assert request.headers["content-type"] == "application/json"
+        assert HERMES_SESSION_HEADER not in request.headers
         assert json.loads(request.content) == {
             "model": MODEL,
             "messages": [{"role": "user", "content": USER_CONTENT}],
@@ -56,12 +60,45 @@ def test_chat_posts_expected_request_and_returns_assistant_content() -> None:
                 ],
                 "usage": {"prompt_tokens": 4, "completion_tokens": 3},
             },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
         )
 
     with hermes_client(handler) as client:
         result = client.chat(USER_CONTENT)
 
-    assert result == "Hello from Hermes"
+    assert result == HermesChatResult(
+        assistant_content="Hello from Hermes",
+        hermes_thread_id=HERMES_THREAD_ID,
+    )
+
+
+def test_chat_sends_existing_hermes_thread_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers[HERMES_SESSION_HEADER] == HERMES_THREAD_ID
+        assert json.loads(request.content) == {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": USER_CONTENT}],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Continued response",
+                        }
+                    }
+                ],
+            },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
+
+    with hermes_client(handler) as client:
+        result = client.chat(USER_CONTENT, hermes_thread_id=HERMES_THREAD_ID)
+
+    assert result.hermes_thread_id == HERMES_THREAD_ID
+    assert result.assistant_content == "Continued response"
 
 
 def test_http_error_has_stable_sanitized_metadata() -> None:
@@ -125,13 +162,21 @@ def test_timeout_has_stable_sanitized_error() -> None:
     "payload",
     [
         {"choices": []},
-        {"choices": [{"message": {"role": "user", "content": "wrong role"}}]},
-        {"choices": [{"message": {"role": "assistant"}}]},
+        {
+            "choices": [{"message": {"role": "user", "content": "wrong role"}}],
+        },
+        {
+            "choices": [{"message": {"role": "assistant"}}],
+        },
     ],
 )
 def test_invalid_success_response_raises_response_error(payload: object) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload)
+        return httpx.Response(
+            200,
+            json=payload,
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
 
     with hermes_client(handler) as client, pytest.raises(HermesResponseError) as caught:
         client.chat(USER_CONTENT)
@@ -143,6 +188,25 @@ def test_invalid_success_response_raises_response_error(payload: object) -> None
 def test_non_json_success_response_raises_response_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="not-json")
+
+    with hermes_client(handler) as client, pytest.raises(HermesResponseError):
+        client.chat(USER_CONTENT)
+
+
+@pytest.mark.parametrize("header_value", [None, "", " ", "x" * 256])
+def test_missing_or_invalid_session_header_raises_response_error(
+    header_value: str | None,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {} if header_value is None else {HERMES_SESSION_HEADER: header_value}
+        return httpx.Response(
+            200,
+            json={
+                "id": "completion-1",
+                "choices": [{"message": {"role": "assistant", "content": "response"}}],
+            },
+            headers=headers,
+        )
 
     with hermes_client(handler) as client, pytest.raises(HermesResponseError):
         client.chat(USER_CONTENT)

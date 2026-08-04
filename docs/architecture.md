@@ -27,10 +27,16 @@ The implemented WeChat polling path is:
 6. Self-originated and system messages remain stored and stop before identity mapping.
    Other messages pass through identity resolution and access policy evaluation.
 7. Unauthorized messages remain stored without a Workspace or AIThread. Authorized
-   messages create or reuse an employee Workspace and AIThread. No Task is created.
+   messages create or reuse an employee Workspace, then resolve one AIThread for the
+   source account and physical conversation. A group uses one thread for the whole room,
+   rather than one thread per sender. No Task is created.
 8. When Hermes is enabled, the dispatch service reloads the persisted message and verifies
    its source binding, AIThread, Workspace, and enterprise identity before calling
-   `HermesClient.chat`.
+   `HermesClient.chat`. Before the first call, an unbound AIThread atomically claims a
+   deterministic `X-Hermes-Session-Id`, so concurrent first calls and retries converge on
+   one Hermes session even on SQLite. Successful responses retain Hermes' effective ID;
+   later calls send the current value, and a replacement returned after context
+   compression becomes the new binding.
 9. `HermesResponseRelay` can decorate the existing dispatcher without changing its
    protocol. On success, `HermesResponseHandler` reloads the source message, validates its
    local AIThread and exact `ThreadSourceBinding`, verifies the injected sender's source
@@ -122,5 +128,6 @@ remain outside the database.
 
 This is a development-time schema change. Until formal migrations exist, developers
 must back up and manually recreate older development databases before using the new
-schema. The service never automatically deletes `gateway.db`, and production automatic
-migration has not been implemented.
+schema. Startup rejects the former sender-scoped thread binding constraints rather than
+running with split-conversation semantics. The service never automatically deletes
+`gateway.db`, and production automatic migration has not been implemented.

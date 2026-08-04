@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -55,7 +55,7 @@ class WorkspaceStore:
     def ensure_thread(
         self, *, workspace_id: str, thread_type: ThreadType, thread_key: str
     ) -> tuple[AIThread, bool]:
-        existing = self.get_thread_by_key(workspace_id=workspace_id, thread_key=thread_key)
+        existing = self.get_thread_by_key(thread_key=thread_key)
         if existing is not None:
             return self._compatible_thread_or_raise(existing, thread_type), False
 
@@ -70,7 +70,7 @@ class WorkspaceStore:
             self._session.commit()
         except IntegrityError:
             self._session.rollback()
-            existing = self.get_thread_by_key(workspace_id=workspace_id, thread_key=thread_key)
+            existing = self.get_thread_by_key(thread_key=thread_key)
             if existing is not None:
                 return self._compatible_thread_or_raise(existing, thread_type), False
             raise
@@ -79,16 +79,82 @@ class WorkspaceStore:
     def get_thread(self, ai_thread_id: str) -> AIThread | None:
         return self._session.get(AIThread, ai_thread_id)
 
-    def get_thread_by_key(self, *, workspace_id: str, thread_key: str) -> AIThread | None:
-        statement = select(AIThread).where(
-            AIThread.workspace_id == workspace_id,
-            AIThread.thread_key == thread_key,
+    def get_thread_for_update(self, ai_thread_id: str) -> AIThread | None:
+        statement = (
+            select(AIThread)
+            .where(AIThread.id == ai_thread_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
+        return self._session.scalar(statement)
+
+    def get_thread_by_key(self, *, thread_key: str) -> AIThread | None:
+        statement = select(AIThread).where(AIThread.thread_key == thread_key)
         return self._session.scalar(statement)
 
     def get_thread_by_hermes_thread_id(self, hermes_thread_id: str) -> AIThread | None:
         statement = select(AIThread).where(AIThread.hermes_thread_id == hermes_thread_id)
         return self._session.scalar(statement)
+
+    def claim_hermes_thread(self, thread: AIThread, hermes_thread_id: str) -> AIThread:
+        if thread.hermes_thread_id is not None:
+            return thread
+
+        statement = (
+            update(AIThread)
+            .where(
+                AIThread.id == thread.id,
+                AIThread.hermes_thread_id.is_(None),
+            )
+            .values(hermes_thread_id=hermes_thread_id)
+        )
+        try:
+            self._session.execute(statement)
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self.get_thread_by_hermes_thread_id(hermes_thread_id)
+            if existing is not None:
+                return self._compatible_hermes_thread_or_raise(
+                    existing,
+                    requested_ai_thread_id=thread.id,
+                    hermes_thread_id=hermes_thread_id,
+                )
+            raise
+        self._session.refresh(thread)
+        return thread
+
+    def advance_hermes_thread(
+        self,
+        thread: AIThread,
+        *,
+        expected_hermes_thread_id: str,
+        next_hermes_thread_id: str,
+    ) -> bool:
+        statement = (
+            update(AIThread)
+            .where(
+                AIThread.id == thread.id,
+                AIThread.hermes_thread_id == expected_hermes_thread_id,
+            )
+            .values(hermes_thread_id=next_hermes_thread_id)
+        )
+        try:
+            result = self._session.execute(statement)
+            advanced = result.rowcount == 1
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self.get_thread_by_hermes_thread_id(next_hermes_thread_id)
+            if existing is not None:
+                self._compatible_hermes_thread_or_raise(
+                    existing,
+                    requested_ai_thread_id=thread.id,
+                    hermes_thread_id=next_hermes_thread_id,
+                )
+                return False
+            raise
+        return advanced
 
     def ensure_source_binding(
         self,
@@ -138,15 +204,35 @@ class WorkspaceStore:
         platform: str,
         account_id: str,
         physical_conversation_id: str,
-        sender_id: str | None,
+        sender_id: str | None = None,
     ) -> ThreadSourceBinding | None:
-        statement = select(ThreadSourceBinding).where(
-            ThreadSourceBinding.platform == platform,
-            ThreadSourceBinding.account_id == account_id,
-            ThreadSourceBinding.physical_conversation_id == physical_conversation_id,
-            ThreadSourceBinding.sender_id == sender_id,
+        statement = (
+            select(ThreadSourceBinding)
+            .where(
+                ThreadSourceBinding.platform == platform,
+                ThreadSourceBinding.account_id == account_id,
+                ThreadSourceBinding.physical_conversation_id == physical_conversation_id,
+            )
+            .order_by(
+                ThreadSourceBinding.created_at,
+                ThreadSourceBinding.id,
+            )
         )
         return self._session.scalar(statement)
+
+    def discard_thread_if_unbound(self, ai_thread_id: str) -> None:
+        binding_exists = (
+            select(ThreadSourceBinding.id)
+            .where(ThreadSourceBinding.ai_thread_id == AIThread.id)
+            .exists()
+        )
+        statement = delete(AIThread).where(
+            AIThread.id == ai_thread_id,
+            AIThread.hermes_thread_id.is_(None),
+            ~binding_exists,
+        )
+        self._session.execute(statement)
+        self._session.commit()
 
     def list_source_bindings_for_thread(self, ai_thread_id: str) -> list[ThreadSourceBinding]:
         statement = select(ThreadSourceBinding).where(

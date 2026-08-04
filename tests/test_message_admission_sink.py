@@ -125,11 +125,16 @@ def allow_gateway(session: Session) -> None:
     )
 
 
-def allow_group(session: Session, *, enabled: bool = True) -> None:
+def allow_group(
+    session: Session,
+    *,
+    conversation_id: str = GROUP_CONVERSATION_ID,
+    enabled: bool = True,
+) -> None:
     AccessPolicyService(session).upsert_group_policy(
         source="wechat",
         source_account_id=SOURCE_ACCOUNT_ID,
-        conversation_id=GROUP_CONVERSATION_ID,
+        conversation_id=conversation_id,
         enabled=enabled,
     )
 
@@ -317,6 +322,78 @@ def test_duplicate_allowed_message_reuses_workspace_and_ai_thread(session: Sessi
     assert second.workspace_id == first.workspace_id
     assert second.ai_thread_id == first.ai_thread_id
     assert_resource_counts(session, messages=1, workspaces=1, threads=1)
+
+
+def test_distinct_private_messages_in_same_chat_reuse_ai_thread(session: Session) -> None:
+    provision_sender(session)
+    allow_gateway(session)
+    service = MessageAdmissionService(session)
+
+    first = service.process(normalized_message())
+    second = service.process(
+        normalized_message(
+            event_id="wechat:event-002",
+            source_message_id="server-002",
+            source_local_id="local-002",
+            source_server_id="server-002",
+            content="and list the breaking changes",
+            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
+        )
+    )
+
+    assert first.message_id != second.message_id
+    assert first.ai_thread_id == second.ai_thread_id
+    assert_resource_counts(session, messages=2, workspaces=1, threads=1)
+
+
+def test_different_private_chats_use_different_ai_threads(session: Session) -> None:
+    provision_sender(session)
+    provision_sender(session, sender_id="wxid-bob")
+    allow_gateway(session)
+    service = MessageAdmissionService(session)
+
+    first = service.process(normalized_message())
+    second = service.process(
+        normalized_message(
+            event_id="wechat:event-002",
+            source_message_id="server-002",
+            source_local_id="local-002",
+            source_server_id="server-002",
+            conversation_id="wxid-bob",
+            conversation_name="Bob",
+            sender_id="wxid-bob",
+            sender_name="Bob",
+            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
+        )
+    )
+
+    assert first.ai_thread_id != second.ai_thread_id
+    assert_resource_counts(session, messages=2, workspaces=2, threads=2)
+
+
+def test_different_group_chats_use_different_ai_threads(session: Session) -> None:
+    other_group_id = "operations@chatroom"
+    provision_sender(session)
+    allow_group(session)
+    allow_group(session, conversation_id=other_group_id)
+    allow_gateway(session)
+    service = MessageAdmissionService(session)
+
+    first = service.process(group_message())
+    second = service.process(
+        group_message(
+            event_id="wechat:event-002",
+            source_message_id="server-002",
+            source_local_id="local-002",
+            source_server_id="server-002",
+            conversation_id=other_group_id,
+            conversation_name="Operations",
+            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
+        )
+    )
+
+    assert first.ai_thread_id != second.ai_thread_id
+    assert_resource_counts(session, messages=2, workspaces=1, threads=2)
 
 
 class _AdmissionFailure(RuntimeError):
@@ -766,7 +843,7 @@ def test_candidate_and_database_ignore_resolver_snapshot_mutations(session: Sess
     assert persisted.message_type == "text"
 
 
-def test_different_employees_in_same_group_get_distinct_ai_threads(session: Session) -> None:
+def test_different_employees_in_same_group_reuse_ai_thread(session: Session) -> None:
     first_identity = provision_sender(
         session,
         sender_id="wxid-alice",
@@ -797,8 +874,8 @@ def test_different_employees_in_same_group_get_distinct_ai_threads(session: Sess
     assert first.admission.enterprise_identity_id == first_identity.id
     assert second.admission.enterprise_identity_id == second_identity.id
     assert first.workspace_id != second.workspace_id
-    assert first.ai_thread_id != second.ai_thread_id
-    assert_resource_counts(session, messages=2, workspaces=2, threads=2)
+    assert first.ai_thread_id == second.ai_thread_id
+    assert_resource_counts(session, messages=2, workspaces=2, threads=1)
 
 
 def test_private_message_does_not_require_mention(session: Session) -> None:

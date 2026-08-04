@@ -14,7 +14,12 @@ from cf_agent_gateway.hermes.models import (
 from cf_agent_gateway.hermes.service import HermesDispatcher
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
-from cf_agent_gateway.workspace.models import AIThread, ThreadSourceBinding, ThreadStatus
+from cf_agent_gateway.workspace.models import (
+    AIThread,
+    ThreadSourceBinding,
+    ThreadStatus,
+    ThreadType,
+)
 from cf_agent_gateway.workspace.store import WorkspaceStore
 
 WECHAT_PLATFORM = "wechat"
@@ -103,7 +108,10 @@ class HermesResponseHandler:
 
     @staticmethod
     def _validate_thread(thread: AIThread, response: HermesDispatchOutcome) -> None:
-        if thread.workspace_id != response.workspace_id:
+        if (
+            thread.thread_type is ThreadType.PRIVATE
+            and thread.workspace_id != response.workspace_id
+        ):
             raise HermesDeliveryError(reason="ai_thread_workspace_mismatch")
         if thread.status is not ThreadStatus.ACTIVE:
             raise HermesDeliveryError(reason="ai_thread_unavailable")
@@ -119,5 +127,4 @@ class HermesResponseHandler:
             and binding.platform == message.source
             and binding.account_id == message.source_account_id
             and binding.physical_conversation_id == message.conversation_id
-            and binding.sender_id == message.sender_id
         )

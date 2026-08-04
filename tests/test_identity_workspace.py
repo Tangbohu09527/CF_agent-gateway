@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
@@ -245,8 +246,9 @@ def test_thread_key_is_stable_and_collision_resistant() -> None:
     private = build_private_thread_key(
         platform="wechat", account_id="bot-001", private_chat_id="chat-001"
     )
+    assert private == "v1:wechat:private:bot-001:chat-001"
     assert private == build_private_thread_key(
-        platform="wechat", account_id="bot-001", private_chat_id="chat-001"
+        platform=" WeChat ", account_id=" bot-001 ", private_chat_id=" chat-001 "
     )
     assert private != build_private_thread_key(
         platform="wechat", account_id="bot-002", private_chat_id="chat-001"
@@ -261,17 +263,41 @@ def test_thread_key_is_stable_and_collision_resistant() -> None:
         group_chat_id="group|with|separators",
         sender_id="sender|one",
     )
+    assert group == "v1:wechat:group:bot-001:group%7Cwith%7Cseparators"
     assert group == build_group_thread_key(
         platform="wechat",
         account_id="bot-001",
         group_chat_id="group|with|separators",
-        sender_id="sender|one",
+        sender_id="sender|two",
     )
     assert group != build_group_thread_key(
         platform="wechat",
         account_id="bot-001",
-        group_chat_id="group|with|separators",
-        sender_id="sender|two",
+        group_chat_id="another-group",
+    )
+    assert build_private_thread_key(
+        platform="wechat", account_id="account:one", private_chat_id="conversation"
+    ) != build_private_thread_key(
+        platform="wechat", account_id="account", private_chat_id="one:conversation"
+    )
+
+    long_key = build_group_thread_key(
+        platform="wechat",
+        account_id="a" * 255,
+        group_chat_id="g" * 255,
+    )
+    assert len(long_key) <= 96
+    assert long_key.startswith("v1:sha256:group:")
+    assert long_key != build_group_thread_key(
+        platform="wechat",
+        account_id="a" * 255,
+        group_chat_id="g" * 254 + "h",
+    )
+    digest = long_key.rsplit(":", maxsplit=1)[1]
+    assert long_key != build_group_thread_key(
+        platform="wechat",
+        account_id="sha256",
+        group_chat_id=digest,
     )
 
 
@@ -286,6 +312,9 @@ def test_group_thread_isolation_and_source_binding(
         other_sender = service.ensure_thread_for_authorized_request(
             **thread_request(identity.id, sender_id="wxid-002")
         )
+        other_group = service.ensure_thread_for_authorized_request(
+            **thread_request(identity.id, conversation_id="group-002")
+        )
         other_account = service.ensure_thread_for_authorized_request(
             **thread_request(identity.id, account_id="bot-002")
         )
@@ -294,12 +323,37 @@ def test_group_thread_isolation_and_source_binding(
         )
 
         assert duplicate.id == first.id
-        assert len({first.id, other_sender.id, other_account.id, other_platform.id}) == 4
+        assert other_sender.id == first.id
+        assert len({first.id, other_group.id, other_account.id, other_platform.id}) == 4
         assert session.scalar(select(func.count()).select_from(AIThread)) == 4
         assert session.scalar(select(func.count()).select_from(ThreadSourceBinding)) == 4
 
 
-def test_private_thread_does_not_depend_on_sender_id(
+def test_same_group_reuses_global_thread_across_employee_workspaces(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        first_identity = create_identity(session)
+        second_identity = create_identity(session, employee_id="EMP-002")
+        service = WorkspaceService(session)
+
+        first = service.ensure_thread_for_authorized_request(
+            **thread_request(first_identity.id, sender_id="wxid-001")
+        )
+        second = service.ensure_thread_for_authorized_request(
+            **thread_request(second_identity.id, sender_id="wxid-002")
+        )
+
+        assert second.id == first.id
+        assert second.workspace_id == first.workspace_id
+        assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 2
+        assert session.scalar(select(func.count()).select_from(AIThread)) == 1
+        binding = session.scalar(select(ThreadSourceBinding))
+        assert binding is not None
+        assert binding.sender_id == "wxid-001"
+
+
+def test_private_thread_reuses_conversation_and_isolates_other_conversations(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
@@ -321,8 +375,19 @@ def test_private_thread_does_not_depend_on_sender_id(
                 sender_id="ignored-for-thread-key",
             )
         )
+        other_chat = service.ensure_thread_for_authorized_request(
+            **thread_request(
+                identity.id,
+                conversation_id="private-002",
+                conversation_type="private",
+                sender_id="wxid-002",
+            )
+        )
 
         assert same_chat.id == first.id
+        assert other_chat.id != first.id
+        assert session.scalar(select(func.count()).select_from(AIThread)) == 2
+        assert session.scalar(select(func.count()).select_from(ThreadSourceBinding)) == 2
 
 
 def test_hermes_thread_binding_is_unique_idempotent_and_rebindable(
@@ -333,7 +398,7 @@ def test_hermes_thread_binding_is_unique_idempotent_and_rebindable(
         service = WorkspaceService(session)
         first = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
         second = service.ensure_thread_for_authorized_request(
-            **thread_request(identity.id, sender_id="wxid-002")
+            **thread_request(identity.id, conversation_id="group-002", sender_id="wxid-002")
         )
         assert first.hermes_thread_id is None
         assert second.hermes_thread_id is None
@@ -369,7 +434,7 @@ def test_source_fact_binding_is_idempotent_and_unique(
         service = WorkspaceService(session)
         first = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
         second = service.ensure_thread_for_authorized_request(
-            **thread_request(identity.id, sender_id="wxid-002")
+            **thread_request(identity.id, conversation_id="group-002", sender_id="wxid-002")
         )
         store = WorkspaceStore(session)
         source_fact = {
@@ -401,7 +466,7 @@ def test_binding_integrity_error_recovery_preserves_existing_bindings(
         service = WorkspaceService(session)
         first = service.ensure_thread_for_authorized_request(**thread_request(identity.id))
         second = service.ensure_thread_for_authorized_request(
-            **thread_request(identity.id, sender_id="wxid-002")
+            **thread_request(identity.id, conversation_id="group-002", sender_id="wxid-002")
         )
         service.bind_hermes_thread(first.id, "hermes-shared")
         store = WorkspaceStore(session)
@@ -545,5 +610,44 @@ def test_concurrent_ensures_do_not_create_duplicate_rows(tmp_path: Path) -> None
             assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
             assert session.scalar(select(func.count()).select_from(AIThread)) == 1
             assert session.scalar(select(func.count()).select_from(SourceIdentityMapping)) == 1
+            assert session.scalar(select(func.count()).select_from(ThreadSourceBinding)) == 1
+    finally:
+        engine.dispose()
+
+
+def test_concurrent_group_ensures_across_workspaces_reuse_global_thread(tmp_path: Path) -> None:
+    database_path = tmp_path / "cross-workspace-concurrency.db"
+    engine = create_database_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    initialize_database(engine)
+    factory = create_database_session_factory(engine)
+    try:
+        with factory() as session:
+            first_identity = create_identity(session)
+            second_identity = create_identity(session, employee_id="EMP-002")
+            service = WorkspaceService(session)
+            service.ensure_workspace_for_authorized_identity(first_identity.id)
+            service.ensure_workspace_for_authorized_identity(second_identity.id)
+            requests = (
+                thread_request(first_identity.id, sender_id="wxid-001"),
+                thread_request(second_identity.id, sender_id="wxid-002"),
+            )
+
+        barrier = Barrier(len(requests))
+
+        def ensure(request: dict[str, str]) -> tuple[str, str]:
+            with factory() as session:
+                barrier.wait()
+                thread = WorkspaceService(session).ensure_thread_for_authorized_request(**request)
+                return thread.id, thread.workspace_id
+
+        with ThreadPoolExecutor(max_workers=len(requests)) as executor:
+            results = list(executor.map(ensure, requests))
+
+        assert len({thread_id for thread_id, _ in results}) == 1
+        assert len({workspace_id for _, workspace_id in results}) == 1
+        with factory() as session:
+            assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 2
+            assert session.scalar(select(func.count()).select_from(AIThread)) == 1
+            assert session.scalar(select(func.count()).select_from(ThreadSourceBinding)) == 1
     finally:
         engine.dispose()

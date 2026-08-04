@@ -60,9 +60,9 @@ request/response path are implemented:
 - Finite WeChat polling with `latest` and `backfill` bootstrap modes
 - Durable per-account, per-conversation polling checkpoints and at-least-once delivery
 - Persist-first message admission, including identity and access-policy evaluation
-- Workspace and AI-thread creation or reuse for authorized messages
+- Workspace creation and conversation-scoped AI-thread reuse for authorized messages
 - OpenAI-compatible `HermesClient` with environment-backed API-key configuration
-- Active Workspace/AIThread validation and allowed-message dispatch to Hermes
+- Active Workspace/AIThread validation and session-bound message dispatch to Hermes
 - `HermesResponseRelay` routing through `ThreadSourceBinding` to a `WechatMessageSender`
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle WeChat runtime assembly and the `poll_once` command-line entry point

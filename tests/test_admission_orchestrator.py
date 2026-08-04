@@ -486,7 +486,7 @@ def test_repeated_allowed_request_returns_stable_workspace_and_thread(
     assert session.scalar(select(func.count()).select_from(AIThread)) == 1
 
 
-def test_different_employees_in_same_group_get_different_threads(session: Session) -> None:
+def test_different_employees_in_same_group_reuse_thread(session: Session) -> None:
     first_identity = provision_sender(
         session,
         sender_id="wxid-001",
@@ -507,9 +507,9 @@ def test_different_employees_in_same_group_get_different_threads(session: Sessio
     assert first.enterprise_identity_id == first_identity.id
     assert second.enterprise_identity_id == second_identity.id
     assert first.workspace_id != second.workspace_id
-    assert first.ai_thread_id != second.ai_thread_id
+    assert first.ai_thread_id == second.ai_thread_id
     assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 2
-    assert session.scalar(select(func.count()).select_from(AIThread)) == 2
+    assert session.scalar(select(func.count()).select_from(AIThread)) == 1
 
 
 def test_candidate_and_outcome_are_immutable_and_exclude_message_content(

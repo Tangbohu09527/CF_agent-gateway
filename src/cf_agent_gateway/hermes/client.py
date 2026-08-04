@@ -16,10 +16,13 @@ from cf_agent_gateway.hermes.errors import (
 from cf_agent_gateway.hermes.models import (
     HermesChatCompletionRequest,
     HermesChatCompletionResponse,
+    HermesChatResult,
     HermesUserMessage,
 )
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=15.0, pool=5.0)
+HERMES_SESSION_HEADER = "X-Hermes-Session-Id"
+MAX_HERMES_THREAD_ID_LENGTH = 255
 
 
 class HermesClient:
@@ -59,29 +62,39 @@ class HermesClient:
     def close(self) -> None:
         self._client.close()
 
-    def chat(self, content: str) -> str:
-        """Send one user message and return the first assistant message content."""
+    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
+        """Send one user message, creating or continuing a Hermes thread."""
 
         if not isinstance(content, str) or not content:
             raise ValueError("content must not be empty")
+        if hermes_thread_id is not None:
+            hermes_thread_id = _hermes_thread_id(hermes_thread_id)
 
         operation = "chat_completion"
         request = HermesChatCompletionRequest(
             model=self._model,
             messages=[HermesUserMessage(content=content)],
         )
+        request_headers = (
+            {HERMES_SESSION_HEADER: hermes_thread_id} if hermes_thread_id is not None else None
+        )
         response = self._request(
             "POST",
             "v1/chat/completions",
             operation=operation,
             json=request.model_dump(mode="json"),
+            headers=request_headers,
         )
         try:
             payload = response.json()
             completion = HermesChatCompletionResponse.model_validate(payload)
+            effective_thread_id = _hermes_thread_id(response.headers.get(HERMES_SESSION_HEADER))
         except (ValueError, ValidationError):
             raise HermesResponseError(operation=operation) from None
-        return completion.choices[0].message.content
+        return HermesChatResult(
+            assistant_content=completion.choices[0].message.content,
+            hermes_thread_id=effective_thread_id,
+        )
 
     def _request(
         self,
@@ -90,9 +103,10 @@ class HermesClient:
         *,
         operation: str,
         json: dict[str, Any],
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         try:
-            response = self._client.request(method, endpoint, json=json)
+            response = self._client.request(method, endpoint, json=json, headers=headers)
         except httpx.TimeoutException:
             raise HermesTimeoutError(operation=operation) from None
         except httpx.RequestError:
@@ -137,3 +151,10 @@ def _api_key(value: object) -> str:
     if any(not 0x21 <= ord(character) <= 0x7E for character in api_key):
         raise HermesAPIKeyError()
     return api_key
+
+
+def _hermes_thread_id(value: object) -> str:
+    thread_id = _required_string(value, "hermes_thread_id")
+    if len(thread_id) > MAX_HERMES_THREAD_ID_LENGTH:
+        raise ValueError("hermes_thread_id is too long")
+    return thread_id

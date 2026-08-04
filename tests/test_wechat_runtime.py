@@ -20,6 +20,7 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
+from cf_agent_gateway.hermes import HermesChatResult
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.runtime import (
@@ -94,13 +95,16 @@ class RecordingClientFactory:
 
 class FakeHermesClient:
     def __init__(self, *, close_error: Exception | None = None) -> None:
-        self.chat_calls: list[str] = []
+        self.chat_calls: list[tuple[str, str | None]] = []
         self.close_calls = 0
         self.close_error = close_error
 
-    def chat(self, content: str) -> str:
-        self.chat_calls.append(content)
-        return "Hermes accepted the message"
+    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
+        self.chat_calls.append((content, hermes_thread_id))
+        return HermesChatResult(
+            assistant_content="Hermes accepted the message",
+            hermes_thread_id="hermes-runtime-thread",
+        )
 
     def close(self) -> None:
         self.close_calls += 1
@@ -457,7 +461,7 @@ def test_runtime_dispatches_allowed_message_to_hermes_without_channel_reply(
 
     assert result.messages_processed == 1
     assert hermes_factory.calls == [("https://hermes.test", HERMES_API_KEY, "hermes-runtime-test")]
-    assert hermes_client.chat_calls == ["send this to Hermes"]
+    assert hermes_client.chat_calls[0][0] == "send this to Hermes"
     assert hermes_client.close_calls == 1
     assert wechat_client.close_calls == 1
 
@@ -466,7 +470,8 @@ def test_runtime_dispatches_allowed_message_to_hermes_without_channel_reply(
         with Session(engine) as session:
             thread = session.scalar(select(AIThread))
             assert thread is not None
-            assert thread.hermes_thread_id is None
+            assert hermes_client.chat_calls[0][1] == f"v1:cf-agent-gateway:{thread.id}"
+            assert thread.hermes_thread_id == "hermes-runtime-thread"
             assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
     finally:
         engine.dispose()

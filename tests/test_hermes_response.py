@@ -15,6 +15,7 @@ from cf_agent_gateway.database import (
     initialize_database,
 )
 from cf_agent_gateway.hermes import (
+    HermesChatResult,
     HermesDeliveryError,
     HermesDispatchOutcome,
     HermesDispatchService,
@@ -61,11 +62,15 @@ class RecordingHermesClient:
         self.error = error
         self.contents: list[str] = []
 
-    def chat(self, content: str) -> str:
+    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
+        del hermes_thread_id
         self.contents.append(content)
         if self.error is not None:
             raise self.error
-        return self.assistant_content
+        return HermesChatResult(
+            assistant_content=self.assistant_content,
+            hermes_thread_id="hermes-response-thread",
+        )
 
 
 class RecordingWechatSender:
@@ -104,13 +109,14 @@ def create_thread(
     *,
     conversation_id: str,
     sender_id: str,
+    conversation_type: str = "private",
 ) -> AIThread:
     return WorkspaceService(session).ensure_thread_for_authorized_request(
         enterprise_identity_id=identity_id,
         platform=SOURCE,
         account_id=SOURCE_ACCOUNT_ID,
         physical_conversation_id=conversation_id,
-        conversation_type="private",
+        conversation_type=conversation_type,
         sender_id=sender_id,
     )
 
@@ -232,6 +238,66 @@ def test_response_relay_connects_dispatch_to_delivery(session: Session) -> None:
     assert response.assistant_content == ASSISTANT_CONTENT
     assert client.contents == [MESSAGE_CONTENT]
     assert sender.messages == [(CONVERSATION_ID, ASSISTANT_CONTENT)]
+
+
+def test_response_relay_delivers_cross_workspace_group_response(session: Session) -> None:
+    identity_service = IdentityService(session)
+    owner = identity_service.create_identity(employee_id="employee-group-owner")
+    participant = identity_service.create_identity(employee_id="employee-group-participant")
+    conversation_id = "operations@chatroom"
+    thread = create_thread(
+        session,
+        owner.id,
+        conversation_id=conversation_id,
+        sender_id="wxid-owner",
+        conversation_type="group",
+    )
+    participant_workspace = WorkspaceService(session).ensure_workspace_for_authorized_identity(
+        participant.id
+    )
+    assert participant_workspace.id != thread.workspace_id
+
+    message, created = MessageStore(session).create(
+        MessageEvent(
+            event_id="wechat:event-group-participant",
+            source=SOURCE,
+            source_account_id=SOURCE_ACCOUNT_ID,
+            source_message_id="server-group-participant",
+            conversation_id=conversation_id,
+            conversation_type="group",
+            is_mentioned=True,
+            is_self=False,
+            sender_type="human",
+            sender_id="wxid-participant",
+            sender_name="Participant",
+            message_type="text",
+            raw_type=1,
+            content=MESSAGE_CONTENT,
+            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
+        )
+    )
+    assert created is True
+    admission = AdmissionOutcome(
+        message_id=message.id,
+        admitted=True,
+        should_create_task=True,
+        reason=AdmissionReason.ALLOWED,
+        enterprise_identity_id=participant.id,
+        workspace_id=participant_workspace.id,
+        ai_thread_id=thread.id,
+    )
+    client = RecordingHermesClient()
+    sender = RecordingWechatSender()
+    relay = HermesResponseRelay(
+        HermesDispatchService(session, client),
+        HermesResponseHandler(session, sender),
+    )
+
+    response = relay.dispatch(admission)
+
+    assert response.workspace_id == participant_workspace.id
+    assert response.ai_thread_id == thread.id
+    assert sender.messages == [(conversation_id, ASSISTANT_CONTENT)]
 
 
 def test_missing_source_binding_rejects_response_without_calling_sender(

@@ -1,6 +1,6 @@
 """Hermes HTTP client boundary."""
 
-from cf_agent_gateway.hermes.client import DEFAULT_TIMEOUT, HermesClient
+from cf_agent_gateway.hermes.client import DEFAULT_TIMEOUT, HERMES_SESSION_HEADER, HermesClient
 from cf_agent_gateway.hermes.errors import (
     HermesAPIError,
     HermesAPIKeyError,
@@ -17,6 +17,7 @@ from cf_agent_gateway.hermes.models import (
     HermesChatCompletionChoice,
     HermesChatCompletionRequest,
     HermesChatCompletionResponse,
+    HermesChatResult,
     HermesDispatchOutcome,
     HermesResponseDeliveryOutcome,
     HermesUserMessage,
@@ -34,9 +35,11 @@ from cf_agent_gateway.hermes.service import (
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "HERMES_SESSION_HEADER",
     "HermesAPIError",
     "HermesAPIKeyError",
     "HermesAssistantMessage",
+    "HermesChatResult",
     "HermesChatClient",
     "HermesChatCompletionChoice",
     "HermesChatCompletionRequest",

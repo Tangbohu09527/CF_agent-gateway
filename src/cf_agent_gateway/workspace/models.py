@@ -65,7 +65,7 @@ class EmployeeWorkspace(Base):
 class AIThread(Base):
     __tablename__ = "ai_threads"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "thread_key", name="uq_ai_thread_workspace_key"),
+        UniqueConstraint("thread_key", name="uq_ai_thread_key"),
         UniqueConstraint("hermes_thread_id", name="uq_ai_thread_hermes_thread_id"),
     )
 
@@ -111,7 +111,6 @@ class ThreadSourceBinding(Base):
             "platform",
             "account_id",
             "physical_conversation_id",
-            "sender_id",
             name="uq_thread_source_fact",
         ),
     )

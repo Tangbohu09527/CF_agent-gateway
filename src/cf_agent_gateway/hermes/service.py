@@ -6,19 +6,22 @@ from sqlalchemy.orm import Session
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
 from cf_agent_gateway.hermes.errors import HermesDispatchError
-from cf_agent_gateway.hermes.models import HermesDispatchOutcome
+from cf_agent_gateway.hermes.models import HermesChatResult, HermesDispatchOutcome
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.workspace.models import (
     AIThread,
     EmployeeWorkspace,
     ThreadStatus,
+    ThreadType,
     WorkspaceStatus,
 )
 from cf_agent_gateway.workspace.store import WorkspaceStore
 
+HERMES_THREAD_NAMESPACE = "v1:cf-agent-gateway"
+
 
 class HermesChatClient(Protocol):
-    def chat(self, content: str) -> str: ...
+    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult: ...
 
 
 class HermesDispatcher(Protocol):
@@ -54,7 +57,7 @@ class HermesDispatchService:
         if thread is None:
             raise HermesDispatchError(reason="ai_thread_not_found")
         self._session.refresh(thread)
-        if thread.workspace_id != workspace_id:
+        if thread.thread_type is ThreadType.PRIVATE and thread.workspace_id != workspace_id:
             raise HermesDispatchError(reason="ai_thread_workspace_mismatch")
         if thread.status is not ThreadStatus.ACTIVE:
             raise HermesDispatchError(reason="ai_thread_unavailable")
@@ -81,12 +84,42 @@ class HermesDispatchService:
         if not message.content:
             raise HermesDispatchError(reason="empty_message_content")
 
-        assistant_content = self._client.chat(message.content)
+        thread = self._workspace_store.get_thread_for_update(ai_thread_id)
+        if thread is None:
+            raise HermesDispatchError(reason="ai_thread_not_found")
+        if thread.thread_type is ThreadType.PRIVATE and thread.workspace_id != workspace_id:
+            raise HermesDispatchError(reason="ai_thread_workspace_mismatch")
+        if thread.status is not ThreadStatus.ACTIVE:
+            raise HermesDispatchError(reason="ai_thread_unavailable")
+        if thread.hermes_thread_id is None:
+            thread = self._workspace_store.claim_hermes_thread(
+                thread,
+                _initial_hermes_thread_id(thread),
+            )
+        requested_hermes_thread_id = _hermes_thread_id_for_dispatch(thread)
+
+        try:
+            result = self._client.chat(
+                message.content,
+                hermes_thread_id=requested_hermes_thread_id,
+            )
+            hermes_thread_advanced = self._workspace_store.advance_hermes_thread(
+                thread,
+                expected_hermes_thread_id=requested_hermes_thread_id,
+                next_hermes_thread_id=result.hermes_thread_id,
+            )
+            if not hermes_thread_advanced:
+                raise HermesDispatchError(reason="hermes_thread_advanced_concurrently")
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+
         return HermesDispatchOutcome(
             message_id=message.id,
             workspace_id=workspace.id,
             ai_thread_id=thread.id,
-            assistant_content=assistant_content,
+            assistant_content=result.assistant_content,
         )
 
     @staticmethod
@@ -98,3 +131,13 @@ class HermesDispatchService:
         if admission.workspace_id is None or admission.ai_thread_id is None:
             raise HermesDispatchError(reason="dispatch_target_missing")
         return admission.workspace_id, admission.ai_thread_id
+
+
+def _hermes_thread_id_for_dispatch(thread: AIThread) -> str:
+    if thread.hermes_thread_id is not None:
+        return thread.hermes_thread_id
+    return _initial_hermes_thread_id(thread)
+
+
+def _initial_hermes_thread_id(thread: AIThread) -> str:
+    return f"{HERMES_THREAD_NAMESPACE}:{thread.id}"
