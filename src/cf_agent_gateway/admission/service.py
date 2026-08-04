@@ -12,7 +12,7 @@ SYSTEM_MESSAGE_TYPE = "system"
 
 
 class AdmissionOrchestrator:
-    """Authorize source-message facts before resolving workspace state."""
+    """Authorize the sender before binding the conversation as thread context."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -38,9 +38,6 @@ class AdmissionOrchestrator:
         )
         conversation = access_policy_service.resolve_conversation_facts(
             conversation_type=candidate.conversation_type,
-            source=candidate.source,
-            source_account_id=candidate.source_account_id,
-            conversation_id=candidate.conversation_id,
             is_mentioned=candidate.is_mentioned,
         )
         gateway_policy = access_policy_service.resolve_gateway_policy_facts()

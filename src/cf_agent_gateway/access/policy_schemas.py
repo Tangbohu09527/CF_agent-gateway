@@ -57,12 +57,6 @@ class UserAccessPolicyUpsert(TimeBoundPolicySchema):
     enterprise_identity_id: str = Field(min_length=1, max_length=36)
 
 
-class GroupAccessPolicyUpsert(TimeBoundPolicySchema):
-    source: str = Field(min_length=1, max_length=64)
-    source_account_id: str = Field(min_length=1, max_length=255)
-    conversation_id: str = Field(min_length=1, max_length=255)
-
-
 class GatewayAccessPolicyUpsert(AccessPolicySchema):
     policy_key: Literal["default"] = DEFAULT_GATEWAY_POLICY_KEY
     permission_scope: frozenset[PolicyValue] = Field(default_factory=frozenset)

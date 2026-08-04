@@ -32,7 +32,6 @@ def identity_facts(**overrides: object) -> IdentityFacts:
 def private_conversation(**overrides: object) -> ConversationFacts:
     values = {
         "conversation_type": ConversationType.PRIVATE,
-        "group_allowed": None,
         "is_mentioned": None,
     }
     values.update(overrides)
@@ -42,10 +41,7 @@ def private_conversation(**overrides: object) -> ConversationFacts:
 def group_conversation(**overrides: object) -> ConversationFacts:
     values = {
         "conversation_type": ConversationType.GROUP,
-        "group_allowed": True,
         "is_mentioned": True,
-        "group_permission_scope": frozenset({"messages:read", "messages:write"}),
-        "group_allowed_skills": frozenset({"search", "summarize"}),
     }
     values.update(overrides)
     return ConversationFacts(**values)  # type: ignore[arg-type]
@@ -101,27 +97,11 @@ def test_private_conversation_does_not_require_mention() -> None:
     assert decision.is_mentioned is None
 
 
-@pytest.mark.parametrize(
-    ("overrides", "reason_code"),
-    [
-        ({"group_allowed": True}, ReasonCode.INVALID_CONVERSATION_FACTS),
-        ({"is_mentioned": False}, ReasonCode.INVALID_CONVERSATION_FACTS),
-        (
-            {"group_permission_scope": frozenset({"messages:read"})},
-            ReasonCode.INVALID_CONVERSATION_FACTS,
-        ),
-        (
-            {"group_allowed_skills": frozenset({"search"})},
-            ReasonCode.INVALID_CONVERSATION_FACTS,
-        ),
-    ],
-)
-def test_private_conversation_rejects_group_facts(
-    overrides: dict[str, object], reason_code: ReasonCode
-) -> None:
-    decision = evaluate(conversation=private_conversation(**overrides))
+@pytest.mark.parametrize("is_mentioned", [False, True])
+def test_private_conversation_rejects_mention_fact(is_mentioned: bool) -> None:
+    decision = evaluate(conversation=private_conversation(is_mentioned=is_mentioned))
 
-    assert decision.reason_code is reason_code
+    assert decision.reason_code is ReasonCode.INVALID_CONVERSATION_FACTS
 
 
 def test_non_allowlisted_private_identity_is_denied() -> None:
@@ -151,25 +131,33 @@ def test_inactive_identity_is_denied(status: IdentityStatus) -> None:
     assert decision.reason_code is ReasonCode.IDENTITY_DISABLED
 
 
-def test_enabled_mentioned_group_allows_allowlisted_identity() -> None:
+def test_mentioned_group_allows_authorized_identity() -> None:
     decision = evaluate(conversation=group_conversation())
 
     assert decision.allowed is True
 
 
-@pytest.mark.parametrize("group_allowed", [False, None])
-def test_group_must_be_explicitly_allowed(group_allowed: bool | None) -> None:
-    decision = evaluate(conversation=group_conversation(group_allowed=group_allowed))
-
-    assert decision.reason_code is ReasonCode.GROUP_NOT_ALLOWED
-
-
-def test_group_user_must_be_allowlisted() -> None:
-    decision = evaluate(
-        identity=identity_facts(user_allowed=False), conversation=group_conversation()
+def test_same_group_authorizes_each_sender_identity_independently() -> None:
+    conversation = group_conversation()
+    authorized = evaluate(
+        identity=identity_facts(enterprise_identity_id="employee-a"),
+        conversation=conversation,
+    )
+    unauthorized = evaluate(
+        identity=identity_facts(
+            enterprise_identity_id="customer-b",
+            user_allowed=False,
+            user_permission_scope=frozenset(),
+            user_allowed_skills=frozenset(),
+        ),
+        conversation=conversation,
     )
 
-    assert decision.reason_code is ReasonCode.USER_NOT_ALLOWED
+    assert authorized.allowed is True
+    assert authorized.enterprise_identity_id == "employee-a"
+    assert unauthorized.allowed is False
+    assert unauthorized.enterprise_identity_id == "customer-b"
+    assert unauthorized.reason_code is ReasonCode.USER_NOT_ALLOWED
 
 
 @pytest.mark.parametrize("is_mentioned", [False, None])
@@ -196,40 +184,39 @@ def test_authorization_models_exclude_message_content_and_identity_labels() -> N
             "quoted_message_id",
         }
     )
+    assert {field.name for field in fields(ConversationFacts)} == {
+        "conversation_type",
+        "is_mentioned",
+    }
 
 
 def test_reply_quote_and_nickname_cannot_be_authorization_inputs() -> None:
     with pytest.raises(TypeError):
         ConversationFacts(  # type: ignore[call-arg]
             conversation_type=ConversationType.GROUP,
-            group_allowed=True,
             is_mentioned=False,
             reply_to_message_id="message-1",
         )
 
 
-def test_group_permissions_only_narrow_user_permissions() -> None:
+@pytest.mark.parametrize("conversation", [private_conversation(), group_conversation()])
+def test_user_and_gateway_permissions_are_intersected(
+    conversation: ConversationFacts,
+) -> None:
     decision = evaluate(
         identity=identity_facts(
-            user_permission_scope=frozenset({"messages:read", "messages:write"})
+            user_permission_scope=frozenset({"messages:read", "messages:write", "user-only"}),
+            user_allowed_skills=frozenset({"search", "summarize", "user-only"}),
         ),
-        conversation=group_conversation(
-            group_permission_scope=frozenset({"messages:read", "admin"})
+        conversation=conversation,
+        policy=policy_facts(
+            system_permission_scope=frozenset({"messages:write", "admin"}),
+            system_allowed_skills=frozenset({"summarize", "admin"}),
         ),
-    )
-
-    assert decision.permission_scope == frozenset({"messages:read"})
-
-
-def test_system_permissions_only_narrow_user_and_group_permissions() -> None:
-    decision = evaluate(
-        conversation=group_conversation(
-            group_permission_scope=frozenset({"messages:read", "messages:write", "admin"})
-        ),
-        policy=policy_facts(system_permission_scope=frozenset({"messages:write", "admin"})),
     )
 
     assert decision.permission_scope == frozenset({"messages:write"})
+    assert decision.allowed_skills == frozenset({"summarize"})
 
 
 def test_nonempty_requested_scope_with_empty_intersection_is_denied() -> None:
@@ -270,7 +257,7 @@ def test_risk_level_must_be_allowed_by_system_policy() -> None:
     "decision",
     [
         evaluate(identity=identity_facts(identity_resolved=False)),
-        evaluate(conversation=group_conversation(group_allowed=False)),
+        evaluate(conversation=group_conversation(is_mentioned=False)),
         evaluate(request=request_facts(requested_scope=frozenset({"admin"}))),
     ],
 )
@@ -314,7 +301,7 @@ def test_inputs_are_immutable_snapshots_and_not_modified() -> None:
 def test_invalid_conversation_type_has_highest_priority() -> None:
     decision = evaluate(
         identity=identity_facts(identity_resolved=False),
-        conversation=ConversationFacts(conversation_type="channel", group_allowed=True),
+        conversation=ConversationFacts(conversation_type="channel"),
     )
 
     assert decision.reason_code is ReasonCode.INVALID_CONVERSATION_TYPE
@@ -323,7 +310,7 @@ def test_invalid_conversation_type_has_highest_priority() -> None:
 def test_denial_precedence_is_stable() -> None:
     decision = evaluate(
         identity=identity_facts(user_allowed=False),
-        conversation=group_conversation(group_allowed=False, is_mentioned=False),
+        conversation=group_conversation(is_mentioned=False),
         request=request_facts(risk_level=RiskLevel.CRITICAL),
     )
 

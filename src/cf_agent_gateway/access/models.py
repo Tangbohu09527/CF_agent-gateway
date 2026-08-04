@@ -37,19 +37,10 @@ class IdentityFacts:
 
 @dataclass(frozen=True, slots=True)
 class ConversationFacts:
-    conversation_type: ConversationType | str
-    group_allowed: bool | None = None
-    is_mentioned: bool | None = None
-    group_permission_scope: frozenset[str] = field(default_factory=frozenset)
-    group_allowed_skills: frozenset[str] = field(default_factory=frozenset)
+    """Carry conversation shape for context routing, never caller permission."""
 
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "group_permission_scope", _immutable_strings(self.group_permission_scope)
-        )
-        object.__setattr__(
-            self, "group_allowed_skills", _immutable_strings(self.group_allowed_skills)
-        )
+    conversation_type: ConversationType | str
+    is_mentioned: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +84,6 @@ class AuthorizationDecision:
     reason_code: ReasonCode
     enterprise_identity_id: str | None
     user_allowed: bool
-    group_allowed: bool | None
     is_mentioned: bool | None
     permission_scope: frozenset[str]
     allowed_skills: frozenset[str]
@@ -114,7 +104,6 @@ class AuthorizationDecision:
             "reason_code": self.reason_code.value,
             "enterprise_identity_id": self.enterprise_identity_id,
             "user_allowed": self.user_allowed,
-            "group_allowed": self.group_allowed,
             "is_mentioned": self.is_mentioned,
             "permission_scope": sorted(self.permission_scope),
             "allowed_skills": sorted(self.allowed_skills),

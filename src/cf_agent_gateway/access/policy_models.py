@@ -80,36 +80,6 @@ class UserAccessPolicy(Base):
     )
 
 
-class GroupAccessPolicy(Base):
-    __tablename__ = "group_access_policies"
-    __table_args__ = (
-        UniqueConstraint(
-            "source",
-            "source_account_id",
-            "conversation_id",
-            name="uq_group_access_policy_source_account_conversation",
-        ),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    source: Mapped[str] = mapped_column(String(64))
-    source_account_id: Mapped[str] = mapped_column(String(255))
-    conversation_id: Mapped[str] = mapped_column(String(255))
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
-    permission_scope: Mapped[frozenset[str]] = mapped_column(
-        SortedStringSet(), default=frozenset, nullable=False
-    )
-    allowed_skills: Mapped[frozenset[str]] = mapped_column(
-        SortedStringSet(), default=frozenset, nullable=False
-    )
-    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-
 class GatewayAccessPolicy(Base):
     __tablename__ = "gateway_access_policies"
     __table_args__ = (

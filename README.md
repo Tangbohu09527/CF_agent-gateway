@@ -70,6 +70,11 @@ request/response path are implemented:
 - `GET /health`
 - Container build and Compose service
 
+Conversation determines context; sender identity determines permission. Admission resolves
+each human message's `sender_id` to an Identity and evaluates its User Access Policy with
+the Gateway Policy. A group conversation adds only the requirement for an explicit
+structured bot mention; the group itself does not grant permission to call AI.
+
 The runtime saves self-originated, system, and unauthorized messages without dispatching
 them. It does not automatically create identity mappings, allowlists, or access policies.
 The response relay implements the existing dispatcher protocol, and its handler verifies

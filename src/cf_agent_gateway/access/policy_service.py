@@ -15,16 +15,13 @@ from cf_agent_gateway.access.models import (
     GatewayPolicyFacts,
     IdentityFacts,
 )
-from cf_agent_gateway.access.policy_errors import GroupPolicyKeyRequiredError
 from cf_agent_gateway.access.policy_models import (
     DEFAULT_GATEWAY_POLICY_KEY,
     GatewayAccessPolicy,
-    GroupAccessPolicy,
     UserAccessPolicy,
 )
 from cf_agent_gateway.access.policy_schemas import (
     GatewayAccessPolicyUpsert,
-    GroupAccessPolicyUpsert,
     UserAccessPolicyUpsert,
 )
 from cf_agent_gateway.access.policy_store import AccessPolicyStore
@@ -67,33 +64,6 @@ class AccessPolicyService:
         return policy
 
     set_user_policy = upsert_user_policy
-
-    def upsert_group_policy(
-        self,
-        *,
-        source: str,
-        source_account_id: str,
-        conversation_id: str,
-        enabled: bool = True,
-        permission_scope: Iterable[str] = (),
-        allowed_skills: Iterable[str] = (),
-        valid_from: datetime | None = None,
-        valid_until: datetime | None = None,
-    ) -> GroupAccessPolicy:
-        data = GroupAccessPolicyUpsert(
-            source=source,
-            source_account_id=source_account_id,
-            conversation_id=conversation_id,
-            enabled=enabled,
-            permission_scope=permission_scope,
-            allowed_skills=allowed_skills,
-            valid_from=valid_from,
-            valid_until=valid_until,
-        )
-        policy, _ = self._store.upsert_group_policy(**data.model_dump())
-        return policy
-
-    set_group_policy = upsert_group_policy
 
     def upsert_gateway_policy(
         self,
@@ -213,46 +183,12 @@ class AccessPolicyService:
         self,
         *,
         conversation_type: ConversationType | str,
-        source: str | None = None,
-        source_account_id: str | None = None,
-        conversation_id: str | None = None,
         is_mentioned: bool | None = None,
-        at: datetime | None = None,
     ) -> ConversationFacts:
         normalized_type = ConversationType(conversation_type)
         if normalized_type is ConversationType.PRIVATE:
             return ConversationFacts(conversation_type=normalized_type)
-        if source is None or source_account_id is None or conversation_id is None:
-            raise GroupPolicyKeyRequiredError
-
-        key = GroupAccessPolicyUpsert(
-            source=source,
-            source_account_id=source_account_id,
-            conversation_id=conversation_id,
-        )
-        policy = self._store.get_group_policy(
-            source=key.source,
-            source_account_id=key.source_account_id,
-            conversation_id=key.conversation_id,
-        )
-        if policy is None or not _is_active_policy(
-            enabled=policy.enabled,
-            valid_from=policy.valid_from,
-            valid_until=policy.valid_until,
-            at=at,
-        ):
-            return ConversationFacts(
-                conversation_type=normalized_type,
-                group_allowed=False,
-                is_mentioned=is_mentioned,
-            )
-        return ConversationFacts(
-            conversation_type=normalized_type,
-            group_allowed=True,
-            is_mentioned=is_mentioned,
-            group_permission_scope=policy.permission_scope,
-            group_allowed_skills=policy.allowed_skills,
-        )
+        return ConversationFacts(conversation_type=normalized_type, is_mentioned=is_mentioned)
 
     def resolve_gateway_policy_facts(
         self,

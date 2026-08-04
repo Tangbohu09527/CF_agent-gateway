@@ -32,7 +32,6 @@ class ReasonCode(StrEnum):
     IDENTITY_UNRESOLVED = "identity_unresolved"
     IDENTITY_DISABLED = "identity_disabled"
     USER_NOT_ALLOWED = "user_not_allowed"
-    GROUP_NOT_ALLOWED = "group_not_allowed"
     BOT_NOT_MENTIONED = "bot_not_mentioned"
     RISK_NOT_ALLOWED = "risk_not_allowed"
     PERMISSION_SCOPE_EMPTY = "permission_scope_empty"

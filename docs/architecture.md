@@ -25,7 +25,10 @@ The implemented WeChat polling path is:
    Store commits the message before admission, with idempotency by both `event_id` and
    physical source-message identity.
 6. Self-originated and system messages remain stored and stop before identity mapping.
-   Other messages pass through identity resolution and access policy evaluation.
+   Other messages resolve `sender_id` to an Identity, then evaluate its User Access Policy
+   together with the Gateway Policy. Conversation determines context; sender identity
+   determines permission. A group conversation adds only the requirement for an explicit
+   structured bot mention and is not itself an authorization subject.
 7. Unauthorized messages remain stored without a Workspace or AIThread. Authorized
    messages create or reuse an employee Workspace, then resolve one AIThread for the
    source account and physical conversation. A group uses one thread for the whole room,

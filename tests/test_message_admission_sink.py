@@ -125,20 +125,6 @@ def allow_gateway(session: Session) -> None:
     )
 
 
-def allow_group(
-    session: Session,
-    *,
-    conversation_id: str = GROUP_CONVERSATION_ID,
-    enabled: bool = True,
-) -> None:
-    AccessPolicyService(session).upsert_group_policy(
-        source="wechat",
-        source_account_id=SOURCE_ACCOUNT_ID,
-        conversation_id=conversation_id,
-        enabled=enabled,
-    )
-
-
 def assert_resource_counts(
     session: Session, *, messages: int, workspaces: int, threads: int
 ) -> None:
@@ -190,11 +176,10 @@ def test_allowlisted_private_message_is_persisted_then_admitted(session: Session
         outcome.message_created = False  # type: ignore[misc]
 
 
-def test_enabled_allowlisted_mentioned_group_is_persisted_then_admitted(
+def test_authorized_contact_mentioning_bot_in_group_is_persisted_then_admitted(
     session: Session,
 ) -> None:
     provision_sender(session)
-    allow_group(session)
     allow_gateway(session)
 
     outcome = MessageAdmissionService(session).process(group_message())
@@ -206,34 +191,18 @@ def test_enabled_allowlisted_mentioned_group_is_persisted_then_admitted(
     assert outcome.workspace_id is not None
     assert outcome.ai_thread_id is not None
     assert outcome.admission.authorization is not None
-    assert outcome.admission.authorization.group_allowed is True
     assert outcome.admission.authorization.is_mentioned is True
     assert_resource_counts(session, messages=1, workspaces=1, threads=1)
 
 
 def test_group_without_mention_is_saved_without_workspace(session: Session) -> None:
     provision_sender(session)
-    allow_group(session)
     allow_gateway(session)
 
     outcome = MessageAdmissionService(session).process(group_message(is_mentioned=False))
 
     persisted = assert_access_denied(session, outcome, ReasonCode.BOT_NOT_MENTIONED)
     assert persisted.is_mentioned is False
-
-
-@pytest.mark.parametrize("create_disabled_policy", [False, True])
-def test_group_without_enabled_policy_is_saved_without_workspace(
-    session: Session, create_disabled_policy: bool
-) -> None:
-    provision_sender(session)
-    if create_disabled_policy:
-        allow_group(session, enabled=False)
-    allow_gateway(session)
-
-    outcome = MessageAdmissionService(session).process(group_message())
-
-    assert_access_denied(session, outcome, ReasonCode.GROUP_NOT_ALLOWED)
 
 
 def test_non_allowlisted_message_is_saved_without_workspace(session: Session) -> None:
@@ -322,78 +291,6 @@ def test_duplicate_allowed_message_reuses_workspace_and_ai_thread(session: Sessi
     assert second.workspace_id == first.workspace_id
     assert second.ai_thread_id == first.ai_thread_id
     assert_resource_counts(session, messages=1, workspaces=1, threads=1)
-
-
-def test_distinct_private_messages_in_same_chat_reuse_ai_thread(session: Session) -> None:
-    provision_sender(session)
-    allow_gateway(session)
-    service = MessageAdmissionService(session)
-
-    first = service.process(normalized_message())
-    second = service.process(
-        normalized_message(
-            event_id="wechat:event-002",
-            source_message_id="server-002",
-            source_local_id="local-002",
-            source_server_id="server-002",
-            content="and list the breaking changes",
-            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
-        )
-    )
-
-    assert first.message_id != second.message_id
-    assert first.ai_thread_id == second.ai_thread_id
-    assert_resource_counts(session, messages=2, workspaces=1, threads=1)
-
-
-def test_different_private_chats_use_different_ai_threads(session: Session) -> None:
-    provision_sender(session)
-    provision_sender(session, sender_id="wxid-bob")
-    allow_gateway(session)
-    service = MessageAdmissionService(session)
-
-    first = service.process(normalized_message())
-    second = service.process(
-        normalized_message(
-            event_id="wechat:event-002",
-            source_message_id="server-002",
-            source_local_id="local-002",
-            source_server_id="server-002",
-            conversation_id="wxid-bob",
-            conversation_name="Bob",
-            sender_id="wxid-bob",
-            sender_name="Bob",
-            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
-        )
-    )
-
-    assert first.ai_thread_id != second.ai_thread_id
-    assert_resource_counts(session, messages=2, workspaces=2, threads=2)
-
-
-def test_different_group_chats_use_different_ai_threads(session: Session) -> None:
-    other_group_id = "operations@chatroom"
-    provision_sender(session)
-    allow_group(session)
-    allow_group(session, conversation_id=other_group_id)
-    allow_gateway(session)
-    service = MessageAdmissionService(session)
-
-    first = service.process(group_message())
-    second = service.process(
-        group_message(
-            event_id="wechat:event-002",
-            source_message_id="server-002",
-            source_local_id="local-002",
-            source_server_id="server-002",
-            conversation_id=other_group_id,
-            conversation_name="Operations",
-            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
-        )
-    )
-
-    assert first.ai_thread_id != second.ai_thread_id
-    assert_resource_counts(session, messages=2, workspaces=1, threads=2)
 
 
 class _AdmissionFailure(RuntimeError):
@@ -705,7 +602,6 @@ def test_resolver_and_identity_map_cannot_override_persisted_source_facts(
     session: Session,
 ) -> None:
     provision_sender(session)
-    allow_group(session)
     allow_gateway(session)
     message = group_message(is_mentioned=False)
     first = MessageAdmissionService(session).process(message)
@@ -843,7 +739,7 @@ def test_candidate_and_database_ignore_resolver_snapshot_mutations(session: Sess
     assert persisted.message_type == "text"
 
 
-def test_different_employees_in_same_group_reuse_ai_thread(session: Session) -> None:
+def test_different_employees_in_same_group_get_distinct_ai_threads(session: Session) -> None:
     first_identity = provision_sender(
         session,
         sender_id="wxid-alice",
@@ -854,7 +750,6 @@ def test_different_employees_in_same_group_reuse_ai_thread(session: Session) -> 
         sender_id="wxid-bob",
         employee_id="employee-bob",
     )
-    allow_group(session)
     allow_gateway(session)
     service = MessageAdmissionService(session)
 
@@ -874,8 +769,48 @@ def test_different_employees_in_same_group_reuse_ai_thread(session: Session) -> 
     assert first.admission.enterprise_identity_id == first_identity.id
     assert second.admission.enterprise_identity_id == second_identity.id
     assert first.workspace_id != second.workspace_id
-    assert first.ai_thread_id == second.ai_thread_id
-    assert_resource_counts(session, messages=2, workspaces=2, threads=1)
+    assert first.ai_thread_id != second.ai_thread_id
+    assert_resource_counts(session, messages=2, workspaces=2, threads=2)
+
+
+def test_same_group_applies_contact_policy_to_each_sender(session: Session) -> None:
+    authorized_identity = provision_sender(
+        session,
+        sender_id="wxid-alice",
+        employee_id="employee-alice",
+    )
+    unauthorized_identity = provision_sender(
+        session,
+        sender_id="wxid-bob",
+        employee_id="employee-bob",
+        create_user_policy=False,
+    )
+    allow_gateway(session)
+    service = MessageAdmissionService(session)
+
+    allowed = service.process(group_message())
+    denied = service.process(
+        group_message(
+            event_id="wechat:event-002",
+            source_message_id="server-002",
+            source_local_id="local-002",
+            source_server_id="server-002",
+            sender_id="wxid-bob",
+            sender_name="Bob",
+            timestamp=datetime(2026, 8, 1, 10, 16, tzinfo=UTC),
+        )
+    )
+
+    assert allowed.admission.admitted is True
+    assert allowed.admission.enterprise_identity_id == authorized_identity.id
+    assert denied.admission.admitted is False
+    assert denied.admission.authorization is not None
+    assert denied.admission.authorization.enterprise_identity_id == unauthorized_identity.id
+    assert denied.admission.authorization.reason_code is ReasonCode.USER_NOT_ALLOWED
+    assert denied.should_create_task is False
+    assert denied.workspace_id is None
+    assert denied.ai_thread_id is None
+    assert_resource_counts(session, messages=2, workspaces=1, threads=1)
 
 
 def test_private_message_does_not_require_mention(session: Session) -> None:

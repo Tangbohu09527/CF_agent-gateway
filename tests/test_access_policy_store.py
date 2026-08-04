@@ -15,7 +15,6 @@ from cf_agent_gateway.access import (
     AccessPolicyStore,
     ConversationType,
     GatewayAccessPolicy,
-    GroupAccessPolicy,
     IdentityStatus,
     InvalidGatewayPolicyKeyError,
     RequestFacts,
@@ -240,129 +239,6 @@ def test_store_normalizes_offset_policy_times_before_sqlite_round_trip(
         assert facts.user_allowed is False
 
 
-def test_create_group_policy_and_resolve_facts(
-    session_factory_fixture: sessionmaker[Session],
-) -> None:
-    with session_factory_fixture() as session:
-        service = AccessPolicyService(session)
-        policy = service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            permission_scope={"messages:read"},
-            allowed_skills={"search"},
-        )
-
-        facts = service.resolve_conversation_facts(
-            conversation_type=ConversationType.GROUP,
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            is_mentioned=True,
-            at=AT,
-        )
-
-        assert policy.id
-        assert facts.group_allowed is True
-        assert facts.is_mentioned is True
-        assert facts.group_permission_scope == frozenset({"messages:read"})
-        assert facts.group_allowed_skills == frozenset({"search"})
-
-
-@pytest.mark.parametrize("create_disabled_policy", [False, True])
-def test_missing_or_disabled_group_resolves_group_allowed_false(
-    session_factory_fixture: sessionmaker[Session],
-    create_disabled_policy: bool,
-) -> None:
-    with session_factory_fixture() as session:
-        service = AccessPolicyService(session)
-        if create_disabled_policy:
-            service.upsert_group_policy(
-                source="wechat",
-                source_account_id="bot-001",
-                conversation_id="group-001",
-                enabled=False,
-                permission_scope={"messages:read"},
-            )
-
-        facts = service.resolve_conversation_facts(
-            conversation_type=ConversationType.GROUP,
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            is_mentioned=True,
-            at=AT,
-        )
-
-        assert facts.group_allowed is False
-        assert facts.group_permission_scope == frozenset()
-
-
-def test_expired_group_policy_resolves_group_allowed_false(
-    session_factory_fixture: sessionmaker[Session],
-) -> None:
-    with session_factory_fixture() as session:
-        service = AccessPolicyService(session)
-        service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            permission_scope={"messages:read"},
-            valid_until=AT - timedelta(seconds=1),
-        )
-
-        facts = service.resolve_conversation_facts(
-            conversation_type=ConversationType.GROUP,
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            is_mentioned=True,
-            at=AT,
-        )
-
-        assert facts.group_allowed is False
-        assert facts.group_permission_scope == frozenset()
-
-
-def test_same_group_id_is_isolated_by_source_account(
-    session_factory_fixture: sessionmaker[Session],
-) -> None:
-    with session_factory_fixture() as session:
-        service = AccessPolicyService(session)
-        service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="shared-group",
-            permission_scope={"messages:read"},
-        )
-        service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-002",
-            conversation_id="shared-group",
-            permission_scope={"messages:write"},
-        )
-
-        first = service.resolve_conversation_facts(
-            conversation_type=ConversationType.GROUP,
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="shared-group",
-            is_mentioned=True,
-            at=AT,
-        )
-        second = service.resolve_conversation_facts(
-            conversation_type=ConversationType.GROUP,
-            source="wechat",
-            source_account_id="bot-002",
-            conversation_id="shared-group",
-            is_mentioned=True,
-            at=AT,
-        )
-
-        assert first.group_permission_scope == frozenset({"messages:read"})
-        assert second.group_permission_scope == frozenset({"messages:write"})
-
-
 def test_default_gateway_policy_generates_stable_facts(
     session_factory_fixture: sessionmaker[Session],
 ) -> None:
@@ -411,13 +287,6 @@ def test_json_collections_round_trip_as_frozensets_and_sorted_arrays(
             permission_scope={"zeta", "alpha"},
             allowed_skills={"skill-z", "skill-a"},
         )
-        service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            permission_scope={"zeta", "alpha"},
-            allowed_skills={"skill-z", "skill-a"},
-        )
         service.upsert_gateway_policy(
             permission_scope={"zeta", "alpha"},
             allowed_skills={"skill-z", "skill-a"},
@@ -440,22 +309,16 @@ def test_json_collections_round_trip_as_frozensets_and_sorted_arrays(
         store = AccessPolicyStore(session)
 
         user = store.get_user_policy(identity_id)
-        group = store.get_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-        )
         gateway = store.get_gateway_policy()
 
         assert json.loads(raw_user.permission_scope) == ["alpha", "zeta"]
         assert json.loads(raw_user.allowed_skills) == ["skill-a", "skill-z"]
         assert json.loads(raw_gateway_risks) == ["low", "normal"]
         assert user is not None and isinstance(user.permission_scope, frozenset)
-        assert group is not None and isinstance(group.allowed_skills, frozenset)
         assert gateway is not None and isinstance(gateway.allowed_risk_levels, frozenset)
 
 
-def test_persisted_group_and_gateway_policies_cannot_expand_user_permissions(
+def test_persisted_user_and_gateway_policies_only_allow_their_intersection(
     session_factory_fixture: sessionmaker[Session],
 ) -> None:
     with session_factory_fixture() as session:
@@ -463,19 +326,12 @@ def test_persisted_group_and_gateway_policies_cannot_expand_user_permissions(
         service = AccessPolicyService(session)
         service.upsert_user_policy(
             enterprise_identity_id=identity_id,
-            permission_scope={"messages:read"},
-            allowed_skills={"search"},
-        )
-        service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="group-001",
-            permission_scope={"messages:read", "admin"},
-            allowed_skills={"search", "admin"},
+            permission_scope={"messages:read", "user-only"},
+            allowed_skills={"search", "user-only"},
         )
         service.upsert_gateway_policy(
-            permission_scope={"messages:read", "admin"},
-            allowed_skills={"search", "admin"},
+            permission_scope={"messages:read", "gateway-only"},
+            allowed_skills={"search", "gateway-only"},
             allowed_risk_levels={RiskLevel.NORMAL},
         )
 
@@ -483,11 +339,7 @@ def test_persisted_group_and_gateway_policies_cannot_expand_user_permissions(
             service.resolve_identity_facts(identity_id, at=AT),
             service.resolve_conversation_facts(
                 conversation_type=ConversationType.GROUP,
-                source="wechat",
-                source_account_id="bot-001",
-                conversation_id="group-001",
                 is_mentioned=True,
-                at=AT,
             ),
             RequestFacts(
                 requested_scope=frozenset(),
@@ -507,52 +359,31 @@ def test_mention_is_only_the_structured_adapter_fact(
 ) -> None:
     with session_factory_fixture() as session:
         service = AccessPolicyService(session)
-        service.upsert_group_policy(
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="text-containing-@bot",
-        )
 
         facts = service.resolve_conversation_facts(
             conversation_type=ConversationType.GROUP,
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="text-containing-@bot",
             is_mentioned=False,
-            at=AT,
         )
         parameters = inspect.signature(service.resolve_conversation_facts).parameters
 
-        assert facts.group_allowed is True
+        assert facts.conversation_type is ConversationType.GROUP
         assert facts.is_mentioned is False
-        assert {"display_name", "message_content", "raw_text"}.isdisjoint(parameters)
-        assert "is_mentioned" not in GroupAccessPolicy.__table__.columns
+        assert set(parameters) == {"conversation_type", "is_mentioned"}
 
 
-def test_private_conversation_does_not_read_group_policy(
-    session_factory_fixture: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+def test_private_conversation_discards_mention_state(
+    session_factory_fixture: sessionmaker[Session],
 ) -> None:
     with session_factory_fixture() as session:
         service = AccessPolicyService(session)
 
-        def fail_group_lookup(**_: str) -> GroupAccessPolicy | None:
-            raise AssertionError("private conversations must not query group policies")
-
-        monkeypatch.setattr(service._store, "get_group_policy", fail_group_lookup)
-
         facts = service.resolve_conversation_facts(
             conversation_type=ConversationType.PRIVATE,
-            source="wechat",
-            source_account_id="bot-001",
-            conversation_id="private-001",
             is_mentioned=True,
-            at=AT,
         )
 
         assert facts.conversation_type is ConversationType.PRIVATE
-        assert facts.group_allowed is None
         assert facts.is_mentioned is None
-        assert facts.group_permission_scope == frozenset()
 
 
 def test_source_identity_resolution_combines_mapping_and_user_policy(

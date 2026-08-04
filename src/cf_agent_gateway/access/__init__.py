@@ -17,14 +17,12 @@ from cf_agent_gateway.access.models import (
 )
 from cf_agent_gateway.access.policy_errors import (
     AccessPolicyError,
-    GroupPolicyKeyRequiredError,
     InvalidGatewayPolicyKeyError,
     InvalidPolicyWindowError,
 )
 from cf_agent_gateway.access.policy_models import (
     DEFAULT_GATEWAY_POLICY_KEY,
     GatewayAccessPolicy,
-    GroupAccessPolicy,
     UserAccessPolicy,
 )
 from cf_agent_gateway.access.policy_service import AccessPolicyService
@@ -41,8 +39,6 @@ __all__ = [
     "DEFAULT_GATEWAY_POLICY_KEY",
     "GatewayAccessPolicy",
     "GatewayPolicyFacts",
-    "GroupAccessPolicy",
-    "GroupPolicyKeyRequiredError",
     "IdentityFacts",
     "IdentityStatus",
     "InvalidGatewayPolicyKeyError",

@@ -13,7 +13,6 @@ from cf_agent_gateway.access.policy_errors import InvalidGatewayPolicyKeyError
 from cf_agent_gateway.access.policy_models import (
     DEFAULT_GATEWAY_POLICY_KEY,
     GatewayAccessPolicy,
-    GroupAccessPolicy,
     UserAccessPolicy,
 )
 
@@ -78,71 +77,6 @@ class AccessPolicyStore:
     def get_user_policy(self, enterprise_identity_id: str) -> UserAccessPolicy | None:
         statement = select(UserAccessPolicy).where(
             UserAccessPolicy.enterprise_identity_id == enterprise_identity_id
-        )
-        return self._session.scalar(statement)
-
-    def upsert_group_policy(
-        self,
-        *,
-        source: str,
-        source_account_id: str,
-        conversation_id: str,
-        enabled: bool = True,
-        permission_scope: Iterable[str] = (),
-        allowed_skills: Iterable[str] = (),
-        valid_from: datetime | None = None,
-        valid_until: datetime | None = None,
-    ) -> tuple[GroupAccessPolicy, bool]:
-        values = {
-            "enabled": enabled,
-            "permission_scope": _string_set(permission_scope),
-            "allowed_skills": _string_set(allowed_skills),
-            "valid_from": _utc_datetime(valid_from),
-            "valid_until": _utc_datetime(valid_until),
-        }
-        existing = self.get_group_policy(
-            source=source,
-            source_account_id=source_account_id,
-            conversation_id=conversation_id,
-        )
-        if existing is not None:
-            self._update(existing, values)
-            return existing, False
-
-        policy = GroupAccessPolicy(
-            id=str(uuid4()),
-            source=source,
-            source_account_id=source_account_id,
-            conversation_id=conversation_id,
-            **values,
-        )
-        self._session.add(policy)
-        try:
-            self._session.commit()
-        except IntegrityError:
-            self._session.rollback()
-            existing = self.get_group_policy(
-                source=source,
-                source_account_id=source_account_id,
-                conversation_id=conversation_id,
-            )
-            if existing is None:
-                raise
-            self._update(existing, values)
-            return existing, False
-        return policy, True
-
-    def get_group_policy(
-        self,
-        *,
-        source: str,
-        source_account_id: str,
-        conversation_id: str,
-    ) -> GroupAccessPolicy | None:
-        statement = select(GroupAccessPolicy).where(
-            GroupAccessPolicy.source == source,
-            GroupAccessPolicy.source_account_id == source_account_id,
-            GroupAccessPolicy.conversation_id == conversation_id,
         )
         return self._session.scalar(statement)
 

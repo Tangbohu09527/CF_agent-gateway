@@ -122,23 +122,6 @@ def allow_gateway(
     )
 
 
-def allow_group(
-    session: Session,
-    *,
-    permission_scope: frozenset[str] = DEFAULT_SCOPE,
-    allowed_skills: frozenset[str] = DEFAULT_SKILLS,
-    enabled: bool = True,
-) -> None:
-    AccessPolicyService(session).upsert_group_policy(
-        source=SOURCE,
-        source_account_id=SOURCE_ACCOUNT_ID,
-        conversation_id=GROUP_CONVERSATION_ID,
-        enabled=enabled,
-        permission_scope=permission_scope,
-        allowed_skills=allowed_skills,
-    )
-
-
 def private_candidate(**overrides: object) -> AdmissionCandidate:
     return candidate(**overrides)
 
@@ -320,9 +303,8 @@ def test_human_message_without_sender_id_is_rejected_before_identity_resolution(
     assert_no_workspace_resources(session)
 
 
-def test_enabled_allowlisted_mentioned_group_is_admitted(session: Session) -> None:
+def test_authorized_contact_mentioning_bot_in_group_is_admitted(session: Session) -> None:
     identity = provision_sender(session)
-    allow_group(session)
     allow_gateway(session)
 
     outcome = AdmissionOrchestrator(session).admit(group_candidate())
@@ -333,27 +315,11 @@ def test_enabled_allowlisted_mentioned_group_is_admitted(session: Session) -> No
     assert outcome.workspace_id is not None
     assert outcome.ai_thread_id is not None
     assert outcome.authorization is not None
-    assert outcome.authorization.group_allowed is True
     assert outcome.authorization.is_mentioned is True
 
 
-@pytest.mark.parametrize("create_disabled_policy", [False, True])
-def test_group_without_enabled_policy_is_denied(
-    session: Session, create_disabled_policy: bool
-) -> None:
-    provision_sender(session)
-    if create_disabled_policy:
-        allow_group(session, enabled=False)
-    allow_gateway(session)
-
-    outcome = AdmissionOrchestrator(session).admit(group_candidate())
-
-    assert_access_denied(session, outcome, ReasonCode.GROUP_NOT_ALLOWED)
-
-
-def test_group_member_without_user_allowlist_is_denied(session: Session) -> None:
+def test_unauthorized_contact_mentioning_bot_in_group_is_denied(session: Session) -> None:
     provision_sender(session, create_user_policy=False)
-    allow_group(session)
     allow_gateway(session)
 
     outcome = AdmissionOrchestrator(session).admit(group_candidate())
@@ -366,7 +332,6 @@ def test_group_requires_an_explicit_structured_mention(
     session: Session, is_mentioned: bool | None
 ) -> None:
     provision_sender(session)
-    allow_group(session)
     allow_gateway(session)
 
     outcome = AdmissionOrchestrator(session).admit(group_candidate(is_mentioned=is_mentioned))
@@ -374,20 +339,15 @@ def test_group_requires_an_explicit_structured_mention(
     assert_access_denied(session, outcome, ReasonCode.BOT_NOT_MENTIONED)
 
 
-def test_allowed_authorization_is_user_group_gateway_intersection(
+def test_allowed_authorization_is_user_gateway_intersection(
     session: Session,
 ) -> None:
     common_scope = "messages:common"
     common_skill = "common-skill"
     provision_sender(
         session,
-        permission_scope=frozenset({common_scope, "user-only", "user-group"}),
-        allowed_skills=frozenset({common_skill, "user-only", "user-group"}),
-    )
-    allow_group(
-        session,
-        permission_scope=frozenset({common_scope, "group-only", "user-group"}),
-        allowed_skills=frozenset({common_skill, "group-only", "user-group"}),
+        permission_scope=frozenset({common_scope, "user-only"}),
+        allowed_skills=frozenset({common_skill, "user-only"}),
     )
     allow_gateway(
         session,
@@ -401,6 +361,32 @@ def test_allowed_authorization_is_user_group_gateway_intersection(
     assert outcome.authorization.allowed is True
     assert outcome.authorization.permission_scope == frozenset({common_scope})
     assert outcome.authorization.allowed_skills == frozenset({common_skill})
+
+
+def test_same_group_authorizes_each_sender_by_contact_policy(session: Session) -> None:
+    authorized = provision_sender(
+        session,
+        sender_id="wxid-authorized",
+        employee_id="employee-authorized",
+    )
+    provision_sender(
+        session,
+        sender_id="wxid-unauthorized",
+        employee_id="employee-unauthorized",
+        create_user_policy=False,
+    )
+    allow_gateway(session)
+    orchestrator = AdmissionOrchestrator(session)
+
+    denied = orchestrator.admit(group_candidate(message_id=1, sender_id="wxid-unauthorized"))
+    assert_access_denied(session, denied, ReasonCode.USER_NOT_ALLOWED)
+
+    allowed = orchestrator.admit(group_candidate(message_id=2, sender_id="wxid-authorized"))
+
+    assert allowed.admitted is True
+    assert allowed.enterprise_identity_id == authorized.id
+    assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
+    assert session.scalar(select(func.count()).select_from(AIThread)) == 1
 
 
 def test_disallowed_requested_skill_is_denied(session: Session) -> None:
@@ -497,7 +483,6 @@ def test_different_employees_in_same_group_reuse_thread(session: Session) -> Non
         sender_id="wxid-002",
         employee_id="employee-002",
     )
-    allow_group(session)
     allow_gateway(session)
     orchestrator = AdmissionOrchestrator(session)
 
