@@ -65,7 +65,7 @@ request/response path are implemented:
 - Active Workspace/AIThread validation and session-bound message dispatch to Hermes
 - `HermesResponseRelay` routing through `ThreadSourceBinding` to a `WechatMessageSender`
 - Message admission sinks for existing sessions and per-message isolated sessions
-- One-cycle WeChat runtime assembly and the `poll_once` command-line entry point
+- One-cycle WeChat runtime assembly with automatic Hermes replies to the source conversation
 - Resident WeChat worker with configurable polling interval and graceful shutdown
 - `GET /health`
 - Container build and Compose service
@@ -78,13 +78,14 @@ structured bot mention; the group itself does not grant permission to call AI.
 The runtime saves self-originated, system, and unauthorized messages without dispatching
 them. It does not automatically create identity mappings, allowlists, or access policies.
 The response relay implements the existing dispatcher protocol, and its handler verifies
-that the injected sender is scoped to the binding's source account. It is tested with a
-fake sender; the polling runtime does not yet assemble a concrete outbound sender. Skill
+that the injected sender is scoped to the binding's source account. For each successful
+Hermes response, the polling runtime creates a concrete outbound sender using the source
+account persisted on the message and sends the reply to the bound conversation. Skill
 execution is not connected.
 
-The Task Queue, Context Builder, durable dispatch/outbox state, AI Providers, production
-outbound wiring, service-manager integration, and deployment verification are not
-implemented. The resident worker is a standalone process and is not embedded in FastAPI.
+The Task Queue, Context Builder, durable dispatch/outbox state, AI Providers,
+service-manager integration, and deployment verification are not implemented. The
+resident worker is a standalone process and is not embedded in FastAPI.
 
 ## Message API
 
@@ -168,7 +169,8 @@ the name of the token environment variable in `wechat.token_env`; it must never 
 the token itself. With the default `token_env`, set `CF_AGENT_WECHAT_TOKEN` in the
 process environment. A missing or empty variable fails closed.
 
-To dispatch allowed messages, also set `hermes.enabled: true`, configure
+To dispatch allowed messages and send Hermes replies back to their source conversations,
+also set `hermes.enabled: true`, configure
 `hermes.base_url`, and set the environment variable named by `hermes.api_key_env`
 (`HERMES_API_KEY` by default). The API key must not be stored in YAML. When Hermes is
 disabled, polling continues through admission without dispatch.

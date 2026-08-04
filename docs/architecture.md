@@ -40,11 +40,11 @@ The implemented WeChat polling path is:
    one Hermes session even on SQLite. Successful responses retain Hermes' effective ID;
    later calls send the current value, and a replacement returned after context
    compression becomes the new binding.
-9. `HermesResponseRelay` can decorate the existing dispatcher without changing its
-   protocol. On success, `HermesResponseHandler` reloads the source message, validates its
-   local AIThread and exact `ThreadSourceBinding`, verifies the injected sender's source
-   account, and sends the assistant text to the bound conversation. The polling runtime
-   does not yet assemble this outbound dependency.
+9. The polling runtime decorates the dispatcher with `HermesResponseRelay`. On success,
+   it reloads the persisted source message, creates a sender scoped to its
+   `source_account_id`, and invokes `HermesResponseHandler`. The handler validates the
+   local AIThread and exact `ThreadSourceBinding`, verifies the sender's source account,
+   and sends the assistant text to the bound conversation.
 
 Delivery from polling to the sink is at least once. A sink or checkpoint failure can
 cause redelivery; Message Store idempotency and admission reuse make storage retry safe.
@@ -52,8 +52,8 @@ Hermes dispatch currently has no durable outbox or upstream idempotency key, so 
 after an ambiguous external result can call Hermes more than once.
 
 The next planned stages are Context Builder, Task Queue, provider routing, AI Provider
-execution, durable dispatch state, and production outbound assembly. None of these stages
-is currently implemented beyond the direct Hermes request/response foundation.
+execution, and durable dispatch state. None of these stages is currently implemented
+beyond the direct Hermes request/response foundation.
 
 ## Package boundaries
 
@@ -85,10 +85,12 @@ enabled, reads the Hermes API key from the variable named by `hermes.api_key_env
 initializes the database, creates a dedicated checkpoint session, and uses a fresh
 admission/dispatch session for each delivered message.
 
-The channel client, optional Hermes client, checkpoint session, and database engine are
-closed after the cycle, including failure paths. Runtime and CLI output is restricted to
-aggregate status and failure codes; tokens, authorization headers, full message bodies,
-cookies, and Base64 file data are outside the output boundary.
+Each successful Hermes response gets a sender whose account comes from the persisted
+message's `source_account_id`; the sender is closed after delivery. The channel client,
+optional Hermes client, checkpoint session, and database engine are closed after the
+cycle, including failure paths. Runtime and CLI output is restricted to aggregate status
+and failure codes; tokens, authorization headers, full message bodies, cookies, and Base64
+file data are outside the output boundary.
 
 `runtime.worker` serially invokes that finite runtime, then waits for the configured
 `runtime.polling_interval_seconds` before the next cycle. A shared stop event makes the

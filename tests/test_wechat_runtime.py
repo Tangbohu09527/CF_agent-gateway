@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -61,16 +61,20 @@ class FakeWechatClient:
         self,
         messages: Mapping[str, list[RawWechatMessage | Mapping[str, Any]]],
         *,
+        account_id: str = ACCOUNT_ID,
         logged_in: bool = True,
     ) -> None:
         self.messages = dict(messages)
+        self.account_id = account_id
         self.logged_in = logged_in
+        self.auth_calls = 0
         self.close_calls = 0
 
     def get_auth_status(self) -> AgentWechatAuthStatus:
+        self.auth_calls += 1
         return AgentWechatAuthStatus(
             status="logged_in" if self.logged_in else "logged_out",
-            loggedInUser=ACCOUNT_ID if self.logged_in else None,
+            loggedInUser=self.account_id if self.logged_in else None,
         )
 
     def list_chats(self) -> list[dict[str, Any]]:
@@ -94,16 +98,24 @@ class RecordingClientFactory:
 
 
 class FakeHermesClient:
-    def __init__(self, *, close_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        assistant_content: str = "Hermes accepted the message",
+        hermes_thread_id: str = "hermes-runtime-thread",
+        close_error: Exception | None = None,
+    ) -> None:
         self.chat_calls: list[tuple[str, str | None]] = []
+        self.assistant_content = assistant_content
+        self.hermes_thread_id = hermes_thread_id
         self.close_calls = 0
         self.close_error = close_error
 
     def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
         self.chat_calls.append((content, hermes_thread_id))
         return HermesChatResult(
-            assistant_content="Hermes accepted the message",
-            hermes_thread_id="hermes-runtime-thread",
+            assistant_content=self.assistant_content,
+            hermes_thread_id=self.hermes_thread_id,
         )
 
     def close(self) -> None:
@@ -120,6 +132,29 @@ class RecordingHermesClientFactory:
     def __call__(self, *, base_url: str, api_key: str, model: str) -> FakeHermesClient:
         self.calls.append((base_url, api_key, model))
         return self.client
+
+
+class RecordingWechatSender:
+    def __init__(self, account_id: str, factory: RecordingWechatSenderFactory) -> None:
+        self.account_id = account_id
+        self._factory = factory
+
+    def send_text(self, conversation_id: str, content: str) -> None:
+        self._factory.send_calls.append((self.account_id, conversation_id, content))
+
+    def close(self) -> None:
+        self._factory.closed_account_ids.append(self.account_id)
+
+
+class RecordingWechatSenderFactory:
+    def __init__(self) -> None:
+        self.account_ids: list[str] = []
+        self.send_calls: list[tuple[str, str, str]] = []
+        self.closed_account_ids: list[str] = []
+
+    def __call__(self, *, account_id: str) -> RecordingWechatSender:
+        self.account_ids.append(account_id)
+        return RecordingWechatSender(account_id, self)
 
 
 def runtime_settings(
@@ -410,7 +445,8 @@ def test_runtime_wires_client_checkpoint_store_and_admission_sink(tmp_path: Path
         engine.dispose()
 
 
-def test_runtime_dispatches_allowed_message_to_hermes_without_channel_reply(
+def test_runtime_relays_hermes_response_to_source_wechat_account(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "gateway.db"
@@ -448,6 +484,21 @@ def test_runtime_dispatches_allowed_message_to_hermes_without_channel_reply(
             model="hermes-runtime-test",
         ),
     )
+    sender_factory = RecordingWechatSenderFactory()
+    outbound_factory_calls: list[tuple[str, str, str]] = []
+
+    def recording_http_sender(
+        account_id: str,
+        base_url: str,
+        token_env: str,
+        *,
+        environment_reader: Callable[[str], str | None],
+    ) -> RecordingWechatSender:
+        assert environment_reader(token_env) == TOKEN
+        outbound_factory_calls.append((account_id, base_url, token_env))
+        return sender_factory(account_id=account_id)
+
+    monkeypatch.setattr(wechat_runtime, "WechatHttpMessageSender", recording_http_sender)
 
     result = run_wechat_poll_once(
         settings,
@@ -459,9 +510,21 @@ def test_runtime_dispatches_allowed_message_to_hermes_without_channel_reply(
         }.get,
     )
 
+    assert result.logged_in is True
     assert result.messages_processed == 1
+    assert result.chats_failed == 0
+    assert result.failures == []
     assert hermes_factory.calls == [("https://hermes.test", HERMES_API_KEY, "hermes-runtime-test")]
     assert hermes_client.chat_calls[0][0] == "send this to Hermes"
+    assert outbound_factory_calls == [
+        (ACCOUNT_ID, "https://agent-wechat.test:6174", TOKEN_ENV),
+    ]
+    assert sender_factory.account_ids == [ACCOUNT_ID]
+    assert sender_factory.send_calls == [
+        (ACCOUNT_ID, CHAT_ID, "Hermes accepted the message"),
+    ]
+    assert sender_factory.closed_account_ids == [ACCOUNT_ID]
+    assert wechat_client.auth_calls == 1
     assert hermes_client.close_calls == 1
     assert wechat_client.close_calls == 1
 
@@ -473,6 +536,101 @@ def test_runtime_dispatches_allowed_message_to_hermes_without_channel_reply(
             assert hermes_client.chat_calls[0][1] == f"v1:cf-agent-gateway:{thread.id}"
             assert thread.hermes_thread_id == "hermes-runtime-thread"
             assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
+    finally:
+        engine.dispose()
+
+
+def test_runtime_isolates_hermes_responses_between_wechat_accounts(tmp_path: Path) -> None:
+    database_path = tmp_path / "gateway.db"
+    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
+    account_ids = ("wxid_gateway_a", "wxid_gateway_b")
+    responses = ("response for account A", "response for account B")
+
+    engine = create_database_engine(database_url)
+    initialize_database(engine)
+    session_factory = create_database_session_factory(engine)
+    try:
+        with session_factory() as session:
+            identity_service = IdentityService(session)
+            policy_service = AccessPolicyService(session)
+            for index, account_id in enumerate(account_ids):
+                identity = identity_service.create_identity(employee_id=f"employee-runtime-{index}")
+                identity_service.create_mapping(
+                    platform="wechat",
+                    account_id=account_id,
+                    sender_id="wxid_sender",
+                    enterprise_identity_id=identity.id,
+                )
+                policy_service.upsert_user_policy(enterprise_identity_id=identity.id)
+            policy_service.upsert_gateway_policy(
+                allowed_risk_levels=(RiskLevel.NORMAL,),
+            )
+    finally:
+        engine.dispose()
+
+    settings = runtime_settings(
+        database_url,
+        hermes=HermesSettings(
+            enabled=True,
+            base_url="https://hermes.test",
+            api_key_env=HERMES_API_KEY_ENV,
+        ),
+    )
+    sender_factory = RecordingWechatSenderFactory()
+    results = []
+    wechat_clients = []
+
+    for index, (account_id, assistant_content) in enumerate(
+        zip(account_ids, responses, strict=True)
+    ):
+        wechat_client = FakeWechatClient(
+            {CHAT_ID: [raw_message(1, content=f"message from {account_id}")]},
+            account_id=account_id,
+        )
+        hermes_client = FakeHermesClient(
+            assistant_content=assistant_content,
+            hermes_thread_id=f"hermes-runtime-thread-{index}",
+        )
+        results.append(
+            run_wechat_poll_once(
+                settings,
+                client_factory=RecordingClientFactory(wechat_client),
+                hermes_client_factory=RecordingHermesClientFactory(hermes_client),
+                sender_factory=sender_factory,
+                environment_reader={
+                    TOKEN_ENV: TOKEN,
+                    HERMES_API_KEY_ENV: HERMES_API_KEY,
+                }.get,
+            )
+        )
+        wechat_clients.append(wechat_client)
+
+    assert [result.source_account_id for result in results] == list(account_ids)
+    assert [result.messages_processed for result in results] == [1, 1]
+    assert [result.chats_failed for result in results] == [0, 0]
+    assert [result.failures for result in results] == [[], []]
+    assert sender_factory.account_ids == list(account_ids)
+    assert sender_factory.send_calls == [
+        (account_ids[0], CHAT_ID, responses[0]),
+        (account_ids[1], CHAT_ID, responses[1]),
+    ]
+    assert sender_factory.closed_account_ids == list(account_ids)
+    assert [client.auth_calls for client in wechat_clients] == [1, 1]
+    assert [client.close_calls for client in wechat_clients] == [1, 1]
+
+    engine = create_database_engine(database_url)
+    try:
+        with Session(engine) as session:
+            stored_account_ids = session.scalars(
+                select(Message.source_account_id).order_by(Message.source_account_id)
+            ).all()
+            checkpoint_account_ids = session.scalars(
+                select(WechatSyncCheckpoint.source_account_id).order_by(
+                    WechatSyncCheckpoint.source_account_id
+                )
+            ).all()
+            assert stored_account_ids == list(account_ids)
+            assert checkpoint_account_ids == list(account_ids)
     finally:
         engine.dispose()
 

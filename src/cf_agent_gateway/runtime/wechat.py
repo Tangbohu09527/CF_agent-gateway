@@ -7,10 +7,13 @@ from functools import partial
 from typing import Protocol
 
 from sqlalchemy import Engine
+from sqlalchemy.orm import Session
 
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatClient,
     PollResult,
+    WechatHttpMessageSender,
+    WechatMessageSender,
     WechatPollingClient,
     WechatPollingService,
     WechatSyncCheckpointStore,
@@ -21,8 +24,17 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesChatClient, HermesClient, HermesDispatchService
+from cf_agent_gateway.hermes import (
+    HermesChatClient,
+    HermesClient,
+    HermesDeliveryError,
+    HermesDispatchOutcome,
+    HermesDispatchService,
+    HermesResponseHandler,
+    HermesResponseRelay,
+)
 from cf_agent_gateway.ingestion import SessionFactoryMessageStoreAdmissionSink
+from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.runtime.errors import (
     HermesAPIKeyEnvironmentError,
     HermesClientInitializationError,
@@ -46,6 +58,14 @@ class WechatClientFactory(Protocol):
     ) -> ClosableWechatPollingClient: ...
 
 
+class ClosableWechatMessageSender(WechatMessageSender, Protocol):
+    def close(self) -> None: ...
+
+
+class WechatMessageSenderFactory(Protocol):
+    def __call__(self, *, account_id: str) -> ClosableWechatMessageSender: ...
+
+
 class ClosableHermesChatClient(HermesChatClient, Protocol):
     def close(self) -> None: ...
 
@@ -60,11 +80,48 @@ class HermesClientFactory(Protocol):
     ) -> ClosableHermesChatClient: ...
 
 
+class _AccountScopedHermesResponseProcessor:
+    def __init__(
+        self,
+        session: Session,
+        sender_factory: WechatMessageSenderFactory,
+    ) -> None:
+        self._session = session
+        self._sender_factory = sender_factory
+        self._message_store = MessageStore(session)
+
+    def handle(self, response: HermesDispatchOutcome) -> None:
+        message = self._message_store.get(response.message_id)
+        if message is None:
+            raise HermesDeliveryError(reason="message_not_found")
+
+        sender = self._sender_factory(account_id=message.source_account_id)
+        try:
+            HermesResponseHandler(self._session, sender).handle(response)
+        finally:
+            # A post-send cleanup failure must not make polling replay the delivered reply.
+            with suppress(Exception):
+                sender.close()
+
+
+def _create_hermes_response_relay(
+    session: Session,
+    *,
+    client: HermesChatClient,
+    sender_factory: WechatMessageSenderFactory,
+) -> HermesResponseRelay:
+    return HermesResponseRelay(
+        HermesDispatchService(session, client),
+        _AccountScopedHermesResponseProcessor(session, sender_factory),
+    )
+
+
 def run_wechat_poll_once(
     settings: Settings,
     *,
     client_factory: WechatClientFactory = AgentWechatClient,
     hermes_client_factory: HermesClientFactory = HermesClient,
+    sender_factory: WechatMessageSenderFactory | None = None,
     engine_factory: Callable[[str], Engine] = create_database_engine,
     environment_reader: Callable[[str], str | None] = os.getenv,
 ) -> PollResult:
@@ -108,11 +165,20 @@ def run_wechat_poll_once(
         if hermes_client is None:
             sink = SessionFactoryMessageStoreAdmissionSink(session_factory)
         else:
+            resolved_sender_factory = sender_factory
+            if resolved_sender_factory is None:
+                resolved_sender_factory = partial(
+                    WechatHttpMessageSender,
+                    base_url=settings.wechat.base_url,
+                    token_env=settings.wechat.token_env,
+                    environment_reader=environment_reader,
+                )
             sink = SessionFactoryMessageStoreAdmissionSink(
                 session_factory,
                 hermes_dispatcher_factory=partial(
-                    HermesDispatchService,
+                    _create_hermes_response_relay,
                     client=hermes_client,
+                    sender_factory=resolved_sender_factory,
                 ),
             )
         client_initialization_failed = False
