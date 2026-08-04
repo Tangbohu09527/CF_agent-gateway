@@ -310,7 +310,9 @@ def test_message_above_checkpoint_is_delivered_and_persisted(
         conversation_id=CHAT_ID,
         last_local_id=2,
     )
-    client = FakeWechatClient(messages={CHAT_ID: [raw_message(3), raw_message(2), raw_message(1)]})
+    client = FakeWechatClient(
+        messages={CHAT_ID: [raw_message(3, isSelf=False), raw_message(2), raw_message(1)]}
+    )
     sink = RecordingSink()
 
     result = WechatPollingService(client, checkpoint_store, sink).poll_once()
@@ -554,16 +556,76 @@ def test_duplicate_chat_entry_cannot_retry_a_failed_conversation_in_same_cycle(
     assert result.failures[1].stage is PollFailureStage.POLL_CHAT
 
 
-def test_self_message_is_forwarded_to_sink(
+@pytest.mark.parametrize("as_model", [False, True], ids=["mapping", "raw-model"])
+def test_self_message_is_ignored_and_advances_checkpoint(
     checkpoint_store: WechatSyncCheckpointStore,
+    as_model: bool,
 ) -> None:
-    client = FakeWechatClient(messages={CHAT_ID: [raw_message(1, isSelf=True)]})
+    message: RawWechatMessage | Mapping[str, Any] = raw_message(1, isSelf=True)
+    if as_model:
+        message = RawWechatMessage.model_validate(message)
+    client = FakeWechatClient(messages={CHAT_ID: [message]})
     sink = RecordingSink()
 
-    WechatPollingService(client, checkpoint_store, sink, bootstrap_mode="backfill").poll_once()
+    result = WechatPollingService(
+        client, checkpoint_store, sink, bootstrap_mode="backfill"
+    ).poll_once()
 
-    assert len(sink.handled) == 1
-    assert sink.handled[0].is_self is True
+    stored = checkpoint(checkpoint_store)
+    assert sink.attempts == []
+    assert result.chats_succeeded == 1
+    assert result.chats_failed == 0
+    assert result.messages_seen == 1
+    assert result.messages_processed == 0
+    assert stored is not None and stored.last_local_id == 1
+
+
+def test_user_message_after_self_message_is_processed(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    client = FakeWechatClient(
+        messages={
+            CHAT_ID: [
+                raw_message(1, isSelf=True),
+                raw_message(2, isSelf=False),
+            ]
+        }
+    )
+    sink = RecordingSink()
+
+    result = WechatPollingService(
+        client, checkpoint_store, sink, bootstrap_mode="backfill"
+    ).poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert source_ids(sink.handled) == ["2"]
+    assert result.chats_succeeded == 1
+    assert result.messages_processed == 1
+    assert stored is not None and stored.last_local_id == 2
+
+
+def test_consecutive_self_messages_are_not_reprocessed(session: Session) -> None:
+    store = TrackingCheckpointStore(session)
+    messages: list[RawWechatMessage | Mapping[str, Any]] = [
+        raw_message(1, isSelf=True),
+        RawWechatMessage.model_validate(raw_message(2, isSelf=True)),
+    ]
+    client = FakeWechatClient(messages={CHAT_ID: messages})
+    sink = RecordingSink()
+    service = WechatPollingService(client, store, sink, bootstrap_mode="backfill")
+
+    first = service.poll_once()
+    second = service.poll_once()
+
+    stored = checkpoint(store)
+    assert sink.attempts == []
+    assert first.chats_succeeded == 1
+    assert first.messages_processed == 0
+    assert second.chats_succeeded == 1
+    assert second.messages_processed == 0
+    assert second.messages_skipped_by_checkpoint == 2
+    assert store.advance_calls == [1, 2]
+    assert stored is not None and stored.last_local_id == 2
 
 
 def test_system_message_is_forwarded_to_sink(

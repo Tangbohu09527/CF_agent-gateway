@@ -30,7 +30,7 @@ class WechatPollingClient(Protocol):
 
     def list_chats(self) -> list[dict[str, Any]]: ...
 
-    def list_messages(self, chat_id: str) -> list[RawWechatMessage]: ...
+    def list_messages(self, chat_id: str) -> list[RawWechatMessage | Mapping[str, Any]]: ...
 
 
 class NormalizedMessageSink(Protocol):
@@ -254,50 +254,52 @@ class WechatPollingService:
                 messages_skipped += 1
                 continue
 
-            try:
-                normalized = _normalize_for_chat(
-                    raw_message,
-                    source_account_id=source_account_id,
-                    conversation_id=conversation_id,
-                    conversation_name=conversation_name,
-                )
-            except Exception as error:
-                failure = _failure(
-                    PollFailureStage.NORMALIZE,
-                    error,
-                    conversation_id=conversation_id,
-                    local_id=local_id,
-                )
-                return ChatPollResult(
-                    conversation_id=conversation_id,
-                    conversation_name=conversation_name,
-                    succeeded=False,
-                    messages_seen=messages_seen,
-                    messages_processed=messages_processed,
-                    messages_skipped_by_checkpoint=messages_skipped,
-                    bootstrapped=bootstrapped,
-                    failures=[failure],
-                )
+            is_self = _is_self_message(raw_message)
+            if not is_self:
+                try:
+                    normalized = _normalize_for_chat(
+                        raw_message,
+                        source_account_id=source_account_id,
+                        conversation_id=conversation_id,
+                        conversation_name=conversation_name,
+                    )
+                except Exception as error:
+                    failure = _failure(
+                        PollFailureStage.NORMALIZE,
+                        error,
+                        conversation_id=conversation_id,
+                        local_id=local_id,
+                    )
+                    return ChatPollResult(
+                        conversation_id=conversation_id,
+                        conversation_name=conversation_name,
+                        succeeded=False,
+                        messages_seen=messages_seen,
+                        messages_processed=messages_processed,
+                        messages_skipped_by_checkpoint=messages_skipped,
+                        bootstrapped=bootstrapped,
+                        failures=[failure],
+                    )
 
-            try:
-                self._sink.handle(normalized)
-            except Exception as error:
-                failure = _failure(
-                    PollFailureStage.SINK,
-                    error,
-                    conversation_id=conversation_id,
-                    local_id=local_id,
-                )
-                return ChatPollResult(
-                    conversation_id=conversation_id,
-                    conversation_name=conversation_name,
-                    succeeded=False,
-                    messages_seen=messages_seen,
-                    messages_processed=messages_processed,
-                    messages_skipped_by_checkpoint=messages_skipped,
-                    bootstrapped=bootstrapped,
-                    failures=[failure],
-                )
+                try:
+                    self._sink.handle(normalized)
+                except Exception as error:
+                    failure = _failure(
+                        PollFailureStage.SINK,
+                        error,
+                        conversation_id=conversation_id,
+                        local_id=local_id,
+                    )
+                    return ChatPollResult(
+                        conversation_id=conversation_id,
+                        conversation_name=conversation_name,
+                        succeeded=False,
+                        messages_seen=messages_seen,
+                        messages_processed=messages_processed,
+                        messages_skipped_by_checkpoint=messages_skipped,
+                        bootstrapped=bootstrapped,
+                        failures=[failure],
+                    )
 
             # A failed checkpoint write deliberately permits redelivery on the next poll.
             try:
@@ -325,7 +327,8 @@ class WechatPollingService:
                 )
 
             current_local_id = checkpoint.last_local_id
-            messages_processed += 1
+            if not is_self:
+                messages_processed += 1
 
         return ChatPollResult(
             conversation_id=conversation_id,
@@ -371,6 +374,17 @@ def _numeric_local_id(message: RawWechatMessage | Mapping[str, Any]) -> int:
     if not 0 < local_id <= MAX_CHECKPOINT_LOCAL_ID:
         raise WechatLocalIdError()
     return local_id
+
+
+def _is_self_message(message: RawWechatMessage | Mapping[str, Any]) -> bool:
+    value = (
+        message.is_self
+        if isinstance(message, RawWechatMessage)
+        else message.get("isSelf")
+        if isinstance(message, Mapping)
+        else None
+    )
+    return value is True
 
 
 def _validated_ordered_messages(
