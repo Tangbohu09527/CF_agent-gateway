@@ -739,7 +739,7 @@ def test_candidate_and_database_ignore_resolver_snapshot_mutations(session: Sess
     assert persisted.message_type == "text"
 
 
-def test_different_employees_in_same_group_get_distinct_ai_threads(session: Session) -> None:
+def test_different_employees_in_same_group_reuse_ai_thread(session: Session) -> None:
     first_identity = provision_sender(
         session,
         sender_id="wxid-alice",
@@ -769,8 +769,8 @@ def test_different_employees_in_same_group_get_distinct_ai_threads(session: Sess
     assert first.admission.enterprise_identity_id == first_identity.id
     assert second.admission.enterprise_identity_id == second_identity.id
     assert first.workspace_id != second.workspace_id
-    assert first.ai_thread_id != second.ai_thread_id
-    assert_resource_counts(session, messages=2, workspaces=2, threads=2)
+    assert first.ai_thread_id == second.ai_thread_id
+    assert_resource_counts(session, messages=2, workspaces=2, threads=1)
 
 
 def test_same_group_applies_contact_policy_to_each_sender(session: Session) -> None:
