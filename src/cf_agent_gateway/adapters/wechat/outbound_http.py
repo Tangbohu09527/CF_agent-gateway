@@ -73,7 +73,7 @@ class WechatHttpMessageSender:
         try:
             response = self._client.post(
                 "api/messages/send",
-                json={"chatId": chat_id, "content": content},
+                json={"chatId": chat_id, "text": content},
             )
         except httpx.TimeoutException:
             failure = "timeout"

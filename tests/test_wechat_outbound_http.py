@@ -37,7 +37,7 @@ def outbound_sender(
     )
 
 
-def test_send_text_posts_bearer_authenticated_content_payload() -> None:
+def test_send_text_posts_bearer_authenticated_text_payload() -> None:
     environment_reads: list[str] = []
 
     def environment_reader(name: str) -> str | None:
@@ -50,7 +50,7 @@ def test_send_text_posts_bearer_authenticated_content_payload() -> None:
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         assert json.loads(request.content) == {
             "chatId": CONVERSATION_ID,
-            "content": "hello from Hermes",
+            "text": "hello from Hermes",
         }
         return httpx.Response(200, json={"success": True, "localId": 102})
 
