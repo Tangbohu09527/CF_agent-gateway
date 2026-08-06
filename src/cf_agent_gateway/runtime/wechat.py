@@ -28,6 +28,7 @@ from cf_agent_gateway.hermes import (
     HermesChatClient,
     HermesClient,
     HermesDeliveryError,
+    HermesDispatchOutboxExecutor,
     HermesDispatchOutcome,
     HermesDispatchService,
     HermesResponseHandler,
@@ -111,7 +112,10 @@ def _create_hermes_response_relay(
     sender_factory: WechatMessageSenderFactory,
 ) -> HermesResponseRelay:
     return HermesResponseRelay(
-        HermesDispatchService(session, client),
+        HermesDispatchOutboxExecutor(
+            session,
+            HermesDispatchService(session, client),
+        ),
         _AccountScopedHermesResponseProcessor(session, sender_factory),
     )
 

@@ -10,7 +10,11 @@ from cf_agent_gateway.adapters.wechat import (
     wechat_message_to_event,
 )
 from cf_agent_gateway.admission import AdmissionCandidate, AdmissionOrchestrator, AdmissionReason
-from cf_agent_gateway.hermes import HermesDispatcher
+from cf_agent_gateway.hermes import (
+    HermesDispatcher,
+    HermesDispatchOutboxExecutor,
+    HermesResponseRelay,
+)
 from cf_agent_gateway.ingestion.errors import PersistedMessageNotFoundError
 from cf_agent_gateway.ingestion.models import (
     MessageIngestionOutcome,
@@ -19,6 +23,11 @@ from cf_agent_gateway.ingestion.models import (
 )
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
+from cf_agent_gateway.task.model import (
+    HermesDispatchRecordStore,
+    HermesDispatchStatus,
+    build_hermes_dispatch_idempotency_key,
+)
 
 
 class AdmissionRequestResolver(Protocol):
@@ -43,7 +52,8 @@ class MessageAdmissionService:
 
     Message storage and admission intentionally do not share one transaction. A successful
     ``MessageStore.create`` has committed before admission starts, so admission failures leave
-    message history intact for at-least-once redelivery.
+    message history intact for at-least-once redelivery. Allowed admissions commit a durable
+    dispatch record before the optional synchronous compatibility dispatcher is invoked.
     """
 
     def __init__(
@@ -54,6 +64,7 @@ class MessageAdmissionService:
         message_store: MessageStore | None = None,
         admission_orchestrator: AdmissionOrchestrator | None = None,
         hermes_dispatcher: HermesDispatcher | None = None,
+        dispatch_record_store: HermesDispatchRecordStore | None = None,
     ) -> None:
         self._session = session
         self._message_store = message_store if message_store is not None else MessageStore(session)
@@ -65,7 +76,16 @@ class MessageAdmissionService:
             if admission_orchestrator is not None
             else AdmissionOrchestrator(session)
         )
-        self._hermes_dispatcher = hermes_dispatcher
+        self._dispatch_record_store = (
+            dispatch_record_store
+            if dispatch_record_store is not None
+            else HermesDispatchRecordStore(session)
+        )
+        self._hermes_dispatcher = _outbox_managed_dispatcher(
+            session,
+            hermes_dispatcher,
+            record_store=self._dispatch_record_store,
+        )
 
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         event = wechat_message_to_event(message)
@@ -105,10 +125,23 @@ class MessageAdmissionService:
             risk_level=request.risk_level,
         )
         admission = self._admission_orchestrator.admit(candidate)
+        dispatch_record = None
+        dispatch_record_created = False
+        if admission.admitted and admission.reason is AdmissionReason.ALLOWED:
+            if message_created:
+                dispatch_record, dispatch_record_created = self._dispatch_record_store.enqueue(
+                    admission
+                )
+            else:
+                dispatch_record = self._dispatch_record_store.get_by_idempotency_key(
+                    build_hermes_dispatch_idempotency_key(message_id)
+                )
+
         hermes_dispatch = None
         if (
-            admission.admitted
-            and admission.reason is AdmissionReason.ALLOWED
+            dispatch_record_created
+            and dispatch_record is not None
+            and dispatch_record.status is HermesDispatchStatus.QUEUED
             and self._hermes_dispatcher is not None
         ):
             hermes_dispatch = self._hermes_dispatcher.dispatch(admission)
@@ -119,6 +152,7 @@ class MessageAdmissionService:
             should_create_task=admission.should_create_task,
             workspace_id=admission.workspace_id,
             ai_thread_id=admission.ai_thread_id,
+            dispatch_record_id=(dispatch_record.id if dispatch_record is not None else None),
             hermes_dispatch=hermes_dispatch,
         )
 
@@ -165,3 +199,26 @@ class MessageAdmissionService:
                 for attachment in message.attachments
             ),
         )
+
+
+def _outbox_managed_dispatcher(
+    session: Session,
+    dispatcher: HermesDispatcher | None,
+    *,
+    record_store: HermesDispatchRecordStore,
+) -> HermesDispatcher | None:
+    if dispatcher is None or getattr(dispatcher, "manages_dispatch_records", False) is True:
+        return dispatcher
+    if isinstance(dispatcher, HermesResponseRelay):
+        return dispatcher.map_dispatcher(
+            lambda inner: HermesDispatchOutboxExecutor(
+                session,
+                inner,
+                record_store=record_store,
+            )
+        )
+    return HermesDispatchOutboxExecutor(
+        session,
+        dispatcher,
+        record_store=record_store,
+    )

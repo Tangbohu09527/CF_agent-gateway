@@ -22,6 +22,7 @@ from cf_agent_gateway.hermes.models import (
     HermesResponseDeliveryOutcome,
     HermesUserMessage,
 )
+from cf_agent_gateway.hermes.outbox import HermesDispatchOutboxExecutor
 from cf_agent_gateway.hermes.response import (
     HermesResponseHandler,
     HermesResponseProcessor,
@@ -50,6 +51,7 @@ __all__ = [
     "HermesDispatchError",
     "HermesDispatcher",
     "HermesDispatchOutcome",
+    "HermesDispatchOutboxExecutor",
     "HermesDispatchService",
     "HermesError",
     "HermesResponseDeliveryOutcome",

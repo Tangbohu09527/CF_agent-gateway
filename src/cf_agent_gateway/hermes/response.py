@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -39,6 +40,16 @@ class HermesResponseRelay:
     ) -> None:
         self._dispatcher = dispatcher
         self._response_processor = response_processor
+
+    @property
+    def manages_dispatch_records(self) -> bool:
+        return getattr(self._dispatcher, "manages_dispatch_records", False) is True
+
+    def map_dispatcher(
+        self,
+        mapper: Callable[[HermesDispatcher], HermesDispatcher],
+    ) -> HermesResponseRelay:
+        return HermesResponseRelay(mapper(self._dispatcher), self._response_processor)
 
     def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
         response = self._dispatcher.dispatch(admission)

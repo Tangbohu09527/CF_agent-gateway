@@ -70,3 +70,4 @@ class MessageIngestionOutcome:
     workspace_id: str | None
     ai_thread_id: str | None
     hermes_dispatch: HermesDispatchOutcome | None = None
+    dispatch_record_id: int | None = None

@@ -33,6 +33,7 @@ from cf_agent_gateway.runtime import (
     run_wechat_poll_once,
 )
 from cf_agent_gateway.runtime import wechat as wechat_runtime
+from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.workspace.models import AIThread, EmployeeWorkspace
 
 ACCOUNT_ID = "wxid_gateway"
@@ -532,9 +533,14 @@ def test_runtime_relays_hermes_response_to_source_wechat_account(
     try:
         with Session(engine) as session:
             thread = session.scalar(select(AIThread))
+            dispatch_record = session.scalar(select(HermesDispatchRecord))
             assert thread is not None
+            assert dispatch_record is not None
             assert hermes_client.chat_calls[0][1] == f"v1:cf-agent-gateway:{thread.id}"
             assert thread.hermes_thread_id == "hermes-runtime-thread"
+            assert dispatch_record.status is HermesDispatchStatus.SUCCESS
+            assert dispatch_record.message_id == session.scalar(select(Message.id))
+            assert dispatch_record.ai_thread_id == thread.id
             assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
     finally:
         engine.dispose()

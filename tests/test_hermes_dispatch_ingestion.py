@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.access import AccessPolicyService, RiskLevel
@@ -20,10 +20,15 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesDispatchOutcome
+from cf_agent_gateway.hermes import HermesDispatchOutcome, HermesResponseRelay
 from cf_agent_gateway.identity.service import IdentityService
-from cf_agent_gateway.ingestion import MessageAdmissionService
+from cf_agent_gateway.ingestion import MessageAdmissionService, MessageIngestionOutcome
 from cf_agent_gateway.message.models import Message
+from cf_agent_gateway.task.model import (
+    HermesDispatchRecord,
+    HermesDispatchRecordStore,
+    HermesDispatchStatus,
+)
 from cf_agent_gateway.workspace.models import AIThread, EmployeeWorkspace
 
 SOURCE_ACCOUNT_ID = "wxid-gateway"
@@ -136,6 +141,29 @@ class _FailingDispatcher:
         raise _DispatchFailure("Hermes dispatch failed")
 
 
+def test_ingestion_outcome_preserves_legacy_positional_dispatch_field() -> None:
+    admission = AdmissionOutcome(
+        message_id=1,
+        admitted=True,
+        should_create_task=True,
+        reason=AdmissionReason.ALLOWED,
+        enterprise_identity_id="identity-1",
+        workspace_id="workspace-1",
+        ai_thread_id="thread-1",
+    )
+    dispatch = HermesDispatchOutcome(
+        message_id=1,
+        workspace_id="workspace-1",
+        ai_thread_id="thread-1",
+        assistant_content="Hermes response",
+    )
+
+    outcome = MessageIngestionOutcome(1, True, admission, True, "workspace-1", "thread-1", dispatch)
+
+    assert outcome.hermes_dispatch is dispatch
+    assert outcome.dispatch_record_id is None
+
+
 def test_allowed_admission_dispatches_authoritative_persisted_message(session: Session) -> None:
     allow_sender(session)
     message = normalized_message()
@@ -158,8 +186,31 @@ def test_allowed_admission_dispatches_authoritative_persisted_message(session: S
     assert outcome.hermes_dispatch.workspace_id == outcome.workspace_id
     assert outcome.hermes_dispatch.ai_thread_id == outcome.ai_thread_id
     assert outcome.hermes_dispatch.assistant_content == "Hermes response"
+    assert outcome.dispatch_record_id is not None
+    dispatch_record = session.get(HermesDispatchRecord, outcome.dispatch_record_id)
+    assert dispatch_record is not None
+    assert dispatch_record.status is HermesDispatchStatus.SUCCESS
     assert session.get(EmployeeWorkspace, outcome.workspace_id) is not None
     assert session.get(AIThread, outcome.ai_thread_id) is not None
+
+
+def test_raw_dispatcher_is_managed_and_not_replayed(session: Session) -> None:
+    allow_sender(session)
+    message = normalized_message()
+    dispatcher = _RecordingDispatcher(session)
+    service = MessageAdmissionService(session, hermes_dispatcher=dispatcher)
+
+    first = service.process(message)
+    duplicate = service.process(message)
+
+    assert first.hermes_dispatch is not None
+    assert duplicate.hermes_dispatch is None
+    assert duplicate.dispatch_record_id == first.dispatch_record_id
+    assert len(dispatcher.admissions) == 1
+    assert first.dispatch_record_id is not None
+    record = session.get(HermesDispatchRecord, first.dispatch_record_id)
+    assert record is not None
+    assert record.status is HermesDispatchStatus.SUCCESS
 
 
 def test_denied_admission_never_invokes_dispatcher(session: Session) -> None:
@@ -172,9 +223,45 @@ def test_denied_admission_never_invokes_dispatcher(session: Session) -> None:
 
     assert outcome.admission.admitted is False
     assert outcome.admission.reason is AdmissionReason.ACCESS_DENIED
+    assert outcome.dispatch_record_id is None
     assert outcome.hermes_dispatch is None
     assert dispatcher.calls == 0
     assert session.get(Message, outcome.message_id) is not None
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
+
+
+class _LookupOnlyDispatchRecordStore(HermesDispatchRecordStore):
+    def enqueue(
+        self,
+        admission: AdmissionOutcome,
+    ) -> tuple[HermesDispatchRecord, bool]:
+        del admission
+        raise AssertionError("duplicate messages must not be enqueued again")
+
+
+def test_duplicate_queued_message_is_not_reenqueued_or_dispatched(session: Session) -> None:
+    allow_sender(session)
+    message = normalized_message()
+
+    first = MessageAdmissionService(session).process(message)
+    dispatcher = _RecordingDispatcher(session)
+    duplicate = MessageAdmissionService(
+        session,
+        hermes_dispatcher=dispatcher,
+        dispatch_record_store=_LookupOnlyDispatchRecordStore(session),
+    ).process(message)
+
+    assert first.dispatch_record_id is not None
+    assert duplicate.dispatch_record_id == first.dispatch_record_id
+    assert duplicate.message_created is False
+    assert first.hermes_dispatch is None
+    assert duplicate.hermes_dispatch is None
+    assert dispatcher.admissions == []
+    record = session.get(HermesDispatchRecord, first.dispatch_record_id)
+    assert record is not None
+    assert record.status is HermesDispatchStatus.QUEUED
+    assert record.attempt_count == 0
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
 
 def test_dispatch_failure_propagates_after_message_commit(session: Session) -> None:
@@ -191,6 +278,45 @@ def test_dispatch_failure_propagates_after_message_commit(session: Session) -> N
     persisted = session.scalar(select(Message).where(Message.event_id == message.event_id))
     assert persisted is not None
     assert persisted.content == message.content
+    dispatch_record = session.scalar(select(HermesDispatchRecord))
+    assert dispatch_record is not None
+    assert dispatch_record.status is HermesDispatchStatus.UNCERTAIN
+    assert dispatch_record.last_error_code == "unexpected_dispatch_error"
     assert len(dispatcher.admissions) == 1
     assert dispatcher.admissions[0].admitted is True
     assert dispatcher.admissions[0].message_id == persisted.id
+
+
+class _DeliveryFailure(RuntimeError):
+    pass
+
+
+class _FailingResponseProcessor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def handle(self, response: HermesDispatchOutcome) -> None:
+        assert response.assistant_content == "Hermes response"
+        self.calls += 1
+        raise _DeliveryFailure("delivery failed")
+
+
+def test_delivery_failure_replay_does_not_redispatch_without_artifact(session: Session) -> None:
+    allow_sender(session)
+    message = normalized_message()
+    dispatcher = _RecordingDispatcher(session)
+    response_processor = _FailingResponseProcessor()
+    relay = HermesResponseRelay(dispatcher, response_processor)
+    service = MessageAdmissionService(session, hermes_dispatcher=relay)
+
+    with pytest.raises(_DeliveryFailure, match="delivery failed"):
+        service.process(message)
+
+    replay = service.process(message)
+
+    assert replay.hermes_dispatch is None
+    assert len(dispatcher.admissions) == 1
+    assert response_processor.calls == 1
+    record = session.scalar(select(HermesDispatchRecord))
+    assert record is not None
+    assert record.status is HermesDispatchStatus.SUCCESS

@@ -24,7 +24,7 @@ from cf_agent_gateway.database import (
 BASELINE_REVISION = "20260806_0001"
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
-HEAD_REVISION = "20260806_02"
+HEAD_REVISION = "20260806_03"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -41,9 +41,7 @@ def sqlite_url(path: Path) -> str:
 
 @pytest.fixture
 def isolated_migration_path() -> Iterator[Path]:
-    temporary_root = ROOT / ".pytest_cache" / "migration-tests"
-    temporary_root.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="concurrent-", dir=temporary_root) as directory:
+    with TemporaryDirectory(prefix=".migration-tests-", dir=ROOT) as directory:
         yield Path(directory)
 
 
@@ -343,4 +341,10 @@ def test_migrations_render_for_postgresql() -> None:
     ddl = output.getvalue()
     assert "CREATE TABLE message_raw_payloads" in ddl
     assert "CREATE TABLE message_delivery_attempts" in ddl
+    assert "CREATE TABLE hermes_dispatch_records" in ddl
     assert "ck_message_direction" in ddl
+    assert "uq_hermes_dispatch_idempotency_key" in ddl
+    assert "uq_hermes_dispatch_message" in ddl
+    assert "ck_hermes_dispatch_state_fields" in ddl
+    assert "ix_hermes_dispatch_queue" in ddl
+    assert "ix_hermes_dispatch_thread_queue" in ddl

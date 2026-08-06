@@ -44,9 +44,12 @@ PROFILE_TABLES = frozenset(
     }
 )
 PRE_PROFILE_TABLES = LEGACY_BUSINESS_TABLES | ARCHIVE_TABLES
-SCHEMA_TABLES = PRE_PROFILE_TABLES | PROFILE_TABLES
+PROFILE_SCHEMA_TABLES = PRE_PROFILE_TABLES | PROFILE_TABLES
+OUTBOX_TABLES = frozenset({"hermes_dispatch_records"})
+SCHEMA_TABLES = PROFILE_SCHEMA_TABLES | OUTBOX_TABLES
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
+PROFILE_REVISION = "20260806_02"
 
 
 def _head_revision() -> str:
@@ -185,6 +188,10 @@ def test_postgresql_offline_upgrade_emits_complete_schema_ddl() -> None:
     assert all(table_name in rendered_sql for table_name in SCHEMA_TABLES)
     assert "create or replace function guard_agent_profile_revision_immutable" in rendered_sql
     assert "before update or delete on agent_profiles" in rendered_sql
+    assert "uq_hermes_dispatch_idempotency_key" in rendered_sql
+    assert "uq_hermes_dispatch_message" in rendered_sql
+    assert "ck_hermes_dispatch_state_fields" in rendered_sql
+    assert "ix_hermes_dispatch_thread_queue" in rendered_sql
 
 
 def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
@@ -217,6 +224,28 @@ def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
             constraint["name"] for constraint in inspector.get_check_constraints("messages")
         }
         assert PROFILE_TABLES.issubset(inspector.get_table_names())
+        assert OUTBOX_TABLES.issubset(inspector.get_table_names())
+        dispatch_checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("hermes_dispatch_records")
+        }
+        assert dispatch_checks >= {
+            "ck_hermes_dispatch_nonempty_claim_token",
+            "ck_hermes_dispatch_nonempty_error_code",
+            "ck_hermes_dispatch_nonempty_idempotency_key",
+            "ck_hermes_dispatch_nonnegative_attempt_count",
+            "ck_hermes_dispatch_state_fields",
+            "ck_hermes_dispatch_status",
+            "ck_hermes_dispatch_status_attempt_count",
+        }
+        dispatch_indexes = {
+            index["name"] for index in inspector.get_indexes("hermes_dispatch_records")
+        }
+        assert dispatch_indexes >= {
+            "ix_hermes_dispatch_queue",
+            "ix_hermes_dispatch_records_message_id",
+            "ix_hermes_dispatch_thread_queue",
+        }
         with engine.connect() as connection:
             triggers = set(
                 connection.scalars(text("SELECT name FROM sqlite_master WHERE type = 'trigger'"))
@@ -251,7 +280,7 @@ def test_upgrade_adopts_profile_schema_created_by_sqlalchemy() -> None:
             table for table in Base.metadata.sorted_tables if table.name in PROFILE_TABLES
         ]
         Base.metadata.create_all(engine, tables=profile_tables)
-        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
+        assert set(inspect(engine).get_table_names()) == PROFILE_SCHEMA_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == ARCHIVE_REVISION
 
         migration.upgrade_database(engine)
@@ -323,7 +352,7 @@ def test_upgrade_rejects_partial_v2_schema() -> None:
 def test_downgrade_removes_only_profile_configuration_tables() -> None:
     engine = create_database_engine("sqlite+pysqlite:///:memory:")
     try:
-        migration.upgrade_database(engine)
+        migration.upgrade_database(engine, PROFILE_REVISION)
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -350,7 +379,7 @@ def test_downgrade_removes_only_profile_configuration_tables() -> None:
 def test_fresh_database_profile_downgrade_preserves_archive_schema() -> None:
     engine = create_database_engine("sqlite+pysqlite:///:memory:")
     try:
-        migration.upgrade_database(engine)
+        migration.upgrade_database(engine, PROFILE_REVISION)
         migration_config = migration.create_migration_config()
         with engine.connect() as connection:
             migration_config.attributes["connection"] = connection
@@ -358,6 +387,21 @@ def test_fresh_database_profile_downgrade_preserves_archive_schema() -> None:
 
         assert set(inspect(engine).get_table_names()) == PRE_PROFILE_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == ARCHIVE_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_outbox_downgrade_preserves_profile_schema() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.downgrade(migration_config, PROFILE_REVISION)
+
+        assert set(inspect(engine).get_table_names()) == PROFILE_SCHEMA_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == PROFILE_REVISION
     finally:
         engine.dispose()
 

@@ -37,7 +37,7 @@ Do not stamp an unknown or older schema. Startup rejects non-empty, unversioned 
 instead of guessing their revision. The single packaged chain is:
 
 ```text
-20260806_01 -> 20260806_0001 -> 20260806_0002 -> 20260806_02
+20260806_01 -> 20260806_0001 -> 20260806_0002 -> 20260806_02 -> 20260806_03
 ```
 
 `20260806_01` retains the migration-foundation marker without business DDL.
@@ -48,7 +48,9 @@ offline DDL rendering. `20260806_02` adds Agent Profiles, Group Types, and conve
 bindings. It adopts an already-complete set of those three tables, rejects a partial set,
 and installs the database guard that keeps profile revisions immutable. The archive revision
 is intentionally irreversible because dropping it would delete retained raw payloads and
-delivery facts.
+delivery facts. `20260806_03` directly follows `20260806_02` and creates the durable
+`hermes_dispatch_records` table, including its stable idempotency key, message and dispatch
+target foreign keys, lifecycle and claim-state constraints, timestamps, and queue indexes.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or

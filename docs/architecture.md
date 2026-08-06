@@ -43,17 +43,20 @@ The implemented WeChat polling path is:
    context; sender identity determines permission. A group conversation adds only the
    requirement for an explicit structured bot mention and is not itself an authorization
    subject.
-8. Unauthorized messages remain stored without a Workspace or AIThread. Authorized
-   messages create or reuse an employee Workspace, then resolve one AIThread for the
-   source account and physical conversation. Under the current V1 implementation, a group
-   uses one thread for the whole room rather than one thread per sender. No Task is created.
-9. When Hermes is enabled, the dispatch service reloads the persisted message and verifies
+8. Unauthorized messages remain stored without a Workspace, AIThread, or dispatch record.
+   Authorized messages create or reuse an employee Workspace, resolve one AIThread for the
+   source account and physical conversation, then idempotently commit a Hermes dispatch
+   record before any external call. Under the current V1 implementation, a group uses one
+   thread for the whole room rather than one thread per sender.
+9. When Hermes is enabled, an inline compatibility executor atomically claims the queued
+   record before the dispatch service reloads the persisted message and verifies
    its source binding, AIThread, Workspace, and enterprise identity before calling
    `HermesClient.chat`. Before the first call, an unbound AIThread atomically claims a
    deterministic `X-Hermes-Session-Id`, so concurrent first calls and retries converge on
    one Hermes session even on SQLite. Successful responses retain Hermes' effective ID;
    later calls send the current value, and a replacement returned after context
-   compression becomes the new binding.
+   compression becomes the new binding. The executor records `success`, a definite
+   `failed` result, or `uncertain` when the external result may have occurred.
 10. The polling runtime decorates the dispatcher with `HermesResponseRelay`. On success,
    it reloads the persisted source message, creates a sender scoped to its
    `source_account_id`, and invokes `HermesResponseHandler`. The handler validates the
@@ -66,8 +69,16 @@ Delivery of eligible non-self messages from polling to the sink is at least once
 or checkpoint failure can cause redelivery; Message Store idempotency and admission reuse
 make storage retry safe. A self message is never delivered to the sink, but a failed
 checkpoint write permits it to be examined and skipped again on the next poll. Hermes
-dispatch currently has no durable outbox or upstream idempotency key, so a retry after an
-ambiguous external result can call Hermes more than once.
+dispatch records use a stable local idempotency key and terminal records are not
+automatically replayed. The complete worker and an upstream Hermes idempotency contract are
+not implemented; ambiguous results remain `uncertain` for operational reconciliation.
+Because assistant artifacts and a delivery worker are not implemented, a WeChat delivery
+failure after a successful dispatch cannot yet be replayed from the record. A repeated
+inbound event observes the terminal dispatch and does not call Hermes or WeChat again.
+
+The future worker must serialize dispatch claims per `ai_thread_id`. Record-level compare
+and swap prevents duplicate execution of one record, but it does not order two different
+records for the same Hermes thread.
 
 ## Target thread isolation and V1 deviation
 
@@ -87,9 +98,10 @@ This whole-room behavior is a known implementation deviation. Recording it here 
 change the target design. Correcting it requires a reviewed code, constraint, and data
 migration change outside this documentation update.
 
-The next planned stages include Context Builder, Task Queue, provider routing, durable
-dispatch state, and media/file workflows. Image understanding, image attachment delivery,
-file-message processing, OCR, archive or ZIP parsing, enterprise knowledge-base access,
+The next planned stages include Context Builder, the full Task Queue worker, provider
+routing, artifact and delivery workers, and media/file workflows. Image understanding,
+image attachment delivery, file-message processing, OCR, archive or ZIP parsing,
+enterprise knowledge-base access,
 and automatic Skill execution are not implemented by the V1 text path.
 
 ## Package boundaries
@@ -110,7 +122,7 @@ and automatic Skill execution are not implemented by the V1 text path.
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
 | `hermes` | OpenAI-compatible client, dispatch, and response routing | Implemented |
 | `context` | Context construction | Reserved |
-| `task.model` | Task model | Reserved |
+| `task.model` | Durable Hermes dispatch record and state transitions | Foundation implemented |
 | `task.queue` | Task scheduling and delivery | Reserved |
 | `provider.router` | Provider registry and routing | Reserved |
 
@@ -141,9 +153,9 @@ permanent configuration errors stop the worker.
 
 The worker is a standalone process. The V1 text round trip has been validated on Debian 13
 with Dockerized `agent-wechat`, a Gateway Worker, and a Hermes API on the Windows AI host.
-There is no FastAPI background worker, service-manager integration, task queue, or
-production automated deployment. Staging validation does not establish production
-readiness. See [v1-staging-validation.md](v1-staging-validation.md).
+There is no FastAPI background worker, standalone dispatch worker, service-manager
+integration, or production automated deployment. Staging validation does not establish
+production readiness. See [v1-staging-validation.md](v1-staging-validation.md).
 
 ## Persistence direction
 

@@ -33,7 +33,8 @@ These are the gateway's intended responsibilities. The current implementation
 accepts and persists eligible messages, applies identity and access policy, provisions
 authorized workspaces and AI threads, dispatches allowed text content to Hermes, and
 routes successful assistant responses to the external `agent-wechat` service.
-Context construction, task queuing, and provider routing remain future work.
+Allowed admissions first create a durable Hermes dispatch record with a stable idempotency
+key. Context construction, a standalone task worker, and provider routing remain future work.
 
 ## Non-goals
 
@@ -64,8 +65,10 @@ implemented:
 - Polling-level `is_self=true` filtering that bypasses the sink and advances the checkpoint
 - Persist-first message admission, including identity and access-policy evaluation
 - Workspace creation and conversation-scoped AI-thread reuse for authorized messages
+- Durable, idempotent Hermes dispatch records with explicit lifecycle states
 - OpenAI-compatible `HermesClient` with environment-backed API-key configuration
-- Active Workspace/AIThread validation and session-bound message dispatch to Hermes
+- Inline compatibility execution with active Workspace/AIThread validation and
+  session-bound message dispatch to Hermes
 - `HermesResponseRelay` routing through `ThreadSourceBinding` to a `WechatMessageSender`
 - Concrete `WechatHttpMessageSender` delivery through `POST /api/messages/send` using
   `{"chatId": "...", "text": "..."}`
@@ -98,9 +101,10 @@ conversation, so authorized senders in one group reuse a whole-room thread. This
 known implementation deviation, not a design change. No code or schema correction is
 included in this documentation update.
 
-The Task Queue, Context Builder, durable dispatch/outbox state, general AI Provider
-routing, service-manager integration, and production automated deployment are not
-implemented. The resident worker is a standalone process and is not embedded in FastAPI.
+The durable Hermes dispatch-record foundation is implemented, but a standalone dispatch
+worker, artifact persistence, delivery worker, Context Builder, general AI Provider routing,
+service-manager integration, and production automated deployment are not. The resident
+WeChat worker is a standalone process and is not embedded in FastAPI.
 
 ## V1 Staging validation
 
@@ -215,7 +219,7 @@ To dispatch allowed messages and send Hermes replies back to their source conver
 also set `hermes.enabled: true`, configure
 `hermes.base_url`, and set the environment variable named by `hermes.api_key_env`
 (`HERMES_API_KEY` by default). The API key must not be stored in YAML. When Hermes is
-disabled, polling continues through admission without dispatch.
+disabled, polling continues through admission and leaves allowed dispatch records queued.
 
 Linux or macOS:
 
