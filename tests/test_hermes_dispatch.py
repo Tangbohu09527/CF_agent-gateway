@@ -17,10 +17,13 @@ from cf_agent_gateway.database import (
     initialize_database,
 )
 from cf_agent_gateway.hermes import (
+    ArtifactRefPart,
     HermesChatResult,
     HermesDispatchError,
     HermesDispatchOutcome,
     HermesDispatchService,
+    ResponseEnvelope,
+    TextPart,
 )
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.message.models import Message
@@ -62,10 +65,12 @@ class RecordingHermesClient:
         assistant_content: str = ASSISTANT_CONTENT,
         *,
         hermes_thread_id: str = HERMES_THREAD_ID,
+        response: ResponseEnvelope | None = None,
         error: Exception | None = None,
     ) -> None:
         self.assistant_content = assistant_content
         self.hermes_thread_id = hermes_thread_id
+        self.response = response
         self.error = error
         self.contents: list[str] = []
         self.thread_ids: list[str | None] = []
@@ -78,6 +83,7 @@ class RecordingHermesClient:
         return HermesChatResult(
             assistant_content=self.assistant_content,
             hermes_thread_id=self.hermes_thread_id,
+            response=self.response,
         )
 
 
@@ -275,6 +281,23 @@ def test_dispatch_calls_client_with_persisted_message_and_returns_target(
     assert client.thread_ids == [initial_hermes_thread_id(resources.thread)]
     session.refresh(resources.thread)
     assert resources.thread.hermes_thread_id == HERMES_THREAD_ID
+
+
+def test_dispatch_preserves_v2_response_envelope(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    envelope = ResponseEnvelope(
+        response_id="response-001",
+        parts=(
+            TextPart(text=ASSISTANT_CONTENT),
+            ArtifactRefPart(artifact_id="artifact-001"),
+        ),
+    )
+    client = RecordingHermesClient(response=envelope)
+
+    outcome = HermesDispatchService(session, client).dispatch(resources.admission)
+
+    assert outcome.response is envelope
+    assert outcome.parts == envelope.parts
 
 
 def test_repeated_dispatch_reuses_bound_hermes_thread(session: Session) -> None:

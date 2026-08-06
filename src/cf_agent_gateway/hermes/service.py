@@ -120,6 +120,7 @@ class HermesDispatchService:
             workspace_id=workspace.id,
             ai_thread_id=thread.id,
             assistant_content=result.assistant_content,
+            response=result.response,
         )
 
     @staticmethod

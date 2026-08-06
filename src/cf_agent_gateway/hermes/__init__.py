@@ -13,6 +13,7 @@ from cf_agent_gateway.hermes.errors import (
     HermesTransportError,
 )
 from cf_agent_gateway.hermes.models import (
+    ArtifactRefPart,
     HermesAssistantMessage,
     HermesChatCompletionChoice,
     HermesChatCompletionRequest,
@@ -21,6 +22,9 @@ from cf_agent_gateway.hermes.models import (
     HermesDispatchOutcome,
     HermesResponseDeliveryOutcome,
     HermesUserMessage,
+    ResponseEnvelope,
+    ResponsePart,
+    TextPart,
 )
 from cf_agent_gateway.hermes.outbox import HermesDispatchOutboxExecutor
 from cf_agent_gateway.hermes.response import (
@@ -37,6 +41,7 @@ from cf_agent_gateway.hermes.service import (
 __all__ = [
     "DEFAULT_TIMEOUT",
     "HERMES_SESSION_HEADER",
+    "ArtifactRefPart",
     "HermesAPIError",
     "HermesAPIKeyError",
     "HermesAssistantMessage",
@@ -62,4 +67,7 @@ __all__ = [
     "HermesTimeoutError",
     "HermesTransportError",
     "HermesUserMessage",
+    "ResponseEnvelope",
+    "ResponsePart",
+    "TextPart",
 ]

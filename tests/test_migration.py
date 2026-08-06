@@ -46,10 +46,13 @@ PROFILE_TABLES = frozenset(
 PRE_PROFILE_TABLES = LEGACY_BUSINESS_TABLES | ARCHIVE_TABLES
 PROFILE_SCHEMA_TABLES = PRE_PROFILE_TABLES | PROFILE_TABLES
 OUTBOX_TABLES = frozenset({"hermes_dispatch_records"})
-SCHEMA_TABLES = PROFILE_SCHEMA_TABLES | OUTBOX_TABLES
+OUTBOX_SCHEMA_TABLES = PROFILE_SCHEMA_TABLES | OUTBOX_TABLES
+ARTIFACT_TABLES = frozenset({"artifacts"})
+SCHEMA_TABLES = OUTBOX_SCHEMA_TABLES | ARTIFACT_TABLES
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
 PROFILE_REVISION = "20260806_02"
+OUTBOX_REVISION = "20260806_03"
 
 
 def _head_revision() -> str:
@@ -192,6 +195,12 @@ def test_postgresql_offline_upgrade_emits_complete_schema_ddl() -> None:
     assert "uq_hermes_dispatch_message" in rendered_sql
     assert "ck_hermes_dispatch_state_fields" in rendered_sql
     assert "ix_hermes_dispatch_thread_queue" in rendered_sql
+    assert "uq_artifact_storage_key" in rendered_sql
+    assert "artifact_kind" in rendered_sql
+    assert "artifact_status" in rendered_sql
+    assert "ck_artifact_ready_metadata" in rendered_sql
+    assert "ck_artifact_size_nonnegative" in rendered_sql
+    assert "ix_artifact_response_id" in rendered_sql
 
 
 def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
@@ -245,6 +254,22 @@ def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
             "ix_hermes_dispatch_queue",
             "ix_hermes_dispatch_records_message_id",
             "ix_hermes_dispatch_thread_queue",
+        }
+        assert ARTIFACT_TABLES.issubset(inspector.get_table_names())
+        artifact_checks = {
+            constraint["name"] for constraint in inspector.get_check_constraints("artifacts")
+        }
+        assert artifact_checks >= {
+            "artifact_kind",
+            "artifact_status",
+            "ck_artifact_ready_metadata",
+            "ck_artifact_size_nonnegative",
+        }
+        assert {
+            constraint["name"] for constraint in inspector.get_unique_constraints("artifacts")
+        } >= {"uq_artifact_storage_key"}
+        assert {index["name"] for index in inspector.get_indexes("artifacts")} >= {
+            "ix_artifact_response_id"
         }
         with engine.connect() as connection:
             triggers = set(
@@ -394,7 +419,7 @@ def test_fresh_database_profile_downgrade_preserves_archive_schema() -> None:
 def test_outbox_downgrade_preserves_profile_schema() -> None:
     engine = create_database_engine("sqlite+pysqlite:///:memory:")
     try:
-        migration.upgrade_database(engine)
+        migration.upgrade_database(engine, OUTBOX_REVISION)
         migration_config = migration.create_migration_config()
         with engine.connect() as connection:
             migration_config.attributes["connection"] = connection
@@ -402,6 +427,21 @@ def test_outbox_downgrade_preserves_profile_schema() -> None:
 
         assert set(inspect(engine).get_table_names()) == PROFILE_SCHEMA_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == PROFILE_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_artifact_downgrade_preserves_outbox_schema() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.downgrade(migration_config, OUTBOX_REVISION)
+
+        assert set(inspect(engine).get_table_names()) == OUTBOX_SCHEMA_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == OUTBOX_REVISION
     finally:
         engine.dispose()
 

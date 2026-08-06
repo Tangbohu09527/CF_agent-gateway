@@ -18,6 +18,7 @@ from cf_agent_gateway.hermes.models import (
     HermesChatCompletionResponse,
     HermesChatResult,
     HermesUserMessage,
+    ResponseEnvelope,
 )
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=15.0, pool=5.0)
@@ -87,12 +88,27 @@ class HermesClient:
         )
         try:
             payload = response.json()
-            completion = HermesChatCompletionResponse.model_validate(payload)
             effective_thread_id = _hermes_thread_id(response.headers.get(HERMES_SESSION_HEADER))
         except (ValueError, ValidationError):
             raise HermesResponseError(operation=operation) from None
-        return HermesChatResult(
-            assistant_content=completion.choices[0].message.content,
+        is_v2_response = isinstance(payload, dict) and (
+            "response_id" in payload or "parts" in payload
+        )
+        if not is_v2_response:
+            try:
+                completion = HermesChatCompletionResponse.model_validate(payload)
+            except ValidationError:
+                raise HermesResponseError(operation=operation) from None
+            return HermesChatResult(
+                assistant_content=completion.choices[0].message.content,
+                hermes_thread_id=effective_thread_id,
+            )
+        try:
+            envelope = ResponseEnvelope.model_validate(payload)
+        except ValidationError:
+            raise HermesResponseError(operation=operation) from None
+        return HermesChatResult.from_response(
+            envelope,
             hermes_thread_id=effective_thread_id,
         )
 

@@ -26,6 +26,7 @@ _MODEL_MODULES = (
     "cf_agent_gateway.access.policy_models",
     "cf_agent_gateway.adapters.wechat.polling_models",
     "cf_agent_gateway.task.model.models",
+    "cf_agent_gateway.artifact.models",
 )
 
 
@@ -40,7 +41,7 @@ class DatabaseSchemaError(RuntimeError):
 _POSTGRES_MIGRATION_LOCK_ID = int.from_bytes(b"CFAGMIGR", byteorder="big", signed=True)
 _SQLITE_MIGRATION_THREAD_LOCK = Lock()
 _PACKAGED_SCRIPT_LOCATION = "cf_agent_gateway:migrations"
-_EXPECTED_MIGRATION_HEAD = "20260806_03"
+_EXPECTED_MIGRATION_HEAD = "20260806_04"
 
 
 def create_database_engine(url: str) -> Engine:

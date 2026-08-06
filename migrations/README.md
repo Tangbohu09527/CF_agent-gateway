@@ -38,6 +38,7 @@ instead of guessing their revision. The single packaged chain is:
 
 ```text
 20260806_01 -> 20260806_0001 -> 20260806_0002 -> 20260806_02 -> 20260806_03
+    -> 20260806_04
 ```
 
 `20260806_01` retains the migration-foundation marker without business DDL.
@@ -51,6 +52,9 @@ is intentionally irreversible because dropping it would delete retained raw payl
 delivery facts. `20260806_03` directly follows `20260806_02` and creates the durable
 `hermes_dispatch_records` table, including its stable idempotency key, message and dispatch
 target foreign keys, lifecycle and claim-state constraints, timestamps, and queue indexes.
+`20260806_04` directly follows the Outbox revision and creates the `artifacts` table with
+its response lookup index, storage-key uniqueness, kind/status constraints, and ready-content
+metadata invariants.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or
