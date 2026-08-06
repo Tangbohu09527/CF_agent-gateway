@@ -150,8 +150,9 @@ readiness. See [v1-staging-validation.md](v1-staging-validation.md).
 SQLAlchemy 2.x provides the persistence boundary. SQLite is the phase-one
 database and PostgreSQL is supported by using a
 `postgresql+psycopg://...` database URL. Domain packages must not depend on a
-specific SQL dialect. Database-specific migrations will live in `migrations/`
-after a formal migration system is introduced.
+specific SQL dialect. Database-specific migrations live in
+`src/cf_agent_gateway/migrations/` and run through the explicit Alembic migration command.
+The initial migration is a schema-version baseline only and contains no business-table DDL.
 
 Conversations are unique by `(source, source_account_id, conversation_id)`, and
 messages reference conversations through the same three-column scope. Conversation
@@ -175,10 +176,9 @@ Verified reply summaries are stored as JSON context, not as inferred message rel
 Attachment rows contain metadata only; the V1 WeChat polling path does not populate them
 or deliver file bytes to Hermes.
 
-This is a development-time schema change. Until formal migrations exist, developers
-must back up and manually recreate older development databases before using the new
-schema. The current V1 startup rejects sender-scoped thread-binding constraints because
-the implemented binding is conversation-scoped. That behavior is the known deviation
-described above, not a change to the target sender-isolated group design. The service never
-automatically deletes `gateway.db`, and production automatic migration has not been
-implemented.
+Business-table migrations have not been introduced yet. Developers must still back up and
+manually recreate older development databases before using the new schema. The current V1
+startup rejects sender-scoped thread-binding constraints because the implemented binding is
+conversation-scoped. That behavior is the known deviation described above, not a change to
+the target sender-isolated group design. The service never automatically migrates or deletes
+`gateway.db`.

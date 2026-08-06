@@ -10,6 +10,14 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+_MODEL_MODULES = (
+    "cf_agent_gateway.message.models",
+    "cf_agent_gateway.identity.models",
+    "cf_agent_gateway.workspace.models",
+    "cf_agent_gateway.access.policy_models",
+    "cf_agent_gateway.adapters.wechat.polling_models",
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -33,18 +41,19 @@ def create_database_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def initialize_database(engine: Engine) -> None:
+def ensure_database_directory(engine: Engine) -> None:
     if engine.dialect.name == "sqlite" and engine.url.database not in {None, "", ":memory:"}:
         Path(engine.url.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
-    for model_module in (
-        "cf_agent_gateway.message.models",
-        "cf_agent_gateway.identity.models",
-        "cf_agent_gateway.workspace.models",
-        "cf_agent_gateway.access.policy_models",
-        "cf_agent_gateway.adapters.wechat.polling_models",
-    ):
+
+def load_database_models() -> None:
+    for model_module in _MODEL_MODULES:
         import_module(model_module)
+
+
+def initialize_database(engine: Engine) -> None:
+    ensure_database_directory(engine)
+    load_database_models()
     Base.metadata.create_all(engine)
     _validate_conversation_binding_constraints(engine)
 

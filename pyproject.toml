@@ -9,6 +9,7 @@ description = "Enterprise AI Message Gateway"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "alembic>=1.14,<2.0",
   "fastapi>=0.115,<1.0",
   "httpx>=0.28,<1.0",
   "psycopg[binary]>=3.2,<4.0",
@@ -18,6 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
+cf-agent-gateway-migrate = "cf_agent_gateway.migration:main"
 cf-agent-gateway-wechat-poll-once = "cf_agent_gateway.wechat_poll_once:main"
 
 [project.optional-dependencies]
@@ -29,6 +31,12 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"cf_agent_gateway.migrations" = [
+  "script.py.mako",
+  "versions/*.py",
+]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

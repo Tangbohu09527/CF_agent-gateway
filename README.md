@@ -157,11 +157,10 @@ stable relationship parsing is available.
 
 ### Development database schema
 
-This is a development-time schema change, and a formal migration system is not yet
-available. Developers using an older development database must back it up and
-manually recreate it before using this schema. The service does not automatically
-migrate or delete `gateway.db`; production automatic migration has not been
-implemented.
+Alembic migration infrastructure is available through `cf-agent-gateway-migrate`. The
+initial migration records only the schema version and does not migrate business tables.
+During this transition the service continues to initialize business tables through
+SQLAlchemy `create_all`; it does not automatically run migrations or delete `gateway.db`.
 
 Attachment content is not stored; only metadata and a storage path can be persisted through
 the Message API. The V1 WeChat polling path does not populate attachment rows or pass image
@@ -172,6 +171,7 @@ or file bytes to Hermes.
 - Python 3.12+
 - FastAPI and Uvicorn
 - SQLAlchemy 2.x
+- Alembic database migrations
 - SQLite for local and phase-one persistence
 - PostgreSQL support through Psycopg 3
 - YAML configuration

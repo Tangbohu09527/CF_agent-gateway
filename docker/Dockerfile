@@ -12,6 +12,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN python -m pip install --no-cache-dir .
 
+COPY alembic.ini ./
 COPY config ./config
 RUN mkdir -p /app/data && chown -R gateway:gateway /app
 
