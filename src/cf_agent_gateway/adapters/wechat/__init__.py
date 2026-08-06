@@ -9,6 +9,12 @@ from cf_agent_gateway.adapters.wechat.errors import (
     WechatTimeoutError,
     WechatTransportError,
 )
+from cf_agent_gateway.adapters.wechat.media import WechatMediaSender, WechatMediaType
+from cf_agent_gateway.adapters.wechat.media_http import (
+    IMAGE_MIME_TYPES,
+    MAX_MEDIA_BYTES,
+    WechatHttpMediaSender,
+)
 from cf_agent_gateway.adapters.wechat.message_event import wechat_message_to_event
 from cf_agent_gateway.adapters.wechat.normalized_models import (
     NormalizedWechatMessage,
@@ -79,8 +85,11 @@ __all__ = [
     "WechatCheckpointValueError",
     "WechatCheckpointStore",
     "WechatLocalIdError",
+    "WechatHttpMediaSender",
     "WechatMessageType",
     "WechatMessageSender",
+    "WechatMediaSender",
+    "WechatMediaType",
     "WechatHttpMessageSender",
     "WechatNormalizationError",
     "WechatPollingClient",
@@ -93,6 +102,8 @@ __all__ = [
     "WechatSenderType",
     "WechatSyncCheckpoint",
     "WechatSyncCheckpointStore",
+    "IMAGE_MIME_TYPES",
+    "MAX_MEDIA_BYTES",
     "build_wechat_event_id",
     "normalize_wechat_message",
     "wechat_message_to_event",
