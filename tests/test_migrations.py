@@ -23,7 +23,8 @@ from cf_agent_gateway.database import (
 
 BASELINE_REVISION = "20260806_0001"
 FOUNDATION_REVISION = "20260806_01"
-HEAD_REVISION = "20260806_0002"
+ARCHIVE_REVISION = "20260806_0002"
+HEAD_REVISION = "20260806_02"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -275,7 +276,7 @@ def test_unversioned_main_schema_can_be_stamped_then_upgraded(tmp_path: Path) ->
 def test_archive_migration_refuses_destructive_downgrade(tmp_path: Path) -> None:
     database_url = sqlite_url(tmp_path / "irreversible.db")
     config = migration_config(database_url)
-    command.upgrade(config, "head")
+    command.upgrade(config, ARCHIVE_REVISION)
 
     with pytest.raises(RuntimeError, match="archive migration is irreversible"):
         command.downgrade(config, BASELINE_REVISION)
@@ -284,7 +285,7 @@ def test_archive_migration_refuses_destructive_downgrade(tmp_path: Path) -> None
     try:
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == HEAD_REVISION
+            assert current_revision == ARCHIVE_REVISION
         assert "message_raw_payloads" in inspect(engine).get_table_names()
     finally:
         engine.dispose()

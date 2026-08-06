@@ -20,6 +20,12 @@ class ThreadType(StrEnum):
     GROUP = "group"
 
 
+class ThreadPolicy(StrEnum):
+    PRIVATE_SENDER = "private_sender"
+    GROUP_SHARED = "group_shared"
+    GROUP_SENDER = "group_sender"
+
+
 class ThreadStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"

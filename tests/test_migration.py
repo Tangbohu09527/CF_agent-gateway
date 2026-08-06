@@ -8,13 +8,19 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect, text
+from sqlalchemy import Engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from cf_agent_gateway import migration
-from cf_agent_gateway.database import create_database_engine, initialize_database
+from cf_agent_gateway.database import (
+    Base,
+    create_database_engine,
+    initialize_database,
+    load_database_models,
+)
 
 ALEMBIC_CONFIG_PATH = Path(__file__).resolve().parents[1] / "alembic.ini"
-BUSINESS_TABLES = frozenset(
+LEGACY_BUSINESS_TABLES = frozenset(
     {
         "ai_threads",
         "attachments",
@@ -30,8 +36,17 @@ BUSINESS_TABLES = frozenset(
     }
 )
 ARCHIVE_TABLES = frozenset({"message_delivery_attempts", "message_raw_payloads"})
-SCHEMA_TABLES = BUSINESS_TABLES | ARCHIVE_TABLES
+PROFILE_TABLES = frozenset(
+    {
+        "agent_profiles",
+        "conversation_group_type_bindings",
+        "group_types",
+    }
+)
+PRE_PROFILE_TABLES = LEGACY_BUSINESS_TABLES | ARCHIVE_TABLES
+SCHEMA_TABLES = PRE_PROFILE_TABLES | PROFILE_TABLES
 FOUNDATION_REVISION = "20260806_01"
+ARCHIVE_REVISION = "20260806_0002"
 
 
 def _head_revision() -> str:
@@ -39,6 +54,10 @@ def _head_revision() -> str:
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
     assert head_revision is not None
     return head_revision
+
+
+def _upgrade_to_archive_schema(engine: Engine) -> None:
+    migration.upgrade_database(engine, ARCHIVE_REVISION)
 
 
 def test_upgrade_preserves_foundation_marker_then_applies_schema_chain() -> None:
@@ -97,6 +116,42 @@ def test_upgrade_is_idempotent_after_database_initialization() -> None:
         engine.dispose()
 
 
+def test_upgrade_adds_profile_tables_to_archive_schema() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        _upgrade_to_archive_schema(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO conversations "
+                    "(source, source_account_id, conversation_id, conversation_type) "
+                    "VALUES ('wechat', 'bot-001', 'group-001', 'group')"
+                )
+            )
+        assert set(inspect(engine).get_table_names()) == PRE_PROFILE_TABLES | {"alembic_version"}
+
+        migration.upgrade_database(engine)
+
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == _head_revision()
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT conversation_id FROM conversations")) == (
+                "group-001"
+            )
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM sqlite_master "
+                        "WHERE type = 'trigger' "
+                        "AND name = 'trg_agent_profiles_immutable_revision'"
+                    )
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
 def test_migrate_database_creates_file_sqlite_parent_and_persists_version(
     tmp_path: Path,
 ) -> None:
@@ -128,6 +183,8 @@ def test_postgresql_offline_upgrade_emits_complete_schema_ddl() -> None:
     assert "create table alembic_version" in rendered_sql
     assert _head_revision().lower() in rendered_sql
     assert all(table_name in rendered_sql for table_name in SCHEMA_TABLES)
+    assert "create or replace function guard_agent_profile_revision_immutable" in rendered_sql
+    assert "before update or delete on agent_profiles" in rendered_sql
 
 
 def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
@@ -159,7 +216,148 @@ def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
         assert "ck_message_direction" in {
             constraint["name"] for constraint in inspector.get_check_constraints("messages")
         }
+        assert PROFILE_TABLES.issubset(inspector.get_table_names())
+        with engine.connect() as connection:
+            triggers = set(
+                connection.scalars(text("SELECT name FROM sqlite_master WHERE type = 'trigger'"))
+            )
+        assert {
+            "trg_agent_profiles_immutable_revision",
+            "trg_agent_profiles_prevent_delete",
+        }.issubset(triggers)
         assert migration.get_schema_version(engine) == _head_revision()
+    finally:
+        engine.dispose()
+
+
+def test_migrated_schema_has_no_alembic_drift() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.check(migration_config)
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_adopts_profile_schema_created_by_sqlalchemy() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        _upgrade_to_archive_schema(engine)
+        load_database_models()
+        profile_tables = [
+            table for table in Base.metadata.sorted_tables if table.name in PROFILE_TABLES
+        ]
+        Base.metadata.create_all(engine, tables=profile_tables)
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == ARCHIVE_REVISION
+
+        migration.upgrade_database(engine)
+
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == _head_revision()
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM sqlite_master "
+                        "WHERE type = 'trigger' "
+                        "AND name = 'trg_agent_profiles_immutable_revision'"
+                    )
+                )
+                == 1
+            )
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.check(migration_config)
+    finally:
+        engine.dispose()
+
+
+def test_application_initialization_after_empty_upgrade_installs_revision_guard() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        initialize_database(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO agent_profiles "
+                    "(id, profile_key, revision, provider, external_profile_ref, model) "
+                    "VALUES ('profile-1', 'assistant', 1, 'openai', 'external-1', 'gpt-5.2')"
+                )
+            )
+
+        with (
+            pytest.raises(IntegrityError, match="agent profile revision is immutable"),
+            engine.begin() as connection,
+        ):
+            connection.execute(
+                text("UPDATE agent_profiles SET model = 'overwritten' WHERE id = 'profile-1'")
+            )
+
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.check(migration_config)
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_rejects_partial_v2_schema() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        _upgrade_to_archive_schema(engine)
+        load_database_models()
+        Base.metadata.tables["agent_profiles"].create(engine)
+
+        with pytest.raises(RuntimeError, match="partial Agent Profile and Group Type schema"):
+            migration.upgrade_database(engine)
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_removes_only_profile_configuration_tables() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO conversations "
+                    "(source, source_account_id, conversation_id, conversation_type) "
+                    "VALUES ('wechat', 'bot-001', 'group-001', 'group')"
+                )
+            )
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.downgrade(migration_config, ARCHIVE_REVISION)
+
+        assert set(inspect(engine).get_table_names()) == PRE_PROFILE_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == ARCHIVE_REVISION
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT conversation_id FROM conversations")) == (
+                "group-001"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_fresh_database_profile_downgrade_preserves_archive_schema() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.downgrade(migration_config, ARCHIVE_REVISION)
+
+        assert set(inspect(engine).get_table_names()) == PRE_PROFILE_TABLES | {"alembic_version"}
+        assert migration.get_schema_version(engine) == ARCHIVE_REVISION
     finally:
         engine.dispose()
 

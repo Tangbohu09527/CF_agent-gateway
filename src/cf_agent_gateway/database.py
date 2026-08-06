@@ -20,6 +20,7 @@ from sqlalchemy.pool import StaticPool
 
 _MODEL_MODULES = (
     "cf_agent_gateway.message.models",
+    "cf_agent_gateway.agent_profile.models",
     "cf_agent_gateway.identity.models",
     "cf_agent_gateway.workspace.models",
     "cf_agent_gateway.access.policy_models",
@@ -38,7 +39,7 @@ class DatabaseSchemaError(RuntimeError):
 _POSTGRES_MIGRATION_LOCK_ID = int.from_bytes(b"CFAGMIGR", byteorder="big", signed=True)
 _SQLITE_MIGRATION_THREAD_LOCK = Lock()
 _PACKAGED_SCRIPT_LOCATION = "cf_agent_gateway:migrations"
-_EXPECTED_MIGRATION_HEAD = "20260806_0002"
+_EXPECTED_MIGRATION_HEAD = "20260806_02"
 
 
 def create_database_engine(url: str) -> Engine:
@@ -50,16 +51,16 @@ def create_database_engine(url: str) -> Engine:
             options["poolclass"] = StaticPool
     engine = create_engine(url, **options)
     if database_url.get_backend_name() == "sqlite":
-
-        @event.listens_for(engine, "connect")
-        def enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:
-            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
-            try:
-                cursor.execute("PRAGMA foreign_keys=ON")
-            finally:
-                cursor.close()
-
+        event.listen(engine, "connect", _enable_sqlite_foreign_keys)
     return engine
+
+
+def _enable_sqlite_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
+    cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
 
 
 def create_database_session_factory(engine: Engine) -> sessionmaker[Session]:

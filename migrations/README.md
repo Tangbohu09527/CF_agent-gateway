@@ -37,15 +37,18 @@ Do not stamp an unknown or older schema. Startup rejects non-empty, unversioned 
 instead of guessing their revision. The single packaged chain is:
 
 ```text
-20260806_01 -> 20260806_0001 -> 20260806_0002
+20260806_01 -> 20260806_0001 -> 20260806_0002 -> 20260806_02
 ```
 
 `20260806_01` retains the migration-foundation marker without business DDL.
 `20260806_0001` creates the V1 main schema for an empty database and adopts a complete V1
 schema already versioned at the foundation marker. `20260806_0002` adds the Message Archive
 schema. The revisions are dialect-neutral and tested against SQLite execution and PostgreSQL
-offline DDL rendering. The archive revision is intentionally irreversible because dropping
-it would delete retained raw payloads and delivery facts.
+offline DDL rendering. `20260806_02` adds Agent Profiles, Group Types, and conversation
+bindings. It adopts an already-complete set of those three tables, rejects a partial set,
+and installs the database guard that keeps profile revisions immutable. The archive revision
+is intentionally irreversible because dropping it would delete retained raw payloads and
+delivery facts.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or
