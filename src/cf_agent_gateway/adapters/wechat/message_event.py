@@ -39,4 +39,5 @@ def wechat_message_to_event(message: NormalizedWechatMessage) -> MessageEvent:
         reply_context=reply_context,
         reply_to_message_id=None,
         attachments=[],
+        raw_payload=message.raw_payload,
     )

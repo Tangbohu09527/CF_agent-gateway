@@ -79,6 +79,7 @@ def normalize_wechat_message(
         is_mentioned=is_mentioned,
         is_self=message.is_self is True,
         reply=reply,
+        raw_payload=message.raw_payload,
     )
 
 

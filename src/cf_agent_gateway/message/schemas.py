@@ -1,11 +1,28 @@
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SkipValidation,
+    StrictInt,
+    StringConstraints,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
+
+from cf_agent_gateway.message.enums import MessageDirection
 
 PreservedText = Annotated[str, StringConstraints(strip_whitespace=False)]
+RawPayload = SkipValidation[dict[str, JsonValue]]
+_RAW_PAYLOAD_ADAPTER = TypeAdapter(dict[str, JsonValue])
 
 
 class MessageSchema(BaseModel):
@@ -31,6 +48,21 @@ class ReplyContext(MessageSchema):
 
 
 class MessageEvent(MessageSchema):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "anyOf": [
+                {
+                    "required": ["timestamp"],
+                    "properties": {"timestamp": {"type": "string", "format": "date-time"}},
+                },
+                {
+                    "required": ["occurred_at"],
+                    "properties": {"occurred_at": {"type": "string", "format": "date-time"}},
+                },
+            ]
+        }
+    )
+
     event_id: str = Field(min_length=1, max_length=255)
     source: str = Field(min_length=1, max_length=64)
     source_account_id: str = Field(min_length=1, max_length=255)
@@ -46,13 +78,37 @@ class MessageEvent(MessageSchema):
     message_type: str = Field(min_length=1, max_length=64)
     raw_type: StrictInt | None = None
     content: PreservedText
-    timestamp: datetime
+    timestamp: datetime | None = None
+    occurred_at: datetime | None = None
+    received_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    direction: MessageDirection | None = None
     source_local_id: str | None = Field(default=None, min_length=1, max_length=255)
     source_server_id: str | None = Field(default=None, min_length=1, max_length=255)
     source_message_id_is_fallback: bool = False
     reply_context: ReplyContext | None = None
     reply_to_message_id: str | None = Field(default=None, max_length=255)
     attachments: list[AttachmentMetadata] = Field(default_factory=list)
+    raw_payload: RawPayload | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_legacy_timestamp(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        if "timestamp" in value or "occurred_at" not in value:
+            return value
+        candidate = dict(value)
+        candidate["timestamp"] = candidate["occurred_at"]
+        return candidate
+
+    @field_validator("raw_payload", mode="before")
+    @classmethod
+    def validate_raw_payload(cls, value: object) -> object:
+        if value is None:
+            return None
+        validated = _RAW_PAYLOAD_ADAPTER.validate_python(value)
+        json.dumps(validated, allow_nan=False)
+        return validated
 
     @model_validator(mode="after")
     def validate_envelope(self) -> Self:
@@ -63,6 +119,21 @@ class MessageEvent(MessageSchema):
                 raise ValueError("is_mentioned must be null for private conversations")
         elif self.is_mentioned is None:
             self.is_mentioned = False
+        if self.timestamp is None and self.occurred_at is None:
+            raise ValueError("timestamp or occurred_at is required")
+        if self.timestamp is None:
+            self.timestamp = self.occurred_at
+        elif self.occurred_at is None:
+            self.occurred_at = self.timestamp
+        elif self.timestamp != self.occurred_at:
+            raise ValueError("occurred_at must match timestamp when both are supplied")
+        if self.direction is None:
+            if self.sender_type == "system":
+                self.direction = MessageDirection.SYSTEM
+            elif self.is_self:
+                self.direction = MessageDirection.OUTBOUND
+            else:
+                self.direction = MessageDirection.INBOUND
         return self
 
 
@@ -103,6 +174,9 @@ class MessageResponse(BaseModel):
     raw_type: int | None
     content: str
     timestamp: datetime
+    occurred_at: datetime
+    received_at: datetime
+    direction: MessageDirection
     source_local_id: str | None
     source_server_id: str | None
     source_message_id_is_fallback: bool

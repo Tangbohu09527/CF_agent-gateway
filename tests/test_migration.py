@@ -29,6 +29,9 @@ BUSINESS_TABLES = frozenset(
         "wechat_sync_checkpoints",
     }
 )
+ARCHIVE_TABLES = frozenset({"message_delivery_attempts", "message_raw_payloads"})
+SCHEMA_TABLES = BUSINESS_TABLES | ARCHIVE_TABLES
+FOUNDATION_REVISION = "20260806_01"
 
 
 def _head_revision() -> str:
@@ -38,19 +41,24 @@ def _head_revision() -> str:
     return head_revision
 
 
-def test_upgrade_records_schema_version_without_business_tables() -> None:
+def test_upgrade_preserves_foundation_marker_then_applies_schema_chain() -> None:
     engine = create_database_engine("sqlite+pysqlite:///:memory:")
     try:
         assert migration.get_schema_version(engine) is None
 
-        migration.upgrade_database(engine)
+        migration.upgrade_database(engine, FOUNDATION_REVISION)
 
         assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+        assert migration.get_schema_version(engine) == FOUNDATION_REVISION
+
+        migration.upgrade_database(engine)
+
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == _head_revision()
 
         migration.upgrade_database(engine)
 
-        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == _head_revision()
     finally:
         engine.dispose()
@@ -65,22 +73,25 @@ def test_upgrade_preserves_existing_tables_and_data() -> None:
 
         migration.upgrade_database(engine)
 
-        assert set(inspect(engine).get_table_names()) == {"alembic_version", "existing_data"}
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {
+            "alembic_version",
+            "existing_data",
+        }
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT id FROM existing_data")) == 7
     finally:
         engine.dispose()
 
 
-def test_upgrade_versions_existing_application_schema_without_altering_it() -> None:
+def test_upgrade_is_idempotent_after_database_initialization() -> None:
     engine = create_database_engine("sqlite+pysqlite:///:memory:")
     try:
         initialize_database(engine)
-        assert set(inspect(engine).get_table_names()) == BUSINESS_TABLES
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
 
         migration.upgrade_database(engine)
 
-        assert set(inspect(engine).get_table_names()) == BUSINESS_TABLES | {"alembic_version"}
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == _head_revision()
     finally:
         engine.dispose()
@@ -99,30 +110,58 @@ def test_migrate_database_creates_file_sqlite_parent_and_persists_version(
     engine = create_database_engine(database_url)
     try:
         assert migration.get_schema_version(engine) == _head_revision()
-        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+        assert set(inspect(engine).get_table_names()) == SCHEMA_TABLES | {"alembic_version"}
     finally:
         engine.dispose()
 
 
-@pytest.mark.parametrize(
-    "database_url",
-    [
-        "sqlite+pysqlite:///:memory:",
-        "postgresql+psycopg://user:password@localhost/gateway",
-    ],
-    ids=["sqlite", "postgresql"],
-)
-def test_offline_upgrade_emits_only_schema_version_ddl(database_url: str) -> None:
+def test_postgresql_offline_upgrade_emits_complete_schema_ddl() -> None:
     output = StringIO()
     migration_config = Config(str(ALEMBIC_CONFIG_PATH), output_buffer=output)
-    migration_config.attributes["database_url"] = database_url
+    migration_config.attributes["database_url"] = (
+        "postgresql+psycopg://user:password@localhost/gateway"
+    )
 
     command.upgrade(migration_config, "head", sql=True)
 
     rendered_sql = output.getvalue().lower()
     assert "create table alembic_version" in rendered_sql
     assert _head_revision().lower() in rendered_sql
-    assert all(table_name not in rendered_sql for table_name in BUSINESS_TABLES)
+    assert all(table_name in rendered_sql for table_name in SCHEMA_TABLES)
+
+
+def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
+    database_path = tmp_path / "batch.db"
+    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
+    migration_config = Config(str(ALEMBIC_CONFIG_PATH))
+    migration_config.attributes["configure_logger"] = False
+    migration_config.set_main_option("sqlalchemy.url", database_url)
+
+    command.upgrade(migration_config, "20260806_0001")
+
+    engine = create_database_engine(database_url)
+    try:
+        baseline_columns = {column["name"] for column in inspect(engine).get_columns("messages")}
+        assert {"direction", "occurred_at", "received_at"}.isdisjoint(baseline_columns)
+    finally:
+        engine.dispose()
+
+    command.upgrade(migration_config, "head")
+
+    engine = create_database_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        archive_columns = {column["name"] for column in inspector.get_columns("messages")}
+        assert {"direction", "occurred_at", "received_at"}.issubset(archive_columns)
+        assert {"message_delivery_attempts", "message_raw_payloads"}.issubset(
+            inspector.get_table_names()
+        )
+        assert "ck_message_direction" in {
+            constraint["name"] for constraint in inspector.get_check_constraints("messages")
+        }
+        assert migration.get_schema_version(engine) == _head_revision()
+    finally:
+        engine.dispose()
 
 
 def test_migration_cli_reads_gateway_config(

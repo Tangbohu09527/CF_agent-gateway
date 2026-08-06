@@ -150,9 +150,10 @@ readiness. See [v1-staging-validation.md](v1-staging-validation.md).
 SQLAlchemy 2.x provides the persistence boundary. SQLite is the phase-one
 database and PostgreSQL is supported by using a
 `postgresql+psycopg://...` database URL. Domain packages must not depend on a
-specific SQL dialect. Database-specific migrations live in
-`src/cf_agent_gateway/migrations/` and run through the explicit Alembic migration command.
-The initial migration is a schema-version baseline only and contains no business-table DDL.
+specific SQL dialect. Alembic owns the schema, with packaged dialect-neutral revisions in
+`src/cf_agent_gateway/migrations/` tested through SQLite execution and PostgreSQL DDL
+rendering. The same migration tree is used by application startup and the explicit
+`cf-agent-gateway-migrate` command.
 
 Conversations are unique by `(source, source_account_id, conversation_id)`, and
 messages reference conversations through the same three-column scope. Conversation
@@ -168,6 +169,11 @@ different bot accounts from conflicting.
 
 Each message can persist `conversation_type`, structured `is_mentioned`, `is_self`, sender
 kind, raw channel type, and available channel-local identifiers from its adapter envelope.
+The archive adds `direction`, `occurred_at`, and first-received `received_at` while retaining
+the legacy `timestamp` field. A canonical first-seen upstream JSON envelope can be stored in
+`message_raw_payloads`; duplicate physical messages do not overwrite it. The
+`message_delivery_attempts` table provides delivery lifecycle storage without adding a
+query API or wiring delivery retries in this foundation change.
 Private-message mention state is `null`; group-message mention state is an explicit boolean
 and defaults to `false` when absent. The store does not inspect message content to infer
 mentions. Direct Message API or sink calls can save `is_self=true`; the active WeChat
@@ -176,9 +182,10 @@ Verified reply summaries are stored as JSON context, not as inferred message rel
 Attachment rows contain metadata only; the V1 WeChat polling path does not populate them
 or deliver file bytes to Hermes.
 
-Business-table migrations have not been introduced yet. Developers must still back up and
-manually recreate older development databases before using the new schema. The current V1
-startup rejects sender-scoped thread-binding constraints because the implemented binding is
-conversation-scoped. That behavior is the known deviation described above, not a change to
-the target sender-isolated group design. The service never automatically migrates or deletes
-`gateway.db`.
+Databases created before Alembic must be backed up, verified against the main-schema
+baseline, stamped with revision `20260806_0001`, and upgraded to `head`. Empty and
+already-versioned databases upgrade during startup; unversioned non-empty databases are
+rejected. The current V1 startup also rejects sender-scoped thread-binding constraints
+because the implemented binding is conversation-scoped. That behavior is the known
+deviation described above, not a change to the target sender-isolated group design. The
+service never automatically deletes `gateway.db`.

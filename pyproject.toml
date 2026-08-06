@@ -9,7 +9,7 @@ description = "Enterprise AI Message Gateway"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "alembic>=1.14,<2.0",
+  "alembic>=1.16,<2.0",
   "fastapi>=0.115,<1.0",
   "httpx>=0.28,<1.0",
   "psycopg[binary]>=3.2,<4.0",

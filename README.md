@@ -157,10 +157,12 @@ stable relationship parsing is available.
 
 ### Development database schema
 
-Alembic migration infrastructure is available through `cf-agent-gateway-migrate`. The
-initial migration records only the schema version and does not migrate business tables.
-During this transition the service continues to initialize business tables through
-SQLAlchemy `create_all`; it does not automatically run migrations or delete `gateway.db`.
+Alembic owns the database schema through packaged migrations and the
+`cf-agent-gateway-migrate` command. The service upgrades empty and versioned databases to
+the current migration head during startup; it never deletes `gateway.db`. A database
+created before migration support must be backed up, verified against the main-schema
+baseline, stamped with `20260806_0001`, and upgraded to `head`. See
+[`migrations/README.md`](migrations/README.md) for commands and safeguards.
 
 Attachment content is not stored; only metadata and a storage path can be persisted through
 the Message API. The V1 WeChat polling path does not populate attachment rows or pass image

@@ -5,7 +5,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from cf_agent_gateway.message.errors import ConversationTypeConflictError
-from cf_agent_gateway.message.models import Attachment, Conversation, Message
+from cf_agent_gateway.message.models import (
+    Attachment,
+    Conversation,
+    Message,
+    MessageRawPayload,
+)
 from cf_agent_gateway.message.schemas import MessageEvent
 
 
@@ -95,6 +100,9 @@ class MessageStore:
             raw_type=event.raw_type,
             content=event.content,
             timestamp=event.timestamp,
+            occurred_at=event.occurred_at,
+            received_at=event.received_at,
+            direction=event.direction.value,
             source_local_id=event.source_local_id,
             source_server_id=event.source_server_id,
             source_message_id_is_fallback=event.source_message_id_is_fallback,
@@ -115,6 +123,11 @@ class MessageStore:
                 )
                 for metadata in event.attachments
             ],
+            raw_payload=(
+                MessageRawPayload(payload=event.raw_payload)
+                if event.raw_payload is not None
+                else None
+            ),
         )
 
     @staticmethod

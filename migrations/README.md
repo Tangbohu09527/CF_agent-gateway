@@ -1,6 +1,8 @@
 # Migrations
 
-Alembic provides the V2 database migration infrastructure. Run migrations explicitly with:
+Alembic owns the Gateway schema through the packaged migration tree under
+`src/cf_agent_gateway/migrations/`. Application startup upgrades an empty or already-versioned
+database to the current head. The same tree can be run explicitly with:
 
 ```console
 cf-agent-gateway-migrate
@@ -10,14 +12,41 @@ The runner reads `config/config.yaml` by default, honors `CF_GATEWAY_CONFIG`, an
 to the latest packaged revision. It does not depend on the current working directory.
 `CF_GATEWAY_ALEMBIC_CONFIG` can select a separate Alembic configuration when needed.
 
-Migration scripts are packaged under `src/cf_agent_gateway/migrations/`. The
-`20260806_01` migration is an infrastructure-only baseline. It creates and records
-Alembic's `alembic_version` schema version but contains no business-table DDL.
-Application startup remains on the existing SQLAlchemy `create_all` path during this
-transition; it does not run migrations automatically.
+For direct Alembic CLI use, set `CF_AGENT_GATEWAY_DATABASE_URL` when the migration target
+differs from the default `sqlite+pysqlite:///./data/gateway.db`:
 
-Migrations must be reviewed against both SQLite and PostgreSQL until separate
-dialect-specific paths are deliberately adopted. The V1 conversation-scoped group thread
-binding is a known implementation deviation from the target sender-isolated group design;
-correcting its key and uniqueness constraints requires an explicit code and data migration,
-not a documentation-only change.
+```powershell
+$env:CF_AGENT_GATEWAY_DATABASE_URL = "sqlite+pysqlite:///./data/gateway.db"
+python -m alembic upgrade head
+```
+
+Run the CLI upgrade as one exclusive deployment step while Gateway API and worker
+processes are stopped. Gateway startup processes serialize their own automatic upgrade,
+but a separately invoked Alembic CLI is not part of that runtime lock.
+
+Databases created by `main` before Alembic have the baseline schema but no
+`alembic_version` table. Back up the database, verify that it is on the exact `main` schema,
+then adopt and upgrade it explicitly:
+
+```powershell
+python -m alembic stamp 20260806_0001
+python -m alembic upgrade head
+```
+
+Do not stamp an unknown or older schema. Startup rejects non-empty, unversioned databases
+instead of guessing their revision. The single packaged chain is:
+
+```text
+20260806_01 -> 20260806_0001 -> 20260806_0002
+```
+
+`20260806_01` retains the migration-foundation marker without business DDL.
+`20260806_0001` creates the V1 main schema for an empty database and adopts a complete V1
+schema already versioned at the foundation marker. `20260806_0002` adds the Message Archive
+schema. The revisions are dialect-neutral and tested against SQLite execution and PostgreSQL
+offline DDL rendering. The archive revision is intentionally irreversible because dropping
+it would delete retained raw payloads and delivery facts.
+
+Installed deployments can use the packaged tree without a source checkout. A custom startup
+configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or
+`CF_GATEWAY_ALEMBIC_CONFIG`; the Docker image points startup at `/app/alembic.ini`.

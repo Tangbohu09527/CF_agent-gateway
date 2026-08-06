@@ -11,7 +11,7 @@ from cf_agent_gateway.adapters.wechat import (
     wechat_message_to_event,
 )
 from cf_agent_gateway.identity.models import EnterpriseIdentity, SourceIdentityMapping
-from cf_agent_gateway.message.models import Message
+from cf_agent_gateway.message.models import Message, MessageRawPayload
 from cf_agent_gateway.message.store import MessageStore
 
 
@@ -43,7 +43,10 @@ def test_wechat_converter_maps_every_message_event_field() -> None:
 
     event = wechat_message_to_event(normalized)
 
-    assert event.model_dump() == {
+    event_payload = event.model_dump()
+    received_at = event_payload.pop("received_at")
+    assert received_at >= event_payload["occurred_at"]
+    assert event_payload == {
         "event_id": normalized.event_id,
         "source": "wechat",
         "source_account_id": "wxid_bot",
@@ -60,6 +63,8 @@ def test_wechat_converter_maps_every_message_event_field() -> None:
         "raw_type": 49,
         "content": "reply body",
         "timestamp": datetime.fromisoformat("2026-08-01T10:15:00+08:00"),
+        "occurred_at": datetime.fromisoformat("2026-08-01T10:15:00+08:00"),
+        "direction": "outbound",
         "source_local_id": "44",
         "source_server_id": "55",
         "source_message_id_is_fallback": False,
@@ -73,6 +78,26 @@ def test_wechat_converter_maps_every_message_event_field() -> None:
         },
         "reply_to_message_id": None,
         "attachments": [],
+        "raw_payload": {
+            "localId": " 44 ",
+            "serverId": 55,
+            "chatId": "team@chatroom",
+            "sender": "wxid_alice",
+            "senderName": "Alice",
+            "type": 49,
+            "content": "reply body",
+            "timestamp": "2026-08-01T10:15:00+08:00",
+            "isMentioned": True,
+            "isSelf": True,
+            "reply": {
+                "localId": 12,
+                "serverId": " 34 ",
+                "sender": "wxid_bob",
+                "senderName": "Bob",
+                "type": 1,
+                "content": "original body",
+            },
+        },
     }
 
 
@@ -134,6 +159,33 @@ def test_senderless_wechat_system_message_is_persisted_and_queryable(
     assert conversation_response.status_code == 200
     assert [message["id"] for message in conversation_response.json()] == [message_id]
     assert conversation_response.json()[0]["sender_type"] == "system"
+
+
+def test_wechat_raw_payload_survives_normalization_and_persistence(
+    client: TestClient,
+) -> None:
+    raw_payload = {
+        "localId": 88,
+        "serverId": 99,
+        "chatId": "wxid_alice",
+        "sender": "wxid_alice",
+        "type": 1,
+        "content": "archive exactly",
+        "timestamp": "2026-08-01T10:15:00+08:00",
+        "unknown": {"items": [1, True, None, "value"]},
+    }
+    normalized = normalize_wechat_message(raw_payload, source_account_id="wxid_bot")
+    event = wechat_message_to_event(normalized)
+
+    with client.app.state.database_session_factory() as session:
+        stored, created = MessageStore(session).create(event)
+        archived_payload = session.scalar(
+            select(MessageRawPayload).where(MessageRawPayload.message_id == stored.id)
+        )
+
+    assert created is True
+    assert archived_payload is not None
+    assert archived_payload.payload == raw_payload
 
 
 def test_wechat_local_id_fallback_and_self_flag_survive_persistence(

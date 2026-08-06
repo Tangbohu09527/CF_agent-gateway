@@ -2,12 +2,19 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from cf_agent_gateway.message.enums import DeliveryAttemptStatus, MessageDirection
 from cf_agent_gateway.message.errors import ConversationTypeConflictError
-from cf_agent_gateway.message.models import Conversation, Message
+from cf_agent_gateway.message.models import (
+    Conversation,
+    Message,
+    MessageDeliveryAttempt,
+    MessageRawPayload,
+)
 from cf_agent_gateway.message.schemas import MessageEvent
 from cf_agent_gateway.message.store import MessageStore
 
@@ -100,6 +107,9 @@ def test_create_message_saves_and_returns_source_envelope(client: TestClient) ->
     assert body["is_mentioned"] is True
     assert body["is_self"] is False
     assert body["sender_type"] == "human"
+    assert body["direction"] == "inbound"
+    assert body["occurred_at"] == body["timestamp"]
+    assert body["received_at"] is not None
     assert body["raw_type"] == 1
     assert body["source_local_id"] == "local-001"
     assert body["source_server_id"] == "server-001"
@@ -132,6 +142,49 @@ def test_get_message_and_scoped_conversation_messages(client: TestClient) -> Non
     assert conversation_response.json()[0]["sender_type"] == "human"
     assert conversation_response.json()[0]["raw_type"] == 1
     assert conversation_response.json()[0]["reply_context"]["content"] == "Original message"
+
+
+def test_occurred_at_can_replace_legacy_timestamp(client: TestClient) -> None:
+    event = message_event(occurred_at="2026-07-31T10:00:00+08:00")
+    del event["timestamp"]
+
+    created = client.post("/internal/messages", json=event)
+
+    assert created.status_code == 201
+    body = client.get(f"/messages/{created.json()['id']}").json()
+    assert body["occurred_at"] == body["timestamp"]
+
+
+def test_message_event_schema_allows_either_time_field() -> None:
+    schema = MessageEvent.model_json_schema()
+
+    assert "timestamp" not in schema.get("required", [])
+    assert "occurred_at" not in schema.get("required", [])
+    assert schema["anyOf"] == [
+        {
+            "required": ["timestamp"],
+            "properties": {"timestamp": {"type": "string", "format": "date-time"}},
+        },
+        {
+            "required": ["occurred_at"],
+            "properties": {"occurred_at": {"type": "string", "format": "date-time"}},
+        },
+    ]
+    with pytest.raises(ValidationError, match="timestamp or occurred_at is required"):
+        MessageEvent.model_validate(message_event(timestamp=None))
+
+
+def test_raw_payload_rejects_non_json_programmatic_values() -> None:
+    with pytest.raises(ValidationError):
+        MessageEvent.model_validate(
+            message_event(raw_payload={"received": datetime(2026, 8, 1, 10, 0)})
+        )
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_raw_payload_rejects_non_finite_numbers(non_finite: float) -> None:
+    with pytest.raises(ValidationError, match="Out of range float values"):
+        MessageEvent.model_validate(message_event(raw_payload={"nested": [non_finite]}))
 
 
 def test_same_conversation_id_does_not_conflict_across_accounts(client: TestClient) -> None:
@@ -272,6 +325,30 @@ def test_system_message_allows_null_sender_id(client: TestClient) -> None:
     body = client.get(f"/messages/{created.json()['id']}").json()
     assert body["sender_type"] == "system"
     assert body["sender_id"] is None
+    assert body["direction"] == "system"
+
+
+@pytest.mark.parametrize("direction", list(MessageDirection))
+def test_message_supports_archive_directions(
+    client: TestClient, direction: MessageDirection
+) -> None:
+    created = client.post(
+        "/internal/messages",
+        json=message_event(direction=direction.value),
+    )
+
+    assert created.status_code == 201
+    body = client.get(f"/messages/{created.json()['id']}").json()
+    assert body["direction"] == direction.value
+
+
+def test_message_rejects_unknown_direction(client: TestClient) -> None:
+    response = client.post(
+        "/internal/messages",
+        json=message_event(direction="sideways"),
+    )
+
+    assert response.status_code == 422
 
 
 def test_sender_type_rejects_unknown_value(client: TestClient) -> None:
@@ -363,9 +440,69 @@ def test_self_message_is_still_saved(client: TestClient) -> None:
     message_id = created.json()["id"]
     body = client.get(f"/messages/{message_id}").json()
     assert body["is_self"] is True
+    assert body["direction"] == "outbound"
 
     messages = client.get(conversation_messages_path()).json()
     assert [message["id"] for message in messages] == [message_id]
+
+
+def test_raw_payload_is_saved_once_without_being_exposed(client: TestClient) -> None:
+    original_payload = {
+        "type": 1,
+        "content": "raw content",
+        "unknown": {"items": [1, True, None, "value"]},
+    }
+    first = client.post(
+        "/internal/messages",
+        json=message_event(raw_payload=original_payload),
+    )
+    duplicate = client.post(
+        "/internal/messages",
+        json=message_event(raw_payload={"content": "must not overwrite"}),
+    )
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 200
+    assert "raw_payload" not in client.get(f"/messages/{first.json()['id']}").json()
+    with database_session_factory(client)() as session:
+        rows = list(session.scalars(select(MessageRawPayload)))
+        assert len(rows) == 1
+        assert rows[0].message_id == first.json()["id"]
+        assert rows[0].payload == original_payload
+
+
+def test_delivery_attempt_foundation_enforces_message_attempt_identity(
+    client: TestClient,
+) -> None:
+    message_id = client.post(
+        "/internal/messages",
+        json=message_event(direction="assistant"),
+    ).json()["id"]
+
+    with database_session_factory(client)() as session:
+        session.add_all(
+            [
+                MessageDeliveryAttempt(message_id=message_id, attempt_number=1),
+                MessageDeliveryAttempt(
+                    message_id=message_id,
+                    attempt_number=2,
+                    status=DeliveryAttemptStatus.SUCCEEDED.value,
+                    provider_message_id="provider-002",
+                    response_payload={"accepted": True},
+                ),
+            ]
+        )
+        session.commit()
+        attempts = list(
+            session.scalars(
+                select(MessageDeliveryAttempt).order_by(MessageDeliveryAttempt.attempt_number)
+            )
+        )
+        assert [attempt.status for attempt in attempts] == ["pending", "succeeded"]
+
+        session.add(MessageDeliveryAttempt(message_id=message_id, attempt_number=2))
+        with pytest.raises(IntegrityError):
+            session.commit()
 
 
 def test_conversation_query_is_isolated_by_source_and_account(client: TestClient) -> None:

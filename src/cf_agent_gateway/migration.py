@@ -35,7 +35,7 @@ def upgrade_database(
 ) -> None:
     ensure_database_directory(engine)
     migration_config = create_migration_config(config_path)
-    with engine.begin() as connection:
+    with engine.connect() as connection:
         migration_config.attributes["connection"] = connection
         command.upgrade(migration_config, revision)
 

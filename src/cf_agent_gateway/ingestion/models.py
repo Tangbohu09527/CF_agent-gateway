@@ -43,6 +43,9 @@ class PersistedMessageSnapshot:
     raw_type: int | None
     content: str
     timestamp: datetime
+    occurred_at: datetime
+    received_at: datetime
+    direction: str
     source_local_id: str | None
     source_server_id: str | None
     source_message_id_is_fallback: bool

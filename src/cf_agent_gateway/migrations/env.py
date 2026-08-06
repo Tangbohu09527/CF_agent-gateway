@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from logging.config import fileConfig
+from os import environ
+from pathlib import Path
+
 from alembic import context
 from sqlalchemy import Connection, engine_from_config, make_url, pool
 
 from cf_agent_gateway.database import Base, load_database_models
 
 config = context.config
+
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
+
+if database_url := environ.get("CF_AGENT_GATEWAY_DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 load_database_models()
 target_metadata = Base.metadata
@@ -32,15 +42,22 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations(connection: Connection) -> None:
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        compare_type=True,
-        render_as_batch=connection.dialect.name == "sqlite",
-    )
+    is_sqlite = connection.dialect.name == "sqlite"
+    if is_sqlite:
+        _set_sqlite_foreign_keys(connection, enabled=False)
+    try:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            render_as_batch=is_sqlite,
+        )
 
-    with context.begin_transaction():
-        context.run_migrations()
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        if is_sqlite:
+            _set_sqlite_foreign_keys(connection, enabled=True)
 
 
 def run_migrations_online() -> None:
@@ -49,6 +66,14 @@ def run_migrations_online() -> None:
         run_migrations(existing_connection)
         return
 
+    database_url = make_url(config.get_main_option("sqlalchemy.url"))
+    if database_url.get_backend_name() == "sqlite" and database_url.database not in {
+        None,
+        "",
+        ":memory:",
+    }:
+        Path(database_url.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -56,6 +81,14 @@ def run_migrations_online() -> None:
     )
     with connectable.connect() as connection:
         run_migrations(connection)
+
+
+def _set_sqlite_foreign_keys(connection: Connection, *, enabled: bool) -> None:
+    cursor = connection.connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA foreign_keys={'ON' if enabled else 'OFF'}")
+    finally:
+        cursor.close()
 
 
 if context.is_offline_mode():

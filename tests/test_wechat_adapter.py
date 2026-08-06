@@ -10,6 +10,7 @@ import pytest
 
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatClient,
+    RawWechatMessage,
     WechatAPIError,
     WechatConversationType,
     WechatMessageType,
@@ -127,11 +128,16 @@ def test_invalid_bearer_token_is_rejected_without_leaking_value(invalid_token: s
 
 
 def test_list_chats_and_messages_parse_supported_payloads() -> None:
+    payload = raw_message(
+        unknown={"items": [1, True, None, "value"]},
+        raw_payload="upstream field with a reserved-looking name",
+    )
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/chats":
             return httpx.Response(200, json={"data": {"chats": [{"chatId": "wxid_alice"}]}})
         assert request.url.path == "/api/messages/wxid_alice"
-        return httpx.Response(200, json={"messages": [raw_message()]})
+        return httpx.Response(200, json={"messages": [payload]})
 
     with wechat_client(handler) as client:
         chats = client.list_chats()
@@ -139,6 +145,16 @@ def test_list_chats_and_messages_parse_supported_payloads() -> None:
 
     assert chats == [{"chatId": "wxid_alice"}]
     assert messages[0].server_id == 9001
+    assert messages[0].raw_payload == payload
+
+
+def test_raw_message_keeps_programmatic_datetime_compatibility() -> None:
+    timestamp = datetime.fromisoformat("2026-08-01T10:15:00+08:00")
+
+    message = RawWechatMessage.model_validate(raw_message(timestamp=timestamp))
+
+    assert message.timestamp == timestamp
+    assert message.raw_payload["timestamp"] == "2026-08-01T10:15:00+08:00"
 
 
 def test_get_media_decodes_verified_txt_response_and_preserves_metadata() -> None:
