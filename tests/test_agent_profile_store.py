@@ -461,6 +461,31 @@ def test_unbound_group_falls_back_to_unknown_group_and_binding_is_reusable(
         assert session.scalar(select(func.count()).select_from(ConversationGroupTypeBinding)) == 1
 
 
+def test_unknown_group_resolution_preserves_disabled_profile_reference(
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    with session_factory_fixture() as session:
+        store = AgentProfileStore(session)
+        profile = create_profile(store)
+        store.set_agent_profile_status(profile.id, AgentProfileStatus.DISABLED)
+        unknown_group, _ = store.create_group_type(
+            type_key=UNKNOWN_GROUP_TYPE_KEY,
+            display_name="Unknown group",
+            agent_profile_id=profile.id,
+            thread_policy=ThreadPolicy.GROUP_SENDER,
+        )
+        conversation = create_conversation(session, conversation_id="group-disabled-profile")
+
+        resolved_group = store.resolve_group_type(conversation.id)
+
+        assert resolved_group is not None
+        assert resolved_group.id == unknown_group.id
+        assert resolved_group.agent_profile_id == profile.id
+        resolved_profile = store.get_agent_profile(resolved_group.agent_profile_id)
+        assert resolved_profile is not None
+        assert resolved_profile.status is AgentProfileStatus.DISABLED
+
+
 def test_private_conversation_does_not_use_unknown_group(
     session_factory_fixture: sessionmaker[Session],
 ) -> None:

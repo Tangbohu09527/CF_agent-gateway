@@ -15,6 +15,7 @@ from cf_agent_gateway.artifact import (
     ArtifactKind,
     ArtifactRepository,
     ArtifactSizeLimitError,
+    ArtifactSizeMismatchError,
     ArtifactStateError,
     ArtifactStatus,
     ArtifactStorageError,
@@ -225,6 +226,22 @@ def test_hash_mismatch_marks_artifact_failed_and_removes_content(
     assert not stored_path(storage_root, persisted.storage_key).exists()
 
 
+def test_size_mismatch_marks_artifact_failed_and_removes_content(
+    session: Session,
+    storage_root: Path,
+) -> None:
+    repo = repository(session, storage_root)
+    artifact = create_artifact(repo)
+
+    with pytest.raises(ArtifactSizeMismatchError):
+        repo.mark_ready(artifact.artifact_id, PAYLOAD, expected_size=len(PAYLOAD) + 1)
+
+    persisted = repo.get(artifact.artifact_id)
+    assert persisted is not None
+    assert persisted.status is ArtifactStatus.FAILED
+    assert not any(path.is_file() for path in storage_root.rglob("*"))
+
+
 def test_size_limit_accepts_exact_boundary(
     session: Session,
     storage_root: Path,
@@ -397,6 +414,26 @@ def test_read_detects_content_tampering(
     stored_path(storage_root, artifact.storage_key).write_bytes(b"x" * len(PAYLOAD))
 
     with pytest.raises(ArtifactIntegrityError):
+        repo.read(artifact.artifact_id)
+
+
+def test_read_rejects_ready_file_replaced_by_symlink_outside_storage_root(
+    session: Session,
+    storage_root: Path,
+    tmp_path: Path,
+) -> None:
+    repo = repository(session, storage_root)
+    artifact = create_artifact(repo, content=PAYLOAD)
+    content_path = stored_path(storage_root, artifact.storage_key)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(PAYLOAD)
+    content_path.unlink()
+    try:
+        content_path.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    with pytest.raises(ArtifactStorageKeyError):
         repo.read(artifact.artifact_id)
 
 

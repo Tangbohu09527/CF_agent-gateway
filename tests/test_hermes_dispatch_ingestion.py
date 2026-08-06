@@ -20,7 +20,11 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesDispatchOutcome, HermesResponseRelay
+from cf_agent_gateway.hermes import (
+    HermesDispatchError,
+    HermesDispatchOutcome,
+    HermesResponseRelay,
+)
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.ingestion import MessageAdmissionService, MessageIngestionOutcome
 from cf_agent_gateway.message.models import Message
@@ -264,6 +268,36 @@ def test_duplicate_queued_message_is_not_reenqueued_or_dispatched(session: Sessi
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
 
+def test_queued_duplicate_is_not_dispatched_when_dispatcher_becomes_available(
+    session: Session,
+) -> None:
+    allow_sender(session)
+    message = normalized_message()
+
+    queued = MessageAdmissionService(session).process(message)
+
+    assert queued.dispatch_record_id is not None
+    record = session.get(HermesDispatchRecord, queued.dispatch_record_id)
+    assert record is not None
+    assert record.status is HermesDispatchStatus.QUEUED
+    assert record.attempt_count == 0
+
+    dispatcher = _RecordingDispatcher(session)
+    retried = MessageAdmissionService(
+        session,
+        hermes_dispatcher=dispatcher,
+    ).process(message)
+
+    assert retried.message_created is False
+    assert retried.dispatch_record_id == queued.dispatch_record_id
+    assert retried.hermes_dispatch is None
+    assert dispatcher.admissions == []
+    session.refresh(record)
+    assert record.status is HermesDispatchStatus.QUEUED
+    assert record.attempt_count == 0
+    assert record.last_error_code is None
+
+
 def test_dispatch_failure_propagates_after_message_commit(session: Session) -> None:
     allow_sender(session)
     message = normalized_message()
@@ -285,6 +319,71 @@ def test_dispatch_failure_propagates_after_message_commit(session: Session) -> N
     assert len(dispatcher.admissions) == 1
     assert dispatcher.admissions[0].admitted is True
     assert dispatcher.admissions[0].message_id == persisted.id
+
+
+class _ErrorDispatcher:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+        self.calls = 0
+
+    def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
+        del admission
+        self.calls += 1
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_error_code"),
+    [
+        (
+            HermesDispatchError(reason="message_not_found"),
+            HermesDispatchStatus.FAILED,
+            "hermes_dispatch_error:message_not_found",
+        ),
+        (
+            _DispatchFailure("Hermes dispatch failed"),
+            HermesDispatchStatus.UNCERTAIN,
+            "unexpected_dispatch_error",
+        ),
+    ],
+)
+def test_terminal_dispatch_is_not_replayed_by_duplicate_inbound(
+    session: Session,
+    error: Exception,
+    expected_status: HermesDispatchStatus,
+    expected_error_code: str,
+) -> None:
+    allow_sender(session)
+    message = normalized_message()
+    failing_dispatcher = _ErrorDispatcher(error)
+
+    with pytest.raises(type(error)) as exc_info:
+        MessageAdmissionService(
+            session,
+            hermes_dispatcher=failing_dispatcher,
+        ).process(message)
+
+    assert exc_info.value is error
+    record = session.scalar(select(HermesDispatchRecord))
+    assert record is not None
+    assert record.status is expected_status
+    assert record.last_error_code == expected_error_code
+    assert record.attempt_count == 1
+    terminal_state = (record.status, record.last_error_code, record.attempt_count)
+
+    retry_dispatcher = _RecordingDispatcher(session)
+    duplicate = MessageAdmissionService(
+        session,
+        hermes_dispatcher=retry_dispatcher,
+    ).process(message)
+
+    assert duplicate.message_created is False
+    assert duplicate.dispatch_record_id == record.id
+    assert duplicate.hermes_dispatch is None
+    assert failing_dispatcher.calls == 1
+    assert retry_dispatcher.admissions == []
+    session.refresh(record)
+    assert (record.status, record.last_error_code, record.attempt_count) == terminal_state
 
 
 class _DeliveryFailure(RuntimeError):

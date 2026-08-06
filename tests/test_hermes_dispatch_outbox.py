@@ -32,7 +32,19 @@ from cf_agent_gateway.task.model import (
 from cf_agent_gateway.workspace.models import AIThread, EmployeeWorkspace, ThreadType
 
 
-def seed_dispatch_target(session: Session) -> None:
+@pytest.fixture
+def session() -> Iterator[Session]:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    initialize_database(engine)
+    factory = create_database_session_factory(engine)
+    try:
+        with factory() as database_session:
+            yield database_session
+    finally:
+        engine.dispose()
+
+
+def allowed_admission(session: Session) -> AdmissionOutcome:
     identity = EnterpriseIdentity(id="identity-1", employee_id="employee-1")
     workspace = EmployeeWorkspace(
         id="workspace-1",
@@ -42,7 +54,7 @@ def seed_dispatch_target(session: Session) -> None:
         id="thread-1",
         workspace_id=workspace.id,
         thread_type=ThreadType.PRIVATE,
-        thread_key="v1:test:thread:one",
+        thread_key="v1:test:thread:1",
     )
     conversation = Conversation(
         source="test",
@@ -51,7 +63,6 @@ def seed_dispatch_target(session: Session) -> None:
         conversation_type="private",
     )
     message = Message(
-        id=1,
         event_id="event-1",
         source=conversation.source,
         source_account_id=conversation.source_account_id,
@@ -70,34 +81,20 @@ def seed_dispatch_target(session: Session) -> None:
     session.flush()
     session.add(workspace)
     session.flush()
-    session.add_all([thread, conversation])
+    session.add(thread)
+    session.flush()
+    session.add(conversation)
     session.flush()
     session.add(message)
     session.commit()
-
-
-@pytest.fixture
-def session() -> Iterator[Session]:
-    engine = create_database_engine("sqlite+pysqlite:///:memory:")
-    initialize_database(engine)
-    factory = create_database_session_factory(engine)
-    try:
-        with factory() as database_session:
-            seed_dispatch_target(database_session)
-            yield database_session
-    finally:
-        engine.dispose()
-
-
-def allowed_admission() -> AdmissionOutcome:
     return AdmissionOutcome(
-        message_id=1,
+        message_id=message.id,
         admitted=True,
         should_create_task=True,
         reason=AdmissionReason.ALLOWED,
-        enterprise_identity_id="identity-1",
-        workspace_id="workspace-1",
-        ai_thread_id="thread-1",
+        enterprise_identity_id=identity.id,
+        workspace_id=workspace.id,
+        ai_thread_id=thread.id,
     )
 
 
@@ -129,6 +126,7 @@ class _ControlledDispatcher:
 
 
 def test_inline_executor_claims_and_completes_dispatch(session: Session) -> None:
+    admission = allowed_admission(session)
     store = HermesDispatchRecordStore(session)
     dispatcher = _ControlledDispatcher(store)
 
@@ -136,9 +134,11 @@ def test_inline_executor_claims_and_completes_dispatch(session: Session) -> None
         session,
         dispatcher,
         record_store=store,
-    ).dispatch(allowed_admission())
+    ).dispatch(admission)
 
-    record = store.get_by_idempotency_key(build_hermes_dispatch_idempotency_key(1))
+    record = store.get_by_idempotency_key(
+        build_hermes_dispatch_idempotency_key(admission.message_id)
+    )
     assert record is not None
     session.refresh(record)
     assert outcome.assistant_content == "Hermes response"
@@ -197,6 +197,7 @@ def test_inline_executor_records_failure_certainty(
     expected_status: HermesDispatchStatus,
     expected_code: str,
 ) -> None:
+    admission = allowed_admission(session)
     store = HermesDispatchRecordStore(session)
     dispatcher = _ControlledDispatcher(store, error=error)
 
@@ -205,10 +206,12 @@ def test_inline_executor_records_failure_certainty(
             session,
             dispatcher,
             record_store=store,
-        ).dispatch(allowed_admission())
+        ).dispatch(admission)
 
     assert exc_info.value is error
-    record = store.get_by_idempotency_key(build_hermes_dispatch_idempotency_key(1))
+    record = store.get_by_idempotency_key(
+        build_hermes_dispatch_idempotency_key(admission.message_id)
+    )
     assert record is not None
     session.refresh(record)
     assert record.status is expected_status
@@ -232,6 +235,7 @@ class _FailedTransactionDispatcher:
 
 
 def test_inline_executor_recovers_session_before_recording_failure(session: Session) -> None:
+    admission = allowed_admission(session)
     store = HermesDispatchRecordStore(session)
     dispatcher = _FailedTransactionDispatcher(session, store)
 
@@ -240,9 +244,11 @@ def test_inline_executor_recovers_session_before_recording_failure(session: Sess
             session,
             dispatcher,
             record_store=store,
-        ).dispatch(allowed_admission())
+        ).dispatch(admission)
 
-    record = store.get_by_idempotency_key(build_hermes_dispatch_idempotency_key(1))
+    record = store.get_by_idempotency_key(
+        build_hermes_dispatch_idempotency_key(admission.message_id)
+    )
     assert record is not None
     session.refresh(record)
     assert record.status is HermesDispatchStatus.UNCERTAIN
@@ -261,6 +267,7 @@ class _FailingResponseProcessor:
 
 
 def test_delivery_failure_does_not_change_successful_dispatch(session: Session) -> None:
+    admission = allowed_admission(session)
     store = HermesDispatchRecordStore(session)
     dispatcher = _ControlledDispatcher(store)
     relay = HermesResponseRelay(
@@ -269,9 +276,11 @@ def test_delivery_failure_does_not_change_successful_dispatch(session: Session) 
     )
 
     with pytest.raises(_DeliveryFailure, match="outbound delivery failed"):
-        relay.dispatch(allowed_admission())
+        relay.dispatch(admission)
 
-    record = store.get_by_idempotency_key(build_hermes_dispatch_idempotency_key(1))
+    record = store.get_by_idempotency_key(
+        build_hermes_dispatch_idempotency_key(admission.message_id)
+    )
     assert record is not None
     session.refresh(record)
     assert record.status is HermesDispatchStatus.SUCCESS

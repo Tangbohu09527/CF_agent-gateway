@@ -152,7 +152,28 @@ def test_occurred_at_can_replace_legacy_timestamp(client: TestClient) -> None:
 
     assert created.status_code == 201
     body = client.get(f"/messages/{created.json()['id']}").json()
+    assert body["occurred_at"] == body["timestamp"] == "2026-07-31T10:00:00"
+
+
+def test_matching_timestamp_and_occurred_at_are_accepted(client: TestClient) -> None:
+    created = client.post(
+        "/internal/messages",
+        json=message_event(occurred_at="2026-07-31T10:00:00+08:00"),
+    )
+
+    assert created.status_code == 201
+    body = client.get(f"/messages/{created.json()['id']}").json()
     assert body["occurred_at"] == body["timestamp"]
+
+
+def test_conflicting_timestamp_and_occurred_at_are_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/internal/messages",
+        json=message_event(occurred_at="2026-07-31T10:00:01+08:00"),
+    )
+
+    assert response.status_code == 422
+    assert "occurred_at must match timestamp when both are supplied" in response.text
 
 
 def test_message_event_schema_allows_either_time_field() -> None:
@@ -446,7 +467,9 @@ def test_self_message_is_still_saved(client: TestClient) -> None:
     assert [message["id"] for message in messages] == [message_id]
 
 
-def test_raw_payload_is_saved_once_without_being_exposed(client: TestClient) -> None:
+def test_received_at_and_raw_payload_are_first_write_wins(client: TestClient) -> None:
+    original_received_at = "2026-08-01T09:08:07.654321"
+    duplicate_received_at = "2026-08-01T10:09:08.765432"
     original_payload = {
         "type": 1,
         "content": "raw content",
@@ -454,18 +477,29 @@ def test_raw_payload_is_saved_once_without_being_exposed(client: TestClient) -> 
     }
     first = client.post(
         "/internal/messages",
-        json=message_event(raw_payload=original_payload),
+        json=message_event(
+            received_at=original_received_at,
+            raw_payload=original_payload,
+        ),
     )
     duplicate = client.post(
         "/internal/messages",
-        json=message_event(raw_payload={"content": "must not overwrite"}),
+        json=message_event(
+            received_at=duplicate_received_at,
+            raw_payload={"content": "must not overwrite"},
+        ),
     )
 
     assert first.status_code == 201
     assert duplicate.status_code == 200
-    assert "raw_payload" not in client.get(f"/messages/{first.json()['id']}").json()
+    body = client.get(f"/messages/{first.json()['id']}").json()
+    assert body["received_at"] == original_received_at
+    assert "raw_payload" not in body
     with database_session_factory(client)() as session:
+        message = session.get(Message, first.json()["id"])
         rows = list(session.scalars(select(MessageRawPayload)))
+        assert message is not None
+        assert message.received_at == datetime.fromisoformat(original_received_at)
         assert len(rows) == 1
         assert rows[0].message_id == first.json()["id"]
         assert rows[0].payload == original_payload

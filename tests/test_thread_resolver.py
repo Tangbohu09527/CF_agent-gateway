@@ -205,6 +205,50 @@ def test_concurrent_first_resolution_creates_one_thread(tmp_path: Path) -> None:
         engine.dispose()
 
 
+def test_concurrent_group_shared_resolution_creates_distinct_workspaces_and_one_thread(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "thread-resolver-group-shared-concurrency.db"
+    engine = create_database_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    initialize_database(engine)
+    factory = create_database_session_factory(engine)
+    barrier = Barrier(2)
+    try:
+        with factory() as session:
+            identity_ids = (
+                create_identity(session, "EMP-A").id,
+                create_identity(session, "EMP-B").id,
+            )
+            assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 0
+
+        def resolve(identity_id: str) -> tuple[str, str]:
+            with factory() as session:
+                request = resolution_request(identity_id, policy=ThreadPolicy.GROUP_SHARED)
+                barrier.wait(timeout=10)
+                thread = ThreadResolver(session).resolve(request)
+                workspace_id = session.scalar(
+                    select(EmployeeWorkspace.id).where(
+                        EmployeeWorkspace.enterprise_identity_id == identity_id
+                    )
+                )
+                assert workspace_id is not None
+                return thread.id, workspace_id
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolutions = list(executor.map(resolve, identity_ids))
+
+        thread_ids = {thread_id for thread_id, _ in resolutions}
+        workspace_ids = {workspace_id for _, workspace_id in resolutions}
+        assert len(thread_ids) == 1
+        assert len(workspace_ids) == 2
+        with factory() as session:
+            assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 2
+            assert session.scalar(select(func.count()).select_from(AIThread)) == 1
+            assert session.scalar(select(AIThread.id)) == next(iter(thread_ids))
+    finally:
+        engine.dispose()
+
+
 def test_v1_and_v2_thread_keys_can_coexist(
     session_factory: sessionmaker[Session],
 ) -> None:
