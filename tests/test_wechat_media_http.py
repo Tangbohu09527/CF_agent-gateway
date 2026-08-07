@@ -134,9 +134,9 @@ def test_send_file_accepts_data_at_exact_size_limit() -> None:
     file_data = b"1234"
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert json.loads(request.content)["file"]["data"] == base64.b64encode(
-            file_data
-        ).decode("ascii")
+        assert json.loads(request.content)["file"]["data"] == base64.b64encode(file_data).decode(
+            "ascii"
+        )
         return httpx.Response(200, json={"success": True})
 
     with media_sender(handler, max_media_bytes=len(file_data)) as sender:

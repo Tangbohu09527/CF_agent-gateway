@@ -34,9 +34,7 @@ _FILE_MIME_TYPES_BY_SUFFIX = {
     ".7z": frozenset({"application/x-7z-compressed"}),
     ".csv": frozenset({"text/csv"}),
     ".doc": frozenset({"application/msword"}),
-    ".docx": frozenset(
-        {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
-    ),
+    ".docx": frozenset({"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}),
     ".json": frozenset({"application/json"}),
     ".gz": frozenset({"application/gzip"}),
     ".html": frozenset({"text/html"}),
@@ -51,9 +49,7 @@ _FILE_MIME_TYPES_BY_SUFFIX = {
     ".tar": frozenset({"application/x-tar"}),
     ".txt": frozenset({"text/plain"}),
     ".xls": frozenset({"application/vnd.ms-excel"}),
-    ".xlsx": frozenset(
-        {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
-    ),
+    ".xlsx": frozenset({"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),
     ".xml": frozenset({"application/xml", "text/xml"}),
     ".zip": frozenset({"application/zip", "application/x-zip-compressed"}),
 }
@@ -184,11 +180,7 @@ def _required_string(value: object, field_name: str) -> str:
 
 
 def _media_size_limit(value: object) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= MAX_MEDIA_BYTES
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_MEDIA_BYTES:
         raise ValueError(f"max_media_bytes must be between 1 and {MAX_MEDIA_BYTES}")
     return value
 
