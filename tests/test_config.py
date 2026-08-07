@@ -15,6 +15,7 @@ def test_runtime_settings_defaults() -> None:
     settings = RuntimeSettings()
 
     assert settings.polling_interval_seconds == 3.0
+    assert settings.v2_routing_enabled is False
 
 
 def test_runtime_settings_rejects_interval_above_platform_wait_limit() -> None:
@@ -66,6 +67,7 @@ logging:
   level: debug
 runtime:
   polling_interval_seconds: 1.5
+  v2_routing_enabled: true
 wechat:
   enabled: true
   base_url: https://agent-wechat.internal:6174
@@ -86,7 +88,10 @@ hermes:
     assert settings.server.port == 9090
     assert settings.database.url.startswith("postgresql+psycopg://")
     assert settings.logging.level == "DEBUG"
-    assert settings.runtime == RuntimeSettings(polling_interval_seconds=1.5)
+    assert settings.runtime == RuntimeSettings(
+        polling_interval_seconds=1.5,
+        v2_routing_enabled=True,
+    )
     assert settings.wechat == WechatSettings(
         enabled=True,
         base_url="https://agent-wechat.internal:6174",
@@ -124,6 +129,21 @@ def test_load_settings_rejects_invalid_polling_interval(
     )
 
     with pytest.raises(ValueError, match="runtime.polling_interval_seconds"):
+        load_settings(config_path)
+
+
+@pytest.mark.parametrize("yaml_value", ["'true'", "1", "[]"])
+def test_load_settings_rejects_non_boolean_v2_routing_flag(
+    tmp_path: Path,
+    yaml_value: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"runtime:\n  v2_routing_enabled: {yaml_value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="runtime.v2_routing_enabled"):
         load_settings(config_path)
 
 

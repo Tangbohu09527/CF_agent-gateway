@@ -75,6 +75,54 @@ def test_chat_posts_expected_request_and_returns_assistant_content() -> None:
     )
 
 
+def test_chat_carries_v2_profile_thread_and_session_metadata() -> None:
+    session_metadata = {
+        "source": "wechat",
+        "source_account_id": "bot-001",
+        "conversation_id": "private-001",
+        "enterprise_identity_id": "identity-001",
+        "message_id": 42,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers[HERMES_SESSION_HEADER] == HERMES_THREAD_ID
+        assert json.loads(request.content) == {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": USER_CONTENT}],
+            "profile_reference": "profiles/employee-assistant",
+            "profile_revision": 3,
+            "thread_id": "gateway-thread-001",
+            "session_metadata": session_metadata,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Profile-aware response",
+                        }
+                    }
+                ],
+            },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
+
+    with hermes_client(handler) as client:
+        result = client.chat(
+            USER_CONTENT,
+            hermes_thread_id=HERMES_THREAD_ID,
+            profile_reference="profiles/employee-assistant",
+            profile_revision=3,
+            thread_id="gateway-thread-001",
+            session_metadata=session_metadata,
+        )
+
+    assert result.assistant_content == "Profile-aware response"
+    assert result.hermes_thread_id == HERMES_THREAD_ID
+
+
 def test_chat_parses_v2_response_envelope_without_local_paths() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         del request

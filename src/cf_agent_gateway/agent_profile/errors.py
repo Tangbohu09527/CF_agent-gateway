@@ -91,6 +91,24 @@ class ConversationNotGroupError(AgentProfileStoreError):
         super().__init__(f"conversation is not a group: {conversation_record_id}")
 
 
+class ConversationNotPrivateError(AgentProfileStoreError):
+    code = "conversation_not_private"
+
+    def __init__(self, conversation_record_id: int) -> None:
+        self.conversation_record_id = conversation_record_id
+        super().__init__(f"conversation is not private: {conversation_record_id}")
+
+
+class PrivateConversationProfileNotConfiguredError(AgentProfileStoreError):
+    code = "private_conversation_profile_not_configured"
+
+    def __init__(self, conversation_record_id: int) -> None:
+        self.conversation_record_id = conversation_record_id
+        super().__init__(
+            f"private conversation has no agent profile binding: {conversation_record_id}"
+        )
+
+
 class UnknownGroupTypeNotConfiguredError(AgentProfileStoreError):
     code = "unknown_group_type_not_configured"
 

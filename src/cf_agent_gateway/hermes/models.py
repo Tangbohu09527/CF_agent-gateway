@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class HermesRequestModel(BaseModel):
@@ -18,6 +27,27 @@ class HermesUserMessage(HermesRequestModel):
 class HermesChatCompletionRequest(HermesRequestModel):
     model: StrictStr = Field(min_length=1)
     messages: list[HermesUserMessage] = Field(min_length=1)
+    profile_reference: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+    profile_revision: StrictInt | None = Field(default=None, gt=0)
+    thread_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+    session_metadata: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def validate_v2_invocation(self) -> Self:
+        invocation_values = (
+            self.profile_reference,
+            self.profile_revision,
+            self.thread_id,
+            self.session_metadata,
+        )
+        if any(value is not None for value in invocation_values) and not all(
+            value is not None for value in invocation_values
+        ):
+            raise ValueError(
+                "profile_reference, profile_revision, thread_id, and session_metadata "
+                "must be provided together"
+            )
+        return self
 
 
 class HermesResponseModel(BaseModel):

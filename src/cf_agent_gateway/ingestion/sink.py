@@ -32,11 +32,13 @@ class SessionFactoryMessageStoreAdmissionSink:
         session_factory: sessionmaker[Session],
         request_resolver: AdmissionRequestResolver | None = None,
         *,
+        v2_routing_enabled: bool = False,
         hermes_dispatcher_factory: Callable[[Session], HermesDispatcher] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._request_resolver = request_resolver
         self._hermes_dispatcher_factory = hermes_dispatcher_factory
+        self._v2_routing_enabled = v2_routing_enabled
 
     def handle(self, message: NormalizedWechatMessage) -> None:
         self.process(message)
@@ -52,6 +54,7 @@ class SessionFactoryMessageStoreAdmissionSink:
             outcome = MessageAdmissionService(
                 session,
                 request_resolver=self._request_resolver,
+                v2_routing_enabled=self._v2_routing_enabled,
                 hermes_dispatcher=hermes_dispatcher,
             ).process(message)
         except Exception:

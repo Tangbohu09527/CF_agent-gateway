@@ -63,7 +63,16 @@ class HermesClient:
     def close(self) -> None:
         self._client.close()
 
-    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
+    def chat(
+        self,
+        content: str,
+        *,
+        hermes_thread_id: str | None = None,
+        profile_reference: str | None = None,
+        profile_revision: int | None = None,
+        thread_id: str | None = None,
+        session_metadata: dict[str, object] | None = None,
+    ) -> HermesChatResult:
         """Send one user message, creating or continuing a Hermes thread."""
 
         if not isinstance(content, str) or not content:
@@ -75,6 +84,10 @@ class HermesClient:
         request = HermesChatCompletionRequest(
             model=self._model,
             messages=[HermesUserMessage(content=content)],
+            profile_reference=profile_reference,
+            profile_revision=profile_revision,
+            thread_id=thread_id,
+            session_metadata=session_metadata,
         )
         request_headers = (
             {HERMES_SESSION_HEADER: hermes_thread_id} if hermes_thread_id is not None else None
@@ -83,7 +96,7 @@ class HermesClient:
             "POST",
             "v1/chat/completions",
             operation=operation,
-            json=request.model_dump(mode="json"),
+            json=request.model_dump(mode="json", exclude_none=True),
             headers=request_headers,
         )
         try:

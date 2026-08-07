@@ -24,7 +24,7 @@ from cf_agent_gateway.database import (
 BASELINE_REVISION = "20260806_0001"
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
-HEAD_REVISION = "20260806_04"
+HEAD_REVISION = "20260807_01"
 ROOT = Path(__file__).resolve().parents[1]
 
 

@@ -3,7 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from cf_agent_gateway.database import Base
@@ -73,11 +81,31 @@ class AIThread(Base):
     __table_args__ = (
         UniqueConstraint("thread_key", name="uq_ai_thread_key"),
         UniqueConstraint("hermes_thread_id", name="uq_ai_thread_hermes_thread_id"),
+        CheckConstraint(
+            "(agent_profile_id IS NULL AND thread_policy IS NULL) OR "
+            "(agent_profile_id IS NOT NULL AND thread_policy IS NOT NULL)",
+            name="ck_ai_thread_v2_route_snapshot",
+        ),
+        CheckConstraint(
+            "thread_policy IS NULL OR "
+            "thread_policy IN ('private_sender', 'group_shared', 'group_sender')",
+            name="ck_ai_thread_v2_thread_policy",
+        ),
+        CheckConstraint(
+            "agent_profile_id IS NULL OR "
+            "(thread_type = 'private' AND thread_policy = 'private_sender') OR "
+            "(thread_type = 'group' AND "
+            "thread_policy IN ('group_shared', 'group_sender'))",
+            name="ck_ai_thread_v2_policy_matches_type",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     workspace_id: Mapped[str] = mapped_column(
         ForeignKey("employee_workspaces.id", ondelete="RESTRICT"), index=True
+    )
+    agent_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_profiles.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     thread_type: Mapped[ThreadType] = mapped_column(
         Enum(
@@ -87,6 +115,17 @@ class AIThread(Base):
             validate_strings=True,
             name="thread_type",
         )
+    )
+    thread_policy: Mapped[ThreadPolicy | None] = mapped_column(
+        Enum(
+            ThreadPolicy,
+            values_callable=_enum_values,
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=False,
+            name="thread_policy",
+        ),
+        nullable=True,
     )
     thread_key: Mapped[str] = mapped_column(String(96))
     status: Mapped[ThreadStatus] = mapped_column(

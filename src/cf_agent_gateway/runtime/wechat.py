@@ -167,7 +167,10 @@ def run_wechat_poll_once(
         checkpoint_session = session_factory()
         checkpoint_store = WechatSyncCheckpointStore(checkpoint_session)
         if hermes_client is None:
-            sink = SessionFactoryMessageStoreAdmissionSink(session_factory)
+            sink = SessionFactoryMessageStoreAdmissionSink(
+                session_factory,
+                v2_routing_enabled=settings.runtime.v2_routing_enabled,
+            )
         else:
             resolved_sender_factory = sender_factory
             if resolved_sender_factory is None:
@@ -179,6 +182,7 @@ def run_wechat_poll_once(
                 )
             sink = SessionFactoryMessageStoreAdmissionSink(
                 session_factory,
+                v2_routing_enabled=settings.runtime.v2_routing_enabled,
                 hermes_dispatcher_factory=partial(
                     _create_hermes_response_relay,
                     client=hermes_client,

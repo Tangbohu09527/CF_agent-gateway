@@ -49,18 +49,21 @@ PROFILE_SCHEMA_TABLES = PRE_PROFILE_TABLES | PROFILE_TABLES
 OUTBOX_TABLES = frozenset({"hermes_dispatch_records"})
 OUTBOX_SCHEMA_TABLES = PROFILE_SCHEMA_TABLES | OUTBOX_TABLES
 ARTIFACT_TABLES = frozenset({"artifacts"})
-SCHEMA_TABLES = OUTBOX_SCHEMA_TABLES | ARTIFACT_TABLES
+ARTIFACT_SCHEMA_TABLES = OUTBOX_SCHEMA_TABLES | ARTIFACT_TABLES
+ROUTING_TABLES = frozenset({"conversation_agent_profile_bindings"})
+SCHEMA_TABLES = ARTIFACT_SCHEMA_TABLES | ROUTING_TABLES
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
 PROFILE_REVISION = "20260806_02"
 OUTBOX_REVISION = "20260806_03"
 ARTIFACT_REVISION = "20260806_04"
+ROUTING_REVISION = "20260807_01"
 
 
 def _head_revision() -> str:
     migration_config = migration.create_migration_config()
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert head_revision == ARTIFACT_REVISION
+    assert head_revision == ROUTING_REVISION
     return head_revision
 
 
@@ -209,6 +212,12 @@ def test_postgresql_offline_upgrade_emits_complete_schema_ddl() -> None:
     assert "ck_artifact_ready_metadata" in rendered_sql
     assert "ck_artifact_size_nonnegative" in rendered_sql
     assert "ix_artifact_response_id" in rendered_sql
+    assert "uq_conversation_agent_profile_binding_conversation" in rendered_sql
+    assert "ck_ai_thread_v2_route_snapshot" in rendered_sql
+    assert "ck_ai_thread_v2_thread_policy" in rendered_sql
+    assert "ck_ai_thread_v2_policy_matches_type" in rendered_sql
+    assert "fk_ai_thread_agent_profile" in rendered_sql
+    assert "ix_ai_threads_agent_profile_id" in rendered_sql
     normalized_sql = " ".join(rendered_sql.split())
     assert "alter table messages add column direction varchar(16)" in normalized_sql
     assert "alter table messages add column occurred_at timestamp with time zone" in normalized_sql
@@ -295,6 +304,31 @@ def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
         } >= {"uq_artifact_storage_key"}
         assert {index["name"] for index in inspector.get_indexes("artifacts")} >= {
             "ix_artifact_response_id"
+        }
+        assert ROUTING_TABLES.issubset(inspector.get_table_names())
+        ai_thread_columns = {column["name"] for column in inspector.get_columns("ai_threads")}
+        assert {"agent_profile_id", "thread_policy"}.issubset(ai_thread_columns)
+        assert {
+            constraint["name"] for constraint in inspector.get_check_constraints("ai_threads")
+        } >= {
+            "ck_ai_thread_v2_route_snapshot",
+            "ck_ai_thread_v2_thread_policy",
+            "ck_ai_thread_v2_policy_matches_type",
+        }
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(
+                "conversation_agent_profile_bindings"
+            )
+        } >= {"uq_conversation_agent_profile_binding_conversation"}
+        assert {
+            index["name"] for index in inspector.get_indexes("conversation_agent_profile_bindings")
+        } >= {
+            "ix_conversation_agent_profile_bindings_agent_profile_id",
+            "ix_conversation_agent_profile_bindings_conversation_id",
+        }
+        assert {index["name"] for index in inspector.get_indexes("ai_threads")} >= {
+            "ix_ai_threads_agent_profile_id"
         }
         with engine.connect() as connection:
             triggers = set(
@@ -483,6 +517,25 @@ def test_artifact_downgrade_preserves_outbox_schema() -> None:
 
         assert set(inspect(engine).get_table_names()) == OUTBOX_SCHEMA_TABLES | {"alembic_version"}
         assert migration.get_schema_version(engine) == OUTBOX_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_routing_downgrade_preserves_artifact_schema() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine)
+        migration_config = migration.create_migration_config()
+        with engine.connect() as connection:
+            migration_config.attributes["connection"] = connection
+            command.downgrade(migration_config, ARTIFACT_REVISION)
+
+        inspector = inspect(engine)
+        assert set(inspector.get_table_names()) == ARTIFACT_SCHEMA_TABLES | {"alembic_version"}
+        assert {"agent_profile_id", "thread_policy"}.isdisjoint(
+            {column["name"] for column in inspector.get_columns("ai_threads")}
+        )
+        assert migration.get_schema_version(engine) == ARTIFACT_REVISION
     finally:
         engine.dispose()
 

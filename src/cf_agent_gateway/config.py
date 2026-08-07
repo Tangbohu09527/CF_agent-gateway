@@ -33,8 +33,12 @@ class LoggingSettings:
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     polling_interval_seconds: float = 3.0
+    v2_routing_enabled: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.v2_routing_enabled, bool):
+            raise ValueError("runtime.v2_routing_enabled must be a boolean")
+
         interval = self.polling_interval_seconds
         if isinstance(interval, bool) or not isinstance(interval, (int, float)):
             raise ValueError(_POLLING_INTERVAL_ERROR)
@@ -201,6 +205,7 @@ def load_settings(path: str | Path) -> Settings:
         logging=LoggingSettings(level=log_level),
         runtime=RuntimeSettings(
             polling_interval_seconds=runtime.get("polling_interval_seconds", 3.0),
+            v2_routing_enabled=runtime.get("v2_routing_enabled", False),
         ),
         wechat=WechatSettings(
             enabled=wechat.get("enabled", False),

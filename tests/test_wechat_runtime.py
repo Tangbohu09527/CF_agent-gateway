@@ -14,7 +14,13 @@ from cf_agent_gateway.adapters.wechat import (
     RawWechatMessage,
     WechatSyncCheckpoint,
 )
-from cf_agent_gateway.config import DatabaseSettings, HermesSettings, Settings, WechatSettings
+from cf_agent_gateway.config import (
+    DatabaseSettings,
+    HermesSettings,
+    RuntimeSettings,
+    Settings,
+    WechatSettings,
+)
 from cf_agent_gateway.database import (
     create_database_engine,
     create_database_session_factory,
@@ -163,9 +169,11 @@ def runtime_settings(
     *,
     bootstrap_mode: str = "backfill",
     hermes: HermesSettings | None = None,
+    v2_routing_enabled: bool = False,
 ) -> Settings:
     return Settings(
         database=DatabaseSettings(url=database_url),
+        runtime=RuntimeSettings(v2_routing_enabled=v2_routing_enabled),
         wechat=WechatSettings(
             enabled=True,
             base_url="https://agent-wechat.test:6174",
@@ -289,11 +297,14 @@ def test_client_initialization_error_does_not_expose_token() -> None:
 
 
 @pytest.mark.parametrize("poll_fails", [False, True])
+@pytest.mark.parametrize("v2_routing_enabled", [False, True])
 def test_runtime_assembly_and_cleanup_order(
     monkeypatch: pytest.MonkeyPatch,
     poll_fails: bool,
+    v2_routing_enabled: bool,
 ) -> None:
     events: list[str] = []
+    expected_routing_flag = v2_routing_enabled
     checkpoint_store_marker = object()
     sink_marker = object()
 
@@ -337,8 +348,9 @@ def test_runtime_assembly_and_cleanup_order(
         events.append("checkpoint_store")
         return checkpoint_store_marker
 
-    def sink_factory(factory: object) -> object:
+    def sink_factory(factory: object, *, v2_routing_enabled: bool) -> object:
         assert callable(factory)
+        assert v2_routing_enabled is expected_routing_flag
         events.append("sink")
         return sink_marker
 
@@ -384,10 +396,14 @@ def test_runtime_assembly_and_cleanup_order(
     )
     monkeypatch.setattr(wechat_runtime, "WechatPollingService", TrackingPollingService)
 
+    settings = runtime_settings(
+        "sqlite+pysqlite:///:memory:",
+        v2_routing_enabled=v2_routing_enabled,
+    )
     if poll_fails:
         with pytest.raises(WechatPollingExecutionError) as error:
             run_wechat_poll_once(
-                runtime_settings("sqlite+pysqlite:///:memory:"),
+                settings,
                 client_factory=client_factory,  # type: ignore[arg-type]
                 engine_factory=engine_factory,  # type: ignore[arg-type]
             )
@@ -395,7 +411,7 @@ def test_runtime_assembly_and_cleanup_order(
         assert error.value.__context__ is None
     else:
         result = run_wechat_poll_once(
-            runtime_settings("sqlite+pysqlite:///:memory:"),
+            settings,
             client_factory=client_factory,  # type: ignore[arg-type]
             engine_factory=engine_factory,  # type: ignore[arg-type]
         )

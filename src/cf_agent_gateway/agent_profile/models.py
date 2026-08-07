@@ -145,6 +145,28 @@ class GroupType(Base):
     )
 
 
+class ConversationAgentProfileBinding(Base):
+    __tablename__ = "conversation_agent_profile_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            name="uq_conversation_agent_profile_binding_conversation",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    agent_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_profiles.id", ondelete="RESTRICT"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ConversationGroupTypeBinding(Base):
     __tablename__ = "conversation_group_type_bindings"
     __table_args__ = (

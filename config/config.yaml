@@ -10,6 +10,7 @@ logging:
 
 runtime:
   polling_interval_seconds: 3
+  v2_routing_enabled: false
 
 wechat:
   enabled: false

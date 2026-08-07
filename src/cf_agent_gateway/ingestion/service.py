@@ -9,7 +9,12 @@ from cf_agent_gateway.adapters.wechat import (
     NormalizedWechatMessage,
     wechat_message_to_event,
 )
-from cf_agent_gateway.admission import AdmissionCandidate, AdmissionOrchestrator, AdmissionReason
+from cf_agent_gateway.admission import (
+    AdmissionCandidate,
+    AdmissionOrchestrator,
+    AdmissionOutcome,
+    AdmissionReason,
+)
 from cf_agent_gateway.hermes import (
     HermesDispatcher,
     HermesDispatchOutboxExecutor,
@@ -24,6 +29,7 @@ from cf_agent_gateway.ingestion.models import (
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.task.model import (
+    HermesDispatchRecord,
     HermesDispatchRecordStore,
     HermesDispatchStatus,
     build_hermes_dispatch_idempotency_key,
@@ -61,6 +67,7 @@ class MessageAdmissionService:
         session: Session,
         request_resolver: AdmissionRequestResolver | None = None,
         *,
+        v2_routing_enabled: bool = False,
         message_store: MessageStore | None = None,
         admission_orchestrator: AdmissionOrchestrator | None = None,
         hermes_dispatcher: HermesDispatcher | None = None,
@@ -74,7 +81,7 @@ class MessageAdmissionService:
         self._admission_orchestrator = (
             admission_orchestrator
             if admission_orchestrator is not None
-            else AdmissionOrchestrator(session)
+            else AdmissionOrchestrator(session, v2_routing_enabled=v2_routing_enabled)
         )
         self._dispatch_record_store = (
             dispatch_record_store
@@ -97,6 +104,16 @@ class MessageAdmissionService:
 
         self._session.refresh(persisted_message)
         message_id = persisted_message.id
+        if not message_created:
+            existing_dispatch_record = self._dispatch_record_store.get_by_idempotency_key(
+                build_hermes_dispatch_idempotency_key(message_id)
+            )
+            if existing_dispatch_record is not None:
+                return self._replay_persisted_dispatch_target(
+                    message_id=message_id,
+                    dispatch_record=existing_dispatch_record,
+                )
+
         source = persisted_message.source
         source_account_id = persisted_message.source_account_id
         conversation_id = persisted_message.conversation_id
@@ -128,13 +145,23 @@ class MessageAdmissionService:
         dispatch_record = None
         dispatch_record_created = False
         if admission.admitted and admission.reason is AdmissionReason.ALLOWED:
-            if message_created:
-                dispatch_record, dispatch_record_created = self._dispatch_record_store.enqueue(
-                    admission
-                )
-            else:
+            if not message_created:
                 dispatch_record = self._dispatch_record_store.get_by_idempotency_key(
                     build_hermes_dispatch_idempotency_key(message_id)
+                )
+                if dispatch_record is not None:
+                    return self._replay_persisted_dispatch_target(
+                        message_id=message_id,
+                        dispatch_record=dispatch_record,
+                    )
+
+            dispatch_record, dispatch_record_created = self._dispatch_record_store.enqueue(
+                admission
+            )
+            if not dispatch_record_created:
+                return self._replay_persisted_dispatch_target(
+                    message_id=message_id,
+                    dispatch_record=dispatch_record,
                 )
 
         hermes_dispatch = None
@@ -154,6 +181,32 @@ class MessageAdmissionService:
             ai_thread_id=admission.ai_thread_id,
             dispatch_record_id=(dispatch_record.id if dispatch_record is not None else None),
             hermes_dispatch=hermes_dispatch,
+        )
+
+    @staticmethod
+    def _replay_persisted_dispatch_target(
+        *,
+        message_id: int,
+        dispatch_record: HermesDispatchRecord,
+    ) -> MessageIngestionOutcome:
+        admission = AdmissionOutcome(
+            message_id=message_id,
+            admitted=True,
+            should_create_task=True,
+            reason=AdmissionReason.ALLOWED,
+            enterprise_identity_id=dispatch_record.enterprise_identity_id,
+            workspace_id=dispatch_record.workspace_id,
+            ai_thread_id=dispatch_record.ai_thread_id,
+        )
+        return MessageIngestionOutcome(
+            message_id=message_id,
+            message_created=False,
+            admission=admission,
+            should_create_task=True,
+            workspace_id=dispatch_record.workspace_id,
+            ai_thread_id=dispatch_record.ai_thread_id,
+            dispatch_record_id=dispatch_record.id,
+            hermes_dispatch=None,
         )
 
     @staticmethod

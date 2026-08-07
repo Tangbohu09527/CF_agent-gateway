@@ -12,16 +12,19 @@ from cf_agent_gateway.agent_profile.errors import (
     AgentProfileRevisionConflictError,
     ConversationNotFoundError,
     ConversationNotGroupError,
+    ConversationNotPrivateError,
     GroupTypeConflictError,
     GroupTypeIdConflictError,
     GroupTypeNotFoundError,
     InvalidGroupThreadPolicyError,
+    PrivateConversationProfileNotConfiguredError,
     UnknownGroupTypeNotConfiguredError,
 )
 from cf_agent_gateway.agent_profile.models import (
     UNKNOWN_GROUP_TYPE_KEY,
     AgentProfile,
     AgentProfileStatus,
+    ConversationAgentProfileBinding,
     ConversationGroupTypeBinding,
     GroupType,
     GroupTypeStatus,
@@ -92,6 +95,56 @@ class AgentProfileStore:
             AgentProfile.revision == revision,
         )
         return self._session.scalar(statement.execution_options(populate_existing=True))
+
+    def bind_conversation_agent_profile(
+        self,
+        *,
+        conversation_record_id: int,
+        agent_profile_id: str,
+    ) -> tuple[ConversationAgentProfileBinding, bool]:
+        self._require_private_conversation(conversation_record_id)
+        self._require_agent_profile(agent_profile_id)
+        existing = self.get_conversation_agent_profile_binding(conversation_record_id)
+        if existing is not None:
+            if existing.agent_profile_id != agent_profile_id:
+                existing.agent_profile_id = agent_profile_id
+                self._session.commit()
+            return existing, False
+
+        binding = ConversationAgentProfileBinding(
+            id=str(uuid4()),
+            conversation_id=conversation_record_id,
+            agent_profile_id=agent_profile_id,
+        )
+        self._session.add(binding)
+        try:
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self.get_conversation_agent_profile_binding(conversation_record_id)
+            if existing is None:
+                raise
+            if existing.agent_profile_id != agent_profile_id:
+                existing.agent_profile_id = agent_profile_id
+                self._session.commit()
+            return existing, False
+        return binding, True
+
+    def get_conversation_agent_profile_binding(
+        self,
+        conversation_record_id: int,
+    ) -> ConversationAgentProfileBinding | None:
+        statement = select(ConversationAgentProfileBinding).where(
+            ConversationAgentProfileBinding.conversation_id == conversation_record_id
+        )
+        return self._session.scalar(statement.execution_options(populate_existing=True))
+
+    def resolve_private_agent_profile(self, conversation_record_id: int) -> AgentProfile:
+        self._require_private_conversation(conversation_record_id)
+        binding = self.get_conversation_agent_profile_binding(conversation_record_id)
+        if binding is None:
+            raise PrivateConversationProfileNotConfiguredError(conversation_record_id)
+        return self._require_agent_profile(binding.agent_profile_id)
 
     def list_agent_profile_revisions(self, profile_key: str) -> list[AgentProfile]:
         statement = (
@@ -349,4 +402,10 @@ class AgentProfileStore:
         conversation = self._require_conversation(conversation_record_id)
         if conversation.conversation_type != "group":
             raise ConversationNotGroupError(conversation_record_id)
+        return conversation
+
+    def _require_private_conversation(self, conversation_record_id: int) -> Conversation:
+        conversation = self._require_conversation(conversation_record_id)
+        if conversation.conversation_type != "private":
+            raise ConversationNotPrivateError(conversation_record_id)
         return conversation
