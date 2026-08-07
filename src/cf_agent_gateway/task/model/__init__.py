@@ -8,12 +8,16 @@ from cf_agent_gateway.task.model.errors import (
 )
 from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.task.model.store import (
+    DEFAULT_LEASE_SECONDS,
+    DEFAULT_RETRY_LIMIT,
     HERMES_DISPATCH_IDEMPOTENCY_NAMESPACE,
     HermesDispatchRecordStore,
     build_hermes_dispatch_idempotency_key,
 )
 
 __all__ = [
+    "DEFAULT_LEASE_SECONDS",
+    "DEFAULT_RETRY_LIMIT",
     "HERMES_DISPATCH_IDEMPOTENCY_NAMESPACE",
     "HermesDispatchAdmissionError",
     "HermesDispatchRecord",

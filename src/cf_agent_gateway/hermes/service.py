@@ -10,6 +10,7 @@ from cf_agent_gateway.hermes.errors import HermesDispatchError
 from cf_agent_gateway.hermes.models import HermesChatResult, HermesDispatchOutcome
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
+from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.workspace.models import (
     AIThread,
     EmployeeWorkspace,
@@ -33,6 +34,7 @@ class HermesChatClient(Protocol):
         profile_revision: int | None = None,
         thread_id: str | None = None,
         session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> HermesChatResult: ...
 
 
@@ -59,6 +61,30 @@ class HermesDispatchService:
         )
 
     def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
+        return self._dispatch(admission, idempotency_key=None)
+
+    def dispatch_record(self, record: HermesDispatchRecord) -> HermesDispatchOutcome:
+        """Execute a claimed durable record without mutating the Message Archive."""
+
+        if record.status is not HermesDispatchStatus.RUNNING or record.claim_token is None:
+            raise HermesDispatchError(reason="dispatch_record_not_claimed")
+        admission = AdmissionOutcome(
+            message_id=record.message_id,
+            admitted=True,
+            should_create_task=True,
+            reason=AdmissionReason.ALLOWED,
+            enterprise_identity_id=record.enterprise_identity_id,
+            workspace_id=record.workspace_id,
+            ai_thread_id=record.ai_thread_id,
+        )
+        return self._dispatch(admission, idempotency_key=record.idempotency_key)
+
+    def _dispatch(
+        self,
+        admission: AdmissionOutcome,
+        *,
+        idempotency_key: str | None,
+    ) -> HermesDispatchOutcome:
         workspace_id, ai_thread_id = self._allowed_target(admission)
 
         message = self._message_store.get(admission.message_id)
@@ -103,9 +129,25 @@ class HermesDispatchService:
 
         try:
             if profile is None:
+                if idempotency_key is None:
+                    result = self._client.chat(
+                        message.content,
+                        hermes_thread_id=requested_hermes_thread_id,
+                    )
+                else:
+                    result = self._client.chat(
+                        message.content,
+                        hermes_thread_id=requested_hermes_thread_id,
+                        idempotency_key=idempotency_key,
+                    )
+            elif idempotency_key is None:
                 result = self._client.chat(
                     message.content,
                     hermes_thread_id=requested_hermes_thread_id,
+                    profile_reference=profile.external_profile_ref,
+                    profile_revision=profile.revision,
+                    thread_id=thread.id,
+                    session_metadata=self._session_metadata(message, thread, admission),
                 )
             else:
                 result = self._client.chat(
@@ -115,6 +157,7 @@ class HermesDispatchService:
                     profile_revision=profile.revision,
                     thread_id=thread.id,
                     session_metadata=self._session_metadata(message, thread, admission),
+                    idempotency_key=idempotency_key,
                 )
             hermes_thread_advanced = self._workspace_store.advance_hermes_thread(
                 thread,

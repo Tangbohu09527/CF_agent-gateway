@@ -154,12 +154,43 @@ class HermesSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerSettings:
+    enabled: bool = False
+    concurrency: int = 4
+    lease_seconds: float = 60.0
+    retry_limit: int = 3
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("worker.enabled must be a boolean")
+        if (
+            isinstance(self.concurrency, bool)
+            or not isinstance(self.concurrency, int)
+            or self.concurrency <= 0
+        ):
+            raise ValueError("worker.concurrency must be a positive integer")
+        if isinstance(self.lease_seconds, bool) or not isinstance(self.lease_seconds, (int, float)):
+            raise ValueError("worker.lease_seconds must be a finite positive number")
+        lease_seconds = float(self.lease_seconds)
+        if not math.isfinite(lease_seconds) or lease_seconds <= 0 or lease_seconds > TIMEOUT_MAX:
+            raise ValueError("worker.lease_seconds must be a finite positive number")
+        if (
+            isinstance(self.retry_limit, bool)
+            or not isinstance(self.retry_limit, int)
+            or self.retry_limit < 0
+        ):
+            raise ValueError("worker.retry_limit must be a non-negative integer")
+        object.__setattr__(self, "lease_seconds", lease_seconds)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
     wechat: WechatSettings = WechatSettings()
     hermes: HermesSettings = HermesSettings()
+    worker: WorkerSettings = WorkerSettings()
     runtime: RuntimeSettings = RuntimeSettings()
 
 
@@ -181,6 +212,7 @@ def load_settings(path: str | Path) -> Settings:
     runtime = _mapping(raw, "runtime")
     wechat = _mapping(raw, "wechat")
     hermes = _mapping(raw, "hermes")
+    worker = _mapping(raw, "worker")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
@@ -218,6 +250,12 @@ def load_settings(path: str | Path) -> Settings:
             base_url=hermes.get("base_url", ""),
             api_key_env=hermes.get("api_key_env", "HERMES_API_KEY"),
             model=hermes.get("model", "hermes-agent"),
+        ),
+        worker=WorkerSettings(
+            enabled=worker.get("enabled", False),
+            concurrency=worker.get("concurrency", 4),
+            lease_seconds=worker.get("lease_seconds", 60.0),
+            retry_limit=worker.get("retry_limit", 3),
         ),
     )
 

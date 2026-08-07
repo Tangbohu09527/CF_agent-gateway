@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +26,7 @@ class HermesDispatchStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     UNCERTAIN = "uncertain"
+    DEAD = "dead"
 
 
 def _enum_values(enum_type: type[StrEnum]) -> list[str]:
@@ -43,7 +45,7 @@ class HermesDispatchRecord(Base):
             name="uq_hermes_dispatch_message",
         ),
         CheckConstraint(
-            "status IN ('queued', 'running', 'success', 'failed', 'uncertain')",
+            "status IN ('queued', 'running', 'success', 'failed', 'uncertain', 'dead')",
             name="ck_hermes_dispatch_status",
         ),
         CheckConstraint(
@@ -69,16 +71,20 @@ class HermesDispatchRecord(Base):
         ),
         CheckConstraint(
             "(status = 'queued' AND claim_token IS NULL "
-            "AND claimed_at IS NULL AND completed_at IS NULL "
+            "AND claimed_at IS NULL AND lease_expires_at IS NULL "
+            "AND completed_at IS NULL "
             "AND last_error_code IS NULL) OR "
             "(status = 'running' AND claim_token IS NOT NULL "
-            "AND claimed_at IS NOT NULL AND completed_at IS NULL "
+            "AND claimed_at IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND completed_at IS NULL "
             "AND last_error_code IS NULL) OR "
             "(status = 'success' AND claim_token IS NULL AND claimed_at IS NOT NULL "
-            "AND completed_at IS NOT NULL AND last_error_code IS NULL) OR "
-            "(status IN ('failed', 'uncertain') AND claim_token IS NULL "
+            "AND lease_expires_at IS NULL AND completed_at IS NOT NULL "
+            "AND last_error_code IS NULL) OR "
+            "(status IN ('failed', 'uncertain', 'dead') AND claim_token IS NULL "
             "AND claimed_at IS NOT NULL "
-            "AND completed_at IS NOT NULL AND last_error_code IS NOT NULL)",
+            "AND lease_expires_at IS NULL AND completed_at IS NOT NULL "
+            "AND last_error_code IS NOT NULL)",
             name="ck_hermes_dispatch_state_fields",
         ),
         Index(
@@ -93,6 +99,27 @@ class HermesDispatchRecord(Base):
             "status",
             "created_at",
             "id",
+        ),
+        Index(
+            "ix_hermes_dispatch_claim",
+            "status",
+            "lease_expires_at",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_hermes_dispatch_fifo",
+            "ai_thread_id",
+            "created_at",
+            "id",
+            "status",
+        ),
+        Index(
+            "uq_hermes_dispatch_running_thread",
+            "ai_thread_id",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
         ),
     )
 
@@ -123,6 +150,9 @@ class HermesDispatchRecord(Base):
     claim_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

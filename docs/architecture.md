@@ -8,77 +8,82 @@ entry points and Hermes; it is neither a channel-specific bot nor an AI runtime.
 ```text
 Employee WeChat
     -> agent-wechat
-    -> CF_agent-gateway Worker
+    -> Gateway polling worker
+    -> Message Archive + Dispatch DB
+    -> Gateway dispatch worker
     -> Hermes API
-    -> CF_agent-gateway response relay
+    -> durable response
     -> agent-wechat outbound sender
     -> Employee WeChat
 ```
 
-The V1 Staging validation covers this text-message round trip. It does not turn
-`agent-wechat` or Hermes into Gateway-owned components.
+`agent-wechat` and Hermes remain external components. Polling and Hermes execution are
+separate Gateway processes coordinated through durable database records.
 
 ## Request flow and status
 
-The implemented WeChat polling path is:
+The implemented runtime path is:
 
-1. Runtime configuration enables WeChat and names the environment variable that
-   contains the agent-wechat token.
-2. `AgentWechatClient` checks authentication and reads visible chats and messages.
-3. `WechatPollingService` applies the durable checkpoint. A first `latest` poll
-   atomically checkpoints visible history; `backfill` processes history by ascending
-   `localId`. Later polls deliver only messages above the checkpoint.
-4. For each message above the checkpoint, the polling layer first inspects the raw
-   `isSelf` fact. An `is_self=true` message bypasses normalization, the sink, Message
-   Store, admission, and Hermes, while its checkpoint is still advanced. This prevents
-   an outbound bot reply from re-entering the AI loop.
-5. The adapter normalizes each remaining message, including source account,
-   conversation type, mention state, and sender facts.
-6. The per-message admission sink opens an isolated database session. The Message
-   Store commits the message before admission, with idempotency by both `event_id` and
-   physical source-message identity.
-7. Senderless system messages remain stored and stop before identity mapping. Human
-   messages resolve `sender_id` to an Identity, then evaluate its User Access Policy
-   together with the Gateway Policy. Conversation determines the current V1 thread
-   context; sender identity determines permission. A group conversation adds only the
-   requirement for an explicit structured bot mention and is not itself an authorization
-   subject.
-8. Unauthorized messages remain stored without a Workspace, AIThread, or dispatch record.
-   Authorized messages create or reuse an employee Workspace, resolve one AIThread for the
-   source account and physical conversation, then idempotently commit a Hermes dispatch
-   record before any external call. Under the current V1 implementation, a group uses one
-   thread for the whole room rather than one thread per sender.
-9. When Hermes is enabled, an inline compatibility executor atomically claims the queued
-   record before the dispatch service reloads the persisted message and verifies
-   its source binding, AIThread, Workspace, and enterprise identity before calling
-   `HermesClient.chat`. Before the first call, an unbound AIThread atomically claims a
-   deterministic `X-Hermes-Session-Id`, so concurrent first calls and retries converge on
-   one Hermes session even on SQLite. Successful responses retain Hermes' effective ID;
-   later calls send the current value, and a replacement returned after context
-   compression becomes the new binding. The executor records `success`, a definite
-   `failed` result, or `uncertain` when the external result may have occurred.
-10. The polling runtime decorates the dispatcher with `HermesResponseRelay`. On success,
-   it reloads the persisted source message, creates a sender scoped to its
-   `source_account_id`, and invokes `HermesResponseHandler`. The handler validates the
-   local AIThread and exact `ThreadSourceBinding`, verifies the sender's source account,
-   and sends the assistant text to the bound conversation. `WechatHttpMessageSender`
-   calls `POST /api/messages/send` with `{"chatId": "...", "text": "..."}`; `content`
-   is not the external API field.
+```text
+WeChat polling
+  -> Message Archive
+  -> identity/access admission
+  -> V1-compatible or V2 profile/thread routing
+  -> queued Hermes dispatch record
 
-Delivery of eligible non-self messages from polling to the sink is at least once. A sink
-or checkpoint failure can cause redelivery; Message Store idempotency and admission reuse
-make storage retry safe. A self message is never delivered to the sink, but a failed
-checkpoint write permits it to be examined and skipped again on the next poll. Hermes
-dispatch records use a stable local idempotency key and terminal records are not
-automatically replayed. The complete worker and an upstream Hermes idempotency contract are
-not implemented; ambiguous results remain `uncertain` for operational reconciliation.
-Because assistant artifacts and a delivery worker are not implemented, a WeChat delivery
-failure after a successful dispatch cannot yet be replayed from the record. A repeated
-inbound event observes the terminal dispatch and does not call Hermes or WeChat again.
+Hermes dispatch worker
+  -> claim token + renewable lease
+  -> Hermes API with stable idempotency key
+  -> durable Hermes response + success transition
+  -> response delivery pipeline
+```
 
-The future worker must serialize dispatch claims per `ai_thread_id`. Record-level compare
-and swap prevents duplicate execution of one record, but it does not order two different
-records for the same Hermes thread.
+The stages are:
+
+1. `WechatPollingService` applies durable per-account/per-conversation checkpoints.
+   A first `latest` poll checkpoints visible history; `backfill` processes history by
+   ascending `localId`. Raw `isSelf=true` messages bypass normalization, Message Archive,
+   admission, and dispatch enqueue while their checkpoint still advances.
+2. The adapter normalizes each remaining message. A per-message session commits Message
+   Archive facts before identity and access admission. Event and physical source-message
+   uniqueness make redelivery storage-idempotent.
+3. Authorized messages create or reuse a Workspace and resolve an AIThread. With
+   `runtime.v2_routing_enabled`, routing snapshots the selected Agent Profile revision and
+   thread policy; the compatibility path retains the existing source binding behavior.
+4. Admission commits one `hermes_dispatch_records` row per message with a stable
+   idempotency key. Polling stops here: it never creates a Hermes client or outbound
+   sender and never calls Hermes.
+5. `HermesDispatchWorker.claim_once()` selects an eligible thread head ordered by
+   `(created_at, id)`. The database update rechecks eligibility, FIFO position, thread
+   idleness, retry budget, and claim token as one compare-and-swap operation. A partial
+   unique index independently enforces at most one `running` record per `ai_thread_id`.
+6. A claim has a renewable lease. The heartbeat remains active through the external call
+   and final persistence transaction. An expired `running` record is reclaimable with a
+   new token while attempts remain; every renewal and terminal write is fenced by the
+   current token.
+7. `HermesDispatchService.dispatch_record()` reads the archived message without inserting
+   or updating Message Archive. It validates Workspace, AIThread, profile snapshot, and
+   source binding, then preserves the profile reference/revision, Gateway thread id,
+   Hermes session id, and dispatch `Idempotency-Key` in the Hermes call.
+8. Definite pre-response failures become retryable `failed` records until the configured
+   budget is exhausted, then become `dead`. Timeouts, transport ambiguity, invalid
+   responses after a possible call, and post-call thread-binding conflicts become
+   `uncertain`. `uncertain` blocks later records on that thread; `success` and `dead`
+   release the next head.
+9. A successful `ResponseEnvelope` is inserted into `hermes_dispatch_responses` in the
+   same claim-token-fenced transaction that changes the dispatch from `running` to
+   `success`. Only after commit does the account-scoped response processor invoke
+   `HermesResponseHandler` and the WeChat sender.
+
+Different AI threads can execute concurrently up to `worker.concurrency`; one AIThread
+cannot have overlapping Hermes calls. `worker.retry_limit` counts retries after the first
+attempt, so the maximum attempt count is `retry_limit + 1`.
+
+Delivery failure after response persistence does not revert dispatch success and does not
+call Hermes again. The response remains available for a future durable delivery runtime,
+but delivery-attempt scheduling and automatic delivery retry are not implemented here.
+Artifact fetching, Context Runtime, Memory, RAG, and Skill authorization are also outside
+this runtime.
 
 ## Target thread isolation and V1 deviation
 
@@ -98,11 +103,10 @@ This whole-room behavior is a known implementation deviation. Recording it here 
 change the target design. Correcting it requires a reviewed code, constraint, and data
 migration change outside this documentation update.
 
-The next planned stages include Context Builder, the full Task Queue worker, provider
-routing, artifact and delivery workers, and media/file workflows. Image understanding,
-image attachment delivery, file-message processing, OCR, archive or ZIP parsing,
-enterprise knowledge-base access,
-and automatic Skill execution are not implemented by the V1 text path.
+The next planned stages include Context Runtime, general provider routing, Artifact
+ingestion, a durable delivery worker, and media/file workflows. Image understanding,
+file-message processing, OCR, archive or ZIP parsing, enterprise knowledge-base access,
+Memory, RAG, and automatic Skill execution are not implemented by this runtime.
 
 ## Package boundaries
 
@@ -111,7 +115,7 @@ and automatic Skill execution are not implemented by the V1 text path.
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
 | `adapters.wechat` | agent-wechat client, normalization, polling, outbound protocol | Implemented |
 | `adapters.wechat.polling_store` | Durable account/conversation checkpoints | Implemented |
-| `runtime` | WeChat cycle assembly, resident scheduling, and cleanup | Implemented |
+| `runtime` | Independent WeChat polling and Hermes dispatch process assembly | Implemented |
 | `ingestion` | Persist-first admission and polling-compatible sinks | Implemented |
 | `message.models` | Conversation, message, and attachment metadata ORM models | Implemented |
 | `message.schemas` | Message API input and output contracts | Implemented |
@@ -120,42 +124,47 @@ and automatic Skill execution are not implemented by the V1 text path.
 | `access` | Persisted policy management and authorization evaluation | Implemented |
 | `admission` | Identity/access orchestration and admission outcomes | Implemented |
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
-| `hermes` | OpenAI-compatible client, dispatch, and response routing | Implemented |
+| `hermes` | Client, dispatch worker, response persistence, and delivery handoff | Implemented |
 | `context` | Context construction | Reserved |
-| `task.model` | Durable Hermes dispatch record and state transitions | Foundation implemented |
+| `task.model` | Durable dispatch claims, leases, FIFO, retries, and terminal states | Implemented |
 | `task.queue` | Task scheduling and delivery | Reserved |
 | `provider.router` | Provider registry and routing | Reserved |
 
 ## WeChat runtime boundary
 
-`run_wechat_poll_once` performs one finite cycle. It validates that WeChat is enabled,
-reads the token from the environment variable named by `wechat.token_env`, and, when
-enabled, reads the Hermes API key from the variable named by `hermes.api_key_env`. It
-initializes the database, creates a dedicated checkpoint session, and uses a fresh
-admission/dispatch session for each delivered message.
+`run_wechat_poll_once` performs one finite cycle. It validates only WeChat enablement and
+the token named by `wechat.token_env`, initializes the database, creates a dedicated
+checkpoint session, and uses a fresh admission session for each delivered message.
+Legacy injected Hermes-client and sender factory parameters remain accepted as no-op
+compatibility arguments; polling does not read Hermes credentials or initialize them.
 
-Before a raw self-originated message can reach that session, `WechatPollingService`
-filters it and advances the conversation checkpoint. It therefore does not enter the sink,
-admission, or Hermes dispatch path.
+Before a raw self-originated message can reach the sink, `WechatPollingService` filters
+it and advances the conversation checkpoint. `runtime.worker` serially invokes the
+finite polling runtime, waits for `runtime.polling_interval_seconds`, and maps `SIGINT`
+and `SIGTERM` to a shared stop event. Poll cycles never overlap.
 
-Each successful Hermes response gets a sender whose account comes from the persisted
-message's `source_account_id`; the sender is closed after delivery. The channel client,
-optional Hermes client, checkpoint session, and database engine are closed after the
-cycle, including failure paths. Runtime and CLI output is restricted to aggregate status
-and failure codes; tokens, authorization headers, full message bodies, cookies, and Base64
-file data are outside the output boundary.
+## Dispatch worker boundary
 
-`runtime.worker` serially invokes that finite runtime, then waits for the configured
-`runtime.polling_interval_seconds` before the next cycle. A shared stop event makes the
-wait interruptible; the module CLI maps `SIGINT` and `SIGTERM` to that event. Poll cycles
-never overlap. Ordinary cycle failures are logged with a redacted code and retried, while
-permanent configuration errors stop the worker.
+`run_dispatch_worker` validates `worker.enabled`, `hermes.enabled`, and the environment
+variable named by `hermes.api_key_env`. It initializes one engine and shared thread-safe
+Hermes HTTP client, then builds `HermesDispatchWorker`. Each claim, Hermes execution,
+heartbeat renewal, terminal transition, response insert, and delivery handoff uses an
+appropriately scoped SQLAlchemy session; sessions are not shared across worker threads.
 
-The worker is a standalone process. The V1 text round trip has been validated on Debian 13
-with Dockerized `agent-wechat`, a Gateway Worker, and a Hermes API on the Windows AI host.
-There is no FastAPI background worker, standalone dispatch worker, service-manager
-integration, or production automated deployment. Staging validation does not establish
-production readiness. See [v1-staging-validation.md](v1-staging-validation.md).
+`HermesDispatchWorker.run()` fills up to `worker.concurrency` slots and drains active
+calls on graceful shutdown. `claim_once()` and `process_claim()` are public so tests and
+recovery tooling can single-step the durable boundary without invoking private helpers.
+`run_once()` combines those operations for one eligible record.
+
+The worker owns dispatch and response tables plus the AIThread Hermes binding. It reads
+Message Archive as the authoritative input but never inserts or updates archive rows.
+Claim-token fencing prevents an expired worker from committing over a newer owner;
+upstream idempotency limits duplicate external effects when a process dies after calling
+Hermes but before local response persistence.
+
+Both runtimes are standalone processes and are not FastAPI background tasks. Runtime and
+CLI output is restricted to aggregate status and stable error codes. Service-manager
+integration and production deployment automation remain separate work.
 
 ## Persistence direction
 

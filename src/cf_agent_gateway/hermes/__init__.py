@@ -1,6 +1,11 @@
 """Hermes HTTP client boundary."""
 
-from cf_agent_gateway.hermes.client import DEFAULT_TIMEOUT, HERMES_SESSION_HEADER, HermesClient
+from cf_agent_gateway.hermes.client import (
+    DEFAULT_TIMEOUT,
+    HERMES_IDEMPOTENCY_HEADER,
+    HERMES_SESSION_HEADER,
+    HermesClient,
+)
 from cf_agent_gateway.hermes.errors import (
     HermesAPIError,
     HermesAPIKeyError,
@@ -32,24 +37,34 @@ from cf_agent_gateway.hermes.response import (
     HermesResponseProcessor,
     HermesResponseRelay,
 )
+from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
+from cf_agent_gateway.hermes.result_store import HermesDispatchResponseStore
 from cf_agent_gateway.hermes.service import (
     HermesChatClient,
     HermesDispatcher,
     HermesDispatchService,
 )
+from cf_agent_gateway.hermes.worker import (
+    DispatchClaim,
+    DispatchProcessResult,
+    HermesDispatchWorker,
+)
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "HERMES_IDEMPOTENCY_HEADER",
     "HERMES_SESSION_HEADER",
     "ArtifactRefPart",
+    "DispatchClaim",
+    "DispatchProcessResult",
     "HermesAPIError",
     "HermesAPIKeyError",
     "HermesAssistantMessage",
-    "HermesChatResult",
     "HermesChatClient",
     "HermesChatCompletionChoice",
     "HermesChatCompletionRequest",
     "HermesChatCompletionResponse",
+    "HermesChatResult",
     "HermesClient",
     "HermesConfigurationError",
     "HermesDeliveryError",
@@ -57,7 +72,10 @@ __all__ = [
     "HermesDispatcher",
     "HermesDispatchOutcome",
     "HermesDispatchOutboxExecutor",
+    "HermesDispatchResponse",
+    "HermesDispatchResponseStore",
     "HermesDispatchService",
+    "HermesDispatchWorker",
     "HermesError",
     "HermesResponseDeliveryOutcome",
     "HermesResponseError",

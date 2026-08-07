@@ -49,8 +49,8 @@ class HermesDispatchOutboxExecutor:
             # A failed inner database operation may leave the shared session unusable.
             with suppress(Exception):
                 self._session.rollback()
-            error_code = _dispatch_error_code(error)
-            status = _failure_status(error)
+            error_code = dispatch_error_code(error)
+            status = dispatch_failure_status(error)
             if status is HermesDispatchStatus.FAILED:
                 self._record_store.mark_failed(
                     record.id,
@@ -69,7 +69,7 @@ class HermesDispatchOutboxExecutor:
         return outcome
 
 
-def _failure_status(error: Exception) -> HermesDispatchStatus:
+def dispatch_failure_status(error: Exception) -> HermesDispatchStatus:
     if isinstance(error, HermesDispatchError):
         if error.reason in _POST_CALL_DISPATCH_ERRORS:
             return HermesDispatchStatus.UNCERTAIN
@@ -83,7 +83,7 @@ def _failure_status(error: Exception) -> HermesDispatchStatus:
     return HermesDispatchStatus.UNCERTAIN
 
 
-def _dispatch_error_code(error: Exception) -> str:
+def dispatch_error_code(error: Exception) -> str:
     if not isinstance(error, HermesError):
         return "unexpected_dispatch_error"
     code = error.code

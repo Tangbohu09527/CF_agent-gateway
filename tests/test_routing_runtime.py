@@ -27,14 +27,16 @@ from cf_agent_gateway.database import (
 from cf_agent_gateway.hermes import (
     HermesChatResult,
     HermesDispatchService,
-    HermesResponseHandler,
-    HermesResponseRelay,
 )
 from cf_agent_gateway.identity.models import EnterpriseIdentity
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.ingestion import MessageAdmissionService
 from cf_agent_gateway.message.models import Conversation, Message
-from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
+from cf_agent_gateway.task.model import (
+    HermesDispatchRecord,
+    HermesDispatchRecordStore,
+    HermesDispatchStatus,
+)
 from cf_agent_gateway.workspace.models import AIThread, ThreadPolicy, ThreadSourceBinding
 from cf_agent_gateway.workspace.store import WorkspaceStore
 
@@ -188,6 +190,7 @@ class RecordingV2HermesClient:
         profile_revision: int | None = None,
         thread_id: str | None = None,
         session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> HermesChatResult:
         assert hermes_thread_id is not None
         self.calls.append(
@@ -198,6 +201,7 @@ class RecordingV2HermesClient:
                 "profile_revision": profile_revision,
                 "thread_id": thread_id,
                 "session_metadata": session_metadata,
+                "idempotency_key": idempotency_key,
             }
         )
         return HermesChatResult(
@@ -472,7 +476,7 @@ def test_duplicate_archived_v2_message_without_outbox_recovers_after_binding(
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
 
-def test_v2_dispatch_pipeline_invokes_hermes_with_profile_and_session_metadata(
+def test_v2_worker_dispatch_preserves_profile_thread_and_idempotency_metadata(
     session: Session,
 ) -> None:
     allow_gateway(session)
@@ -481,16 +485,7 @@ def test_v2_dispatch_pipeline_invokes_hermes_with_profile_and_session_metadata(
     profile = create_profile(session, revision=3)
     bind_private_profile(session, conversation, profile)
     client = RecordingV2HermesClient()
-    sender = RecordingWechatSender(SOURCE_ACCOUNT_ID)
-    dispatcher = HermesResponseRelay(
-        HermesDispatchService(session, client),
-        HermesResponseHandler(session, sender),
-    )
-    service = MessageAdmissionService(
-        session,
-        v2_routing_enabled=True,
-        hermes_dispatcher=dispatcher,
-    )
+    service = MessageAdmissionService(session, v2_routing_enabled=True)
 
     outcome = service.process(
         message(
@@ -501,12 +496,23 @@ def test_v2_dispatch_pipeline_invokes_hermes_with_profile_and_session_metadata(
         )
     )
 
-    assert outcome.hermes_dispatch is not None
+    assert outcome.hermes_dispatch is None
+    assert outcome.dispatch_record_id is not None
+    record_store = HermesDispatchRecordStore(session)
+    record = record_store.claim(
+        outcome.dispatch_record_id,
+        claim_token="worker-metadata-contract",
+    )
+
+    dispatched = HermesDispatchService(session, client).dispatch_record(record)
+
+    assert dispatched.message_id == outcome.message_id
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call["profile_reference"] == profile.external_profile_ref
     assert call["profile_revision"] == profile.revision
     assert call["thread_id"] == outcome.ai_thread_id
+    assert call["idempotency_key"] == record.idempotency_key
     assert call["session_metadata"] == {
         "message_id": outcome.message_id,
         "source": SOURCE,
@@ -518,7 +524,4 @@ def test_v2_dispatch_pipeline_invokes_hermes_with_profile_and_session_metadata(
         "sender_id": "employee-a",
         "thread_policy": ThreadPolicy.PRIVATE_SENDER.value,
     }
-    record = session.scalar(select(HermesDispatchRecord))
-    assert record is not None
-    assert record.status is HermesDispatchStatus.SUCCESS
-    assert sender.messages == [(conversation.conversation_id, "V2 response")]
+    assert record.status is HermesDispatchStatus.RUNNING

@@ -24,6 +24,24 @@ class WechatRuntimeError(RuntimeError):
     code = "wechat_runtime_error"
 
 
+class DispatchWorkerRuntimeError(RuntimeError):
+    code = "dispatch_worker_runtime_error"
+
+
+class DispatchWorkerDisabledError(DispatchWorkerRuntimeError):
+    code = "dispatch_worker_disabled"
+
+    def __init__(self) -> None:
+        super().__init__("Hermes dispatch worker is disabled")
+
+
+class HermesRuntimeDisabledError(DispatchWorkerRuntimeError):
+    code = "hermes_runtime_disabled"
+
+    def __init__(self) -> None:
+        super().__init__("Hermes runtime is disabled")
+
+
 class WechatRuntimeDisabledError(WechatRuntimeError):
     code = "wechat_runtime_disabled"
 

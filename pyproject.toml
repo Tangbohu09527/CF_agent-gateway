@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 cf-agent-gateway-migrate = "cf_agent_gateway.migration:main"
 cf-agent-gateway-wechat-poll-once = "cf_agent_gateway.wechat_poll_once:main"
+cf-agent-gateway-dispatch-worker = "cf_agent_gateway.runtime.dispatch_worker:main"
 
 [project.optional-dependencies]
 dev = [

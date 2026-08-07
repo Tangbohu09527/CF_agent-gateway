@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -26,12 +26,10 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesChatResult
+from cf_agent_gateway.hermes import HermesDispatchResponse
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.runtime import (
-    HermesAPIKeyEnvironmentError,
-    HermesClientInitializationError,
     WechatClientInitializationError,
     WechatPollingExecutionError,
     WechatRuntimeDisabledError,
@@ -47,7 +45,6 @@ CHAT_ID = "wxid_alice"
 TOKEN_ENV = "TEST_WECHAT_RUNTIME_TOKEN"
 TOKEN = "runtime-test-token"
 HERMES_API_KEY_ENV = "TEST_HERMES_RUNTIME_API_KEY"
-HERMES_API_KEY = "runtime-hermes-api-key"
 
 
 def raw_message(local_id: int, *, content: str | None = None) -> dict[str, Any]:
@@ -102,66 +99,6 @@ class RecordingClientFactory:
     def __call__(self, *, base_url: str, token: str) -> FakeWechatClient:
         self.calls.append((base_url, token))
         return self.client
-
-
-class FakeHermesClient:
-    def __init__(
-        self,
-        *,
-        assistant_content: str = "Hermes accepted the message",
-        hermes_thread_id: str = "hermes-runtime-thread",
-        close_error: Exception | None = None,
-    ) -> None:
-        self.chat_calls: list[tuple[str, str | None]] = []
-        self.assistant_content = assistant_content
-        self.hermes_thread_id = hermes_thread_id
-        self.close_calls = 0
-        self.close_error = close_error
-
-    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
-        self.chat_calls.append((content, hermes_thread_id))
-        return HermesChatResult(
-            assistant_content=self.assistant_content,
-            hermes_thread_id=self.hermes_thread_id,
-        )
-
-    def close(self) -> None:
-        self.close_calls += 1
-        if self.close_error is not None:
-            raise self.close_error
-
-
-class RecordingHermesClientFactory:
-    def __init__(self, client: FakeHermesClient) -> None:
-        self.client = client
-        self.calls: list[tuple[str, str, str]] = []
-
-    def __call__(self, *, base_url: str, api_key: str, model: str) -> FakeHermesClient:
-        self.calls.append((base_url, api_key, model))
-        return self.client
-
-
-class RecordingWechatSender:
-    def __init__(self, account_id: str, factory: RecordingWechatSenderFactory) -> None:
-        self.account_id = account_id
-        self._factory = factory
-
-    def send_text(self, conversation_id: str, content: str) -> None:
-        self._factory.send_calls.append((self.account_id, conversation_id, content))
-
-    def close(self) -> None:
-        self._factory.closed_account_ids.append(self.account_id)
-
-
-class RecordingWechatSenderFactory:
-    def __init__(self) -> None:
-        self.account_ids: list[str] = []
-        self.send_calls: list[tuple[str, str, str]] = []
-        self.closed_account_ids: list[str] = []
-
-    def __call__(self, *, account_id: str) -> RecordingWechatSender:
-        self.account_ids.append(account_id)
-        return RecordingWechatSender(account_id, self)
 
 
 def runtime_settings(
@@ -219,62 +156,38 @@ def test_missing_token_environment_fails_closed_before_resource_creation() -> No
     assert engine_calls == 0
 
 
-def test_missing_hermes_api_key_fails_before_resource_creation() -> None:
-    engine_calls = 0
-
-    def engine_factory(url: str) -> Engine:
-        del url
-        nonlocal engine_calls
-        engine_calls += 1
-        raise AssertionError("engine must not be created")
-
+def test_polling_does_not_require_or_initialize_hermes(tmp_path: Path) -> None:
+    database_path = tmp_path / "gateway.db"
+    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
     settings = runtime_settings(
-        "sqlite+pysqlite:///:memory:",
+        database_url,
         hermes=HermesSettings(
             enabled=True,
             base_url="https://hermes.test",
             api_key_env=HERMES_API_KEY_ENV,
         ),
     )
-    with pytest.raises(HermesAPIKeyEnvironmentError) as error:
-        run_wechat_poll_once(
-            settings,
-            engine_factory=engine_factory,
-            environment_reader=lambda name: TOKEN if name == TOKEN_ENV else None,
-        )
+    client = FakeWechatClient({})
+    environment_reads: list[str] = []
 
-    assert error.value.environment_variable == HERMES_API_KEY_ENV
-    assert engine_calls == 0
+    def environment_reader(name: str) -> str | None:
+        environment_reads.append(name)
+        return TOKEN if name == TOKEN_ENV else None
 
+    def forbidden_inline_resource(*args: object, **kwargs: object) -> Any:
+        raise AssertionError(f"inline Hermes resource initialized: {args!r} {kwargs!r}")
 
-def test_hermes_client_initialization_error_does_not_expose_api_key() -> None:
-    sensitive_api_key = "hermes-key-that-must-not-appear"
-    settings = runtime_settings(
-        "sqlite+pysqlite:///:memory:",
-        hermes=HermesSettings(
-            enabled=True,
-            base_url="https://hermes.test",
-            api_key_env=HERMES_API_KEY_ENV,
-        ),
+    result = run_wechat_poll_once(
+        settings,
+        client_factory=RecordingClientFactory(client),
+        hermes_client_factory=forbidden_inline_resource,  # type: ignore[arg-type]
+        sender_factory=forbidden_inline_resource,  # type: ignore[arg-type]
+        environment_reader=environment_reader,
     )
 
-    def failing_factory(*, base_url: str, api_key: str, model: str) -> FakeHermesClient:
-        del base_url, model
-        raise RuntimeError(f"Hermes client rejected {api_key}")
-
-    with pytest.raises(HermesClientInitializationError) as error:
-        run_wechat_poll_once(
-            settings,
-            hermes_client_factory=failing_factory,
-            environment_reader={
-                TOKEN_ENV: TOKEN,
-                HERMES_API_KEY_ENV: sensitive_api_key,
-            }.get,
-        )
-
-    assert sensitive_api_key not in str(error.value)
-    assert error.value.__cause__ is None
-    assert error.value.__context__ is None
+    assert result.logged_in is True
+    assert environment_reads == [TOKEN_ENV]
+    assert client.close_calls == 1
 
 
 def test_client_initialization_error_does_not_expose_token() -> None:
@@ -462,10 +375,7 @@ def test_runtime_wires_client_checkpoint_store_and_admission_sink(tmp_path: Path
         engine.dispose()
 
 
-def test_runtime_relays_hermes_response_to_source_wechat_account(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_runtime_archives_admits_and_enqueues_without_inline_hermes(tmp_path: Path) -> None:
     database_path = tmp_path / "gateway.db"
     database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
     engine = create_database_engine(database_url)
@@ -490,8 +400,6 @@ def test_runtime_relays_hermes_response_to_source_wechat_account(
         engine.dispose()
 
     wechat_client = FakeWechatClient({CHAT_ID: [raw_message(1, content="send this to Hermes")]})
-    hermes_client = FakeHermesClient()
-    hermes_factory = RecordingHermesClientFactory(hermes_client)
     settings = runtime_settings(
         database_url,
         hermes=HermesSettings(
@@ -501,72 +409,60 @@ def test_runtime_relays_hermes_response_to_source_wechat_account(
             model="hermes-runtime-test",
         ),
     )
-    sender_factory = RecordingWechatSenderFactory()
-    outbound_factory_calls: list[tuple[str, str, str]] = []
+    environment_reads: list[str] = []
 
-    def recording_http_sender(
-        account_id: str,
-        base_url: str,
-        token_env: str,
-        *,
-        environment_reader: Callable[[str], str | None],
-    ) -> RecordingWechatSender:
-        assert environment_reader(token_env) == TOKEN
-        outbound_factory_calls.append((account_id, base_url, token_env))
-        return sender_factory(account_id=account_id)
+    def environment_reader(name: str) -> str | None:
+        environment_reads.append(name)
+        return TOKEN if name == TOKEN_ENV else None
 
-    monkeypatch.setattr(wechat_runtime, "WechatHttpMessageSender", recording_http_sender)
+    def forbidden_inline_resource(*args: object, **kwargs: object) -> Any:
+        raise AssertionError(f"inline Hermes resource initialized: {args!r} {kwargs!r}")
 
     result = run_wechat_poll_once(
         settings,
         client_factory=RecordingClientFactory(wechat_client),
-        hermes_client_factory=hermes_factory,
-        environment_reader={
-            TOKEN_ENV: TOKEN,
-            HERMES_API_KEY_ENV: HERMES_API_KEY,
-        }.get,
+        hermes_client_factory=forbidden_inline_resource,  # type: ignore[arg-type]
+        sender_factory=forbidden_inline_resource,  # type: ignore[arg-type]
+        environment_reader=environment_reader,
     )
 
     assert result.logged_in is True
     assert result.messages_processed == 1
     assert result.chats_failed == 0
     assert result.failures == []
-    assert hermes_factory.calls == [("https://hermes.test", HERMES_API_KEY, "hermes-runtime-test")]
-    assert hermes_client.chat_calls[0][0] == "send this to Hermes"
-    assert outbound_factory_calls == [
-        (ACCOUNT_ID, "https://agent-wechat.test:6174", TOKEN_ENV),
-    ]
-    assert sender_factory.account_ids == [ACCOUNT_ID]
-    assert sender_factory.send_calls == [
-        (ACCOUNT_ID, CHAT_ID, "Hermes accepted the message"),
-    ]
-    assert sender_factory.closed_account_ids == [ACCOUNT_ID]
+    assert environment_reads == [TOKEN_ENV]
     assert wechat_client.auth_calls == 1
-    assert hermes_client.close_calls == 1
     assert wechat_client.close_calls == 1
 
     engine = create_database_engine(database_url)
     try:
         with Session(engine) as session:
+            message = session.scalar(select(Message))
             thread = session.scalar(select(AIThread))
             dispatch_record = session.scalar(select(HermesDispatchRecord))
+            assert message is not None
+            assert message.content == "send this to Hermes"
             assert thread is not None
             assert dispatch_record is not None
-            assert hermes_client.chat_calls[0][1] == f"v1:cf-agent-gateway:{thread.id}"
-            assert thread.hermes_thread_id == "hermes-runtime-thread"
-            assert dispatch_record.status is HermesDispatchStatus.SUCCESS
-            assert dispatch_record.message_id == session.scalar(select(Message.id))
+            assert thread.hermes_thread_id is None
+            assert dispatch_record.status is HermesDispatchStatus.QUEUED
+            assert dispatch_record.attempt_count == 0
+            assert dispatch_record.claim_token is None
+            assert dispatch_record.claimed_at is None
+            assert dispatch_record.lease_expires_at is None
+            assert dispatch_record.completed_at is None
+            assert dispatch_record.message_id == message.id
             assert dispatch_record.ai_thread_id == thread.id
+            assert session.scalar(select(func.count()).select_from(HermesDispatchResponse)) == 0
             assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
     finally:
         engine.dispose()
 
 
-def test_runtime_isolates_hermes_responses_between_wechat_accounts(tmp_path: Path) -> None:
+def test_runtime_queues_dispatches_independently_between_wechat_accounts(tmp_path: Path) -> None:
     database_path = tmp_path / "gateway.db"
     database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
     account_ids = ("wxid_gateway_a", "wxid_gateway_b")
-    responses = ("response for account A", "response for account B")
 
     engine = create_database_engine(database_url)
     initialize_database(engine)
@@ -590,39 +486,25 @@ def test_runtime_isolates_hermes_responses_between_wechat_accounts(tmp_path: Pat
     finally:
         engine.dispose()
 
-    settings = runtime_settings(
-        database_url,
-        hermes=HermesSettings(
-            enabled=True,
-            base_url="https://hermes.test",
-            api_key_env=HERMES_API_KEY_ENV,
-        ),
-    )
-    sender_factory = RecordingWechatSenderFactory()
+    settings = runtime_settings(database_url)
     results = []
     wechat_clients = []
 
-    for index, (account_id, assistant_content) in enumerate(
-        zip(account_ids, responses, strict=True)
-    ):
+    def forbidden_inline_resource(*args: object, **kwargs: object) -> Any:
+        raise AssertionError(f"inline Hermes resource initialized: {args!r} {kwargs!r}")
+
+    for account_id in account_ids:
         wechat_client = FakeWechatClient(
             {CHAT_ID: [raw_message(1, content=f"message from {account_id}")]},
             account_id=account_id,
-        )
-        hermes_client = FakeHermesClient(
-            assistant_content=assistant_content,
-            hermes_thread_id=f"hermes-runtime-thread-{index}",
         )
         results.append(
             run_wechat_poll_once(
                 settings,
                 client_factory=RecordingClientFactory(wechat_client),
-                hermes_client_factory=RecordingHermesClientFactory(hermes_client),
-                sender_factory=sender_factory,
-                environment_reader={
-                    TOKEN_ENV: TOKEN,
-                    HERMES_API_KEY_ENV: HERMES_API_KEY,
-                }.get,
+                hermes_client_factory=forbidden_inline_resource,  # type: ignore[arg-type]
+                sender_factory=forbidden_inline_resource,  # type: ignore[arg-type]
+                environment_reader=lambda name: TOKEN if name == TOKEN_ENV else None,
             )
         )
         wechat_clients.append(wechat_client)
@@ -631,12 +513,6 @@ def test_runtime_isolates_hermes_responses_between_wechat_accounts(tmp_path: Pat
     assert [result.messages_processed for result in results] == [1, 1]
     assert [result.chats_failed for result in results] == [0, 0]
     assert [result.failures for result in results] == [[], []]
-    assert sender_factory.account_ids == list(account_ids)
-    assert sender_factory.send_calls == [
-        (account_ids[0], CHAT_ID, responses[0]),
-        (account_ids[1], CHAT_ID, responses[1]),
-    ]
-    assert sender_factory.closed_account_ids == list(account_ids)
     assert [client.auth_calls for client in wechat_clients] == [1, 1]
     assert [client.close_calls for client in wechat_clients] == [1, 1]
 
@@ -651,39 +527,25 @@ def test_runtime_isolates_hermes_responses_between_wechat_accounts(tmp_path: Pat
                     WechatSyncCheckpoint.source_account_id
                 )
             ).all()
+            dispatch_rows = session.execute(
+                select(
+                    Message.source_account_id,
+                    HermesDispatchRecord.status,
+                    HermesDispatchRecord.attempt_count,
+                )
+                .join(HermesDispatchRecord, HermesDispatchRecord.message_id == Message.id)
+                .order_by(Message.source_account_id)
+            ).all()
             assert stored_account_ids == list(account_ids)
             assert checkpoint_account_ids == list(account_ids)
+            assert dispatch_rows == [
+                (account_ids[0], HermesDispatchStatus.QUEUED, 0),
+                (account_ids[1], HermesDispatchStatus.QUEUED, 0),
+            ]
+            assert session.scalars(select(AIThread.hermes_thread_id)).all() == [None, None]
+            assert session.scalar(select(func.count()).select_from(HermesDispatchResponse)) == 0
     finally:
         engine.dispose()
-
-
-def test_hermes_cleanup_error_does_not_replace_successful_poll_result(tmp_path: Path) -> None:
-    database_path = tmp_path / "gateway.db"
-    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
-    wechat_client = FakeWechatClient({})
-    close_error = RuntimeError(f"cleanup leaked {HERMES_API_KEY}")
-    hermes_client = FakeHermesClient(close_error=close_error)
-
-    result = run_wechat_poll_once(
-        runtime_settings(
-            database_url,
-            hermes=HermesSettings(
-                enabled=True,
-                base_url="https://hermes.test",
-                api_key_env=HERMES_API_KEY_ENV,
-            ),
-        ),
-        client_factory=RecordingClientFactory(wechat_client),
-        hermes_client_factory=RecordingHermesClientFactory(hermes_client),
-        environment_reader={
-            TOKEN_ENV: TOKEN,
-            HERMES_API_KEY_ENV: HERMES_API_KEY,
-        }.get,
-    )
-
-    assert result.logged_in is True
-    assert hermes_client.close_calls == 1
-    assert wechat_client.close_calls == 1
 
 
 def test_latest_bootstrap_then_processes_only_new_messages(tmp_path: Path) -> None:

@@ -51,19 +51,21 @@ OUTBOX_SCHEMA_TABLES = PROFILE_SCHEMA_TABLES | OUTBOX_TABLES
 ARTIFACT_TABLES = frozenset({"artifacts"})
 ARTIFACT_SCHEMA_TABLES = OUTBOX_SCHEMA_TABLES | ARTIFACT_TABLES
 ROUTING_TABLES = frozenset({"conversation_agent_profile_bindings"})
-SCHEMA_TABLES = ARTIFACT_SCHEMA_TABLES | ROUTING_TABLES
+WORKER_TABLES = frozenset({"hermes_dispatch_responses"})
+SCHEMA_TABLES = ARTIFACT_SCHEMA_TABLES | ROUTING_TABLES | WORKER_TABLES
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
 PROFILE_REVISION = "20260806_02"
 OUTBOX_REVISION = "20260806_03"
 ARTIFACT_REVISION = "20260806_04"
 ROUTING_REVISION = "20260807_01"
+WORKER_REVISION = "20260807_02"
 
 
 def _head_revision() -> str:
     migration_config = migration.create_migration_config()
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert head_revision == ROUTING_REVISION
+    assert head_revision == WORKER_REVISION
     return head_revision
 
 
@@ -206,6 +208,10 @@ def test_postgresql_offline_upgrade_emits_complete_schema_ddl() -> None:
     assert "uq_hermes_dispatch_message" in rendered_sql
     assert "ck_hermes_dispatch_state_fields" in rendered_sql
     assert "ix_hermes_dispatch_thread_queue" in rendered_sql
+    assert "lease_expires_at" in rendered_sql
+    assert "uq_hermes_dispatch_running_thread" in rendered_sql
+    assert "ix_hermes_dispatch_claim" in rendered_sql
+    assert "create table hermes_dispatch_responses" in rendered_sql
     assert "uq_artifact_storage_key" in rendered_sql
     assert "artifact_kind" in rendered_sql
     assert "artifact_status" in rendered_sql
@@ -288,6 +294,9 @@ def test_sqlite_online_upgrade_applies_batch_migration(tmp_path: Path) -> None:
             "ix_hermes_dispatch_queue",
             "ix_hermes_dispatch_records_message_id",
             "ix_hermes_dispatch_thread_queue",
+            "ix_hermes_dispatch_claim",
+            "ix_hermes_dispatch_fifo",
+            "uq_hermes_dispatch_running_thread",
         }
         assert ARTIFACT_TABLES.issubset(inspector.get_table_names())
         artifact_checks = {

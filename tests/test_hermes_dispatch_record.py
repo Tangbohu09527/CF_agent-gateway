@@ -419,6 +419,7 @@ def test_database_enforces_status_attempt_and_state_constraints(session: Session
         "status = 'running', attempt_count = 1, claim_token = '   ', "
         "claimed_at = CURRENT_TIMESTAMP",
         "status = 'success', completed_at = CURRENT_TIMESTAMP",
+        "lease_expires_at = CURRENT_TIMESTAMP",
     ):
         with pytest.raises(IntegrityError):
             session.execute(

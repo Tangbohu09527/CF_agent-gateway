@@ -1,5 +1,10 @@
 # V2 Integration Alpha Status
 
+> Historical snapshot: this document records `feat/v2-integration` at `afb90d4`.
+> It predates V2 routing runtime `0850eb2` and the standalone dispatch worker.
+> See [architecture.md](architecture.md) and the root README for the current runtime.
+
+
 ## Current Version
 
 | Item | Value |

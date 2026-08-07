@@ -24,7 +24,7 @@ from cf_agent_gateway.database import (
 BASELINE_REVISION = "20260806_0001"
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
-HEAD_REVISION = "20260807_01"
+HEAD_REVISION = "20260807_02"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -342,6 +342,7 @@ def test_migrations_render_for_postgresql() -> None:
     assert "CREATE TABLE message_raw_payloads" in ddl
     assert "CREATE TABLE message_delivery_attempts" in ddl
     assert "CREATE TABLE hermes_dispatch_records" in ddl
+    assert "CREATE TABLE hermes_dispatch_responses" in ddl
     assert "CREATE TABLE artifacts" in ddl
     assert "ck_message_direction" in ddl
     assert "uq_hermes_dispatch_idempotency_key" in ddl
@@ -349,6 +350,9 @@ def test_migrations_render_for_postgresql() -> None:
     assert "ck_hermes_dispatch_state_fields" in ddl
     assert "ix_hermes_dispatch_queue" in ddl
     assert "ix_hermes_dispatch_thread_queue" in ddl
+    assert "ix_hermes_dispatch_claim" in ddl
+    assert "ix_hermes_dispatch_fifo" in ddl
+    assert "uq_hermes_dispatch_running_thread" in ddl
     assert "uq_artifact_storage_key" in ddl
     assert "artifact_kind" in ddl
     assert "artifact_status" in ddl

@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from cf_agent_gateway.hermes import (
+    HERMES_IDEMPOTENCY_HEADER,
     HERMES_SESSION_HEADER,
     ArtifactRefPart,
     HermesAPIError,
@@ -86,6 +87,7 @@ def test_chat_carries_v2_profile_thread_and_session_metadata() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers[HERMES_SESSION_HEADER] == HERMES_THREAD_ID
+        assert request.headers[HERMES_IDEMPOTENCY_HEADER] == "dispatch-message-42"
         assert json.loads(request.content) == {
             "model": MODEL,
             "messages": [{"role": "user", "content": USER_CONTENT}],
@@ -117,6 +119,7 @@ def test_chat_carries_v2_profile_thread_and_session_metadata() -> None:
             profile_revision=3,
             thread_id="gateway-thread-001",
             session_metadata=session_metadata,
+            idempotency_key="dispatch-message-42",
         )
 
     assert result.assistant_content == "Profile-aware response"
