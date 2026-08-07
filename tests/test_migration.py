@@ -52,7 +52,18 @@ ARTIFACT_TABLES = frozenset({"artifacts"})
 ARTIFACT_SCHEMA_TABLES = OUTBOX_SCHEMA_TABLES | ARTIFACT_TABLES
 ROUTING_TABLES = frozenset({"conversation_agent_profile_bindings"})
 WORKER_TABLES = frozenset({"hermes_dispatch_responses"})
-SCHEMA_TABLES = ARTIFACT_SCHEMA_TABLES | ROUTING_TABLES | WORKER_TABLES
+RESPONSE_DELIVERY_TABLES = frozenset(
+    {
+        "hermes_responses",
+        "hermes_response_parts",
+        "delivery_outbox",
+        "delivery_attempts",
+        "delivery_receipts",
+    }
+)
+SCHEMA_TABLES = (
+    ARTIFACT_SCHEMA_TABLES | ROUTING_TABLES | WORKER_TABLES | RESPONSE_DELIVERY_TABLES
+)
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
 PROFILE_REVISION = "20260806_02"
@@ -60,12 +71,13 @@ OUTBOX_REVISION = "20260806_03"
 ARTIFACT_REVISION = "20260806_04"
 ROUTING_REVISION = "20260807_01"
 WORKER_REVISION = "20260807_02"
+RESPONSE_DELIVERY_REVISION = "20260807_03"
 
 
 def _head_revision() -> str:
     migration_config = migration.create_migration_config()
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert head_revision == WORKER_REVISION
+    assert head_revision == RESPONSE_DELIVERY_REVISION
     return head_revision
 
 

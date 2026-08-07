@@ -5,7 +5,6 @@ import os
 import signal
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from functools import partial
 from threading import Event
 from types import FrameType
 from typing import Protocol
@@ -13,7 +12,6 @@ from typing import Protocol
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from cf_agent_gateway.adapters.wechat import WechatHttpMessageSender
 from cf_agent_gateway.config import Settings, load_settings
 from cf_agent_gateway.database import (
     create_database_engine,
@@ -23,7 +21,7 @@ from cf_agent_gateway.database import (
 from cf_agent_gateway.hermes import HermesChatClient, HermesClient, HermesDispatchService
 from cf_agent_gateway.hermes.worker import HermesDispatchWorker
 from cf_agent_gateway.logging import configure_logging
-from cf_agent_gateway.runtime.delivery import AccountScopedHermesResponseProcessor
+from cf_agent_gateway.response import ResponsePersistenceProcessor
 from cf_agent_gateway.runtime.errors import (
     DispatchWorkerDisabledError,
     DispatchWorkerRuntimeError,
@@ -65,10 +63,7 @@ def build_dispatch_worker(
         lambda session: HermesDispatchService(session, hermes_client),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,
-        response_processor_factory=lambda session: AccountScopedHermesResponseProcessor(
-            session,
-            sender_factory,
-        ),
+        response_processor_factory=ResponsePersistenceProcessor,
     )
 
 
@@ -110,19 +105,11 @@ def run_dispatch_worker(
         engine = engine_factory(settings.database.url)
         initialize_database(engine)
         session_factory = create_database_session_factory(engine)
-        resolved_sender_factory = sender_factory
-        if resolved_sender_factory is None:
-            resolved_sender_factory = partial(
-                WechatHttpMessageSender,
-                base_url=settings.wechat.base_url,
-                token_env=settings.wechat.token_env,
-                environment_reader=environment_reader,
-            )
         worker = build_dispatch_worker(
             settings,
             session_factory=session_factory,
             hermes_client=hermes_client,
-            sender_factory=resolved_sender_factory,
+            sender_factory=sender_factory,
         )
         logger.info(
             "dispatch worker started",

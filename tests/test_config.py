@@ -4,11 +4,23 @@ from threading import TIMEOUT_MAX
 import pytest
 
 from cf_agent_gateway.config import (
+    ArtifactSettings,
     HermesSettings,
     RuntimeSettings,
     WechatSettings,
     load_settings,
 )
+
+
+def test_artifact_settings_defaults() -> None:
+    settings = ArtifactSettings()
+
+    assert settings.storage_root == "./data/artifacts"
+
+
+def test_artifact_settings_rejects_empty_storage_root() -> None:
+    with pytest.raises(ValueError, match="artifact.storage_root"):
+        ArtifactSettings(storage_root="  ")
 
 
 def test_runtime_settings_defaults() -> None:
@@ -48,6 +60,7 @@ def test_legacy_yaml_without_runtime_or_wechat_settings_uses_safe_defaults(
     config_path.write_text("logging:\n  level: INFO\n", encoding="utf-8")
 
     settings = load_settings(config_path)
+    assert settings.artifact == ArtifactSettings()
 
     assert settings.runtime == RuntimeSettings()
     assert settings.wechat == WechatSettings()
@@ -63,6 +76,8 @@ server:
   port: 9090
 database:
   url: postgresql+psycopg://gateway:secret@db/gateway
+artifact:
+  storage_root: /var/lib/cf-agent-gateway/artifacts
 logging:
   level: debug
 runtime:
@@ -87,6 +102,7 @@ hermes:
     assert settings.server.host == "127.0.0.1"
     assert settings.server.port == 9090
     assert settings.database.url.startswith("postgresql+psycopg://")
+    assert settings.artifact == ArtifactSettings(storage_root="/var/lib/cf-agent-gateway/artifacts")
     assert settings.logging.level == "DEBUG"
     assert settings.runtime == RuntimeSettings(
         polling_interval_seconds=1.5,

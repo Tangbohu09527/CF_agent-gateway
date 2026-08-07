@@ -31,6 +31,19 @@ class LoggingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactSettings:
+    storage_root: str = "./data/artifacts"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.storage_root, str) or not self.storage_root.strip():
+            raise ValueError("artifact.storage_root must not be empty")
+        storage_root = self.storage_root.strip()
+        if "\x00" in storage_root:
+            raise ValueError("artifact.storage_root contains invalid characters")
+        object.__setattr__(self, "storage_root", storage_root)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     polling_interval_seconds: float = 3.0
     v2_routing_enabled: bool = False
@@ -188,6 +201,7 @@ class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
+    artifact: ArtifactSettings = ArtifactSettings()
     wechat: WechatSettings = WechatSettings()
     hermes: HermesSettings = HermesSettings()
     worker: WorkerSettings = WorkerSettings()
@@ -209,6 +223,7 @@ def load_settings(path: str | Path) -> Settings:
     server = _mapping(raw, "server")
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
+    artifact = _mapping(raw, "artifact")
     runtime = _mapping(raw, "runtime")
     wechat = _mapping(raw, "wechat")
     hermes = _mapping(raw, "hermes")
@@ -235,6 +250,9 @@ def load_settings(path: str | Path) -> Settings:
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
+        artifact=ArtifactSettings(
+            storage_root=artifact.get("storage_root", "./data/artifacts"),
+        ),
         runtime=RuntimeSettings(
             polling_interval_seconds=runtime.get("polling_interval_seconds", 3.0),
             v2_routing_enabled=runtime.get("v2_routing_enabled", False),

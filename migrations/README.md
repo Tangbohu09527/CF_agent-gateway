@@ -38,7 +38,7 @@ instead of guessing their revision. The single packaged chain is:
 
 ```text
 20260806_01 -> 20260806_0001 -> 20260806_0002 -> 20260806_02 -> 20260806_03
-    -> 20260806_04 -> 20260807_01 -> 20260807_02 (head)
+    -> 20260806_04 -> 20260807_01 -> 20260807_02 -> 20260807_03 (head)
 ```
 
 `20260806_01` retains the migration-foundation marker without business DDL.
@@ -57,11 +57,13 @@ its response lookup index, storage-key uniqueness, kind/status constraints, and
 ready-content metadata invariants. `20260807_01` adds the persisted bindings and thread
 facts required by the V2 routing runtime.
 
-`20260807_02` is the current head. It adds dispatch lease expiry, the `dead` state,
+`20260807_02` adds dispatch lease expiry, the `dead` state,
 claim/FIFO indexes, and the partial unique index that permits at most one `running`
 record per AIThread. It also creates `hermes_dispatch_responses`. Existing pre-worker
 `running` rows are migrated conservatively to `uncertain`, because their external
 Hermes outcome cannot be proven during upgrade.
+`20260807_03` is the current head. It adds persisted Hermes responses and ordered parts together with the delivery
+outbox, per-part attempts, and receipts.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or
