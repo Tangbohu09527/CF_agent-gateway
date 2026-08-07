@@ -31,6 +31,10 @@ from cf_agent_gateway.runtime.errors import (
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
 )
+from cf_agent_gateway.runtime.startup import (
+    check_database_migrations,
+    database_startup_check_enabled,
+)
 
 
 class ClosableWechatPollingClient(WechatPollingClient, Protocol):
@@ -95,7 +99,10 @@ def run_wechat_poll_once(
     client: ClosableWechatPollingClient | None = None
     try:
         engine = engine_factory(settings.database.url)
-        initialize_database(engine)
+        if database_startup_check_enabled():
+            check_database_migrations(engine)
+        else:
+            initialize_database(engine)
         session_factory = create_database_session_factory(engine)
         checkpoint_session = session_factory()
         checkpoint_store = WechatSyncCheckpointStore(checkpoint_session)

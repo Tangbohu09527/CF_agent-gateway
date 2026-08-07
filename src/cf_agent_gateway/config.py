@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import TIMEOUT_MAX
@@ -234,8 +235,11 @@ def load_settings(path: str | Path) -> Settings:
 
     host = str(server.get("host", "0.0.0.0")).strip()
     port = int(server.get("port", 8080))
-    database_url = str(database.get("url", "sqlite:///./data/gateway.db")).strip()
-    log_level = str(logging.get("level", "INFO")).upper()
+    database_url = os.getenv(
+        "CF_AGENT_GATEWAY_DATABASE_URL",
+        str(database.get("url", "sqlite:///./data/gateway.db")),
+    ).strip()
+    log_level = os.getenv("CF_GATEWAY_LOG_LEVEL", str(logging.get("level", "INFO"))).strip().upper()
 
     if not host:
         raise ValueError("server.host is required")

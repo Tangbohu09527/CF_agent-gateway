@@ -266,3 +266,27 @@ def test_yaml_parse_error_does_not_echo_sensitive_source_text(tmp_path: Path) ->
         load_settings(config_path)
 
     assert sensitive_value not in str(error.value)
+
+
+def test_environment_overrides_production_database_and_log_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+database:
+  url: sqlite:///ignored.db
+logging:
+  level: WARNING
+""".strip(),
+        encoding="utf-8",
+    )
+    database_url = "postgresql+psycopg://gateway:password@database/gateway"
+    monkeypatch.setenv("CF_AGENT_GATEWAY_DATABASE_URL", database_url)
+    monkeypatch.setenv("CF_GATEWAY_LOG_LEVEL", " debug ")
+
+    settings = load_settings(config_path)
+
+    assert settings.database.url == database_url
+    assert settings.logging.level == "DEBUG"

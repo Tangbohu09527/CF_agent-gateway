@@ -1,6 +1,7 @@
+import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -8,6 +9,9 @@ from cf_agent_gateway.database import get_database_session
 from cf_agent_gateway.message.errors import ConversationTypeConflictError
 from cf_agent_gateway.message.schemas import MessageCreated, MessageEvent, MessageResponse
 from cf_agent_gateway.message.store import MessageStore
+from cf_agent_gateway.runtime.health import DatabaseReadinessMonitor
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -19,6 +23,28 @@ class HealthResponse(BaseModel):
 @router.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+@router.get("/ready", response_model=HealthResponse, tags=["system"])
+async def readiness(request: Request, response: Response) -> HealthResponse:
+    if not getattr(request.app.state, "ready", False):
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return HealthResponse(status="not_ready")
+
+    monitor: DatabaseReadinessMonitor | None = getattr(
+        request.app.state,
+        "database_readiness",
+        None,
+    )
+    if monitor is None or not monitor.is_ready():
+        logger.warning(
+            "readiness check failed",
+            extra={"fields": {"error_code": "database_unavailable"}},
+        )
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return HealthResponse(status="not_ready")
+
+    return HealthResponse(status="ready")
 
 
 DatabaseSession = Annotated[Session, Depends(get_database_session)]

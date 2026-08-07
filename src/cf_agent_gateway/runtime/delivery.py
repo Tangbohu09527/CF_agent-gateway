@@ -25,6 +25,10 @@ from cf_agent_gateway.runtime.errors import (
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
 )
+from cf_agent_gateway.runtime.startup import (
+    check_database_migrations,
+    database_startup_check_enabled,
+)
 
 
 def drain_wechat_delivery_outbox(
@@ -66,7 +70,10 @@ def run_wechat_delivery_once(
     engine: Engine | None = None
     try:
         engine = engine_factory(settings.database.url)
-        initialize_database(engine)
+        if database_startup_check_enabled():
+            check_database_migrations(engine)
+        else:
+            initialize_database(engine)
         session_factory = create_database_session_factory(engine)
         resolved_sender_factory = sender_factory
         if resolved_sender_factory is None:

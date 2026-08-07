@@ -1,0 +1,100 @@
+name: cf-agent-gateway
+
+x-runtime: &runtime
+  image: ${CF_GATEWAY_IMAGE:?Set CF_GATEWAY_IMAGE to an immutable image tag or digest}
+  init: true
+  read_only: true
+  env_file:
+    - ${CF_GATEWAY_ENV_FILE:-.env}
+  environment: &runtime-environment
+    CF_GATEWAY_CONFIG: /app/config/production.yaml
+    CF_AGENT_GATEWAY_DATABASE_URL: ${CF_AGENT_GATEWAY_DATABASE_URL:?Set CF_AGENT_GATEWAY_DATABASE_URL to the production PostgreSQL URL}
+    CF_GATEWAY_STARTUP_MIGRATION_MODE: check
+  volumes:
+    - ./config/production.yaml:/app/config/production.yaml:ro
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: ${CF_GATEWAY_STOP_GRACE_PERIOD:-120s}
+  logging:
+    driver: json-file
+    options:
+      max-size: ${CF_GATEWAY_LOG_MAX_SIZE:-10m}
+      max-file: ${CF_GATEWAY_LOG_MAX_FILES:-5}
+
+services:
+  migration:
+    <<: *runtime
+    environment:
+      <<: *runtime-environment
+      CF_GATEWAY_SERVICE: cf-agent-gateway-migration
+    command:
+      - python
+      - -m
+      - cf_agent_gateway.runtime.startup
+      - migrate
+    restart: "no"
+
+  gateway:
+    <<: *runtime
+    environment:
+      <<: *runtime-environment
+      CF_GATEWAY_SERVICE: cf-agent-gateway
+    command:
+      - python
+      - -m
+      - cf_agent_gateway.main
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    ports:
+      - ${CF_GATEWAY_BIND_ADDRESS:-127.0.0.1}:${CF_GATEWAY_PORT:-8080}:8080
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3).read()
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    <<: *runtime
+    profiles:
+      - worker
+    command:
+      - python
+      - -m
+      - cf_agent_gateway.runtime.worker
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    environment:
+      <<: *runtime-environment
+      CF_GATEWAY_SERVICE: cf-agent-gateway-worker
+      CF_GATEWAY_WORKER_HEARTBEAT_PATH: /run/cf-agent-gateway/worker-heartbeat.json
+      CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/cf-agent-gateway:size=1m,mode=1777
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - cf_agent_gateway.runtime.heartbeat
+        - --file
+        - /run/cf-agent-gateway/worker-heartbeat.json
+        - --max-age-seconds
+        - ${CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

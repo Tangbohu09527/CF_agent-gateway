@@ -346,6 +346,45 @@ def test_runtime_assembly_and_cleanup_order(
     ]
 
 
+def test_production_poll_uses_read_only_database_check_before_external_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class TrackingEngine:
+        def dispose(self) -> None:
+            events.append("engine.dispose")
+
+    engine = TrackingEngine()
+
+    def engine_factory(url: str) -> TrackingEngine:
+        assert url == "sqlite+pysqlite:///:memory:"
+        events.append("engine")
+        return engine
+
+    def check_database(candidate: object) -> None:
+        assert candidate is engine
+        events.append("check_database")
+        raise RuntimeError("database migration is stale")
+
+    def forbidden(*args: object, **kwargs: object) -> Any:
+        raise AssertionError(f"unexpected runtime access: {args!r} {kwargs!r}")
+
+    monkeypatch.setenv(TOKEN_ENV, TOKEN)
+    monkeypatch.setattr(wechat_runtime, "database_startup_check_enabled", lambda: True)
+    monkeypatch.setattr(wechat_runtime, "check_database_migrations", check_database)
+    monkeypatch.setattr(wechat_runtime, "initialize_database", forbidden)
+
+    with pytest.raises(RuntimeError, match="database migration is stale"):
+        run_wechat_poll_once(
+            runtime_settings("sqlite+pysqlite:///:memory:"),
+            client_factory=forbidden,  # type: ignore[arg-type]
+            engine_factory=engine_factory,  # type: ignore[arg-type]
+        )
+
+    assert events == ["engine", "check_database", "engine.dispose"]
+
+
 def test_runtime_wires_client_checkpoint_store_and_admission_sink(tmp_path: Path) -> None:
     database_path = tmp_path / "gateway.db"
     database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"

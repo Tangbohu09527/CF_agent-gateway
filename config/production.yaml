@@ -1,0 +1,26 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+# CF_AGENT_GATEWAY_DATABASE_URL must override this placeholder in production.
+database:
+  url: postgresql+psycopg://cf_agent_gateway:replace-me@127.0.0.1:5432/cf_agent_gateway?connect_timeout=5
+
+logging:
+  level: INFO
+
+runtime:
+  polling_interval_seconds: 3
+  v2_routing_enabled: true
+
+wechat:
+  enabled: false
+  base_url: http://127.0.0.1:6174
+  bootstrap_mode: latest
+  token_env: CF_AGENT_WECHAT_TOKEN
+
+hermes:
+  enabled: false
+  base_url: ""
+  api_key_env: HERMES_API_KEY
+  model: hermes-agent

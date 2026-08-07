@@ -6,11 +6,12 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from typing import Any
 
 import pytest
 
+from cf_agent_gateway.adapters.wechat import PollResult
 from cf_agent_gateway.config import LoggingSettings, Settings
 from cf_agent_gateway.runtime import WechatRuntimeDisabledError, worker
 
@@ -63,6 +64,66 @@ def test_main_loads_config_configures_logging_and_starts_worker(
     assert len(worker_calls) == 1
     assert worker_calls[0][0] is settings
     assert worker_calls[0][1].is_set() is False
+
+
+def test_main_checks_database_before_starting_worker_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings()
+    events: list[str] = []
+
+    def check_database(candidate: Settings) -> None:
+        assert candidate is settings
+        events.append("database")
+
+    def run_worker(candidate: Settings, *, stop_event: Event) -> None:
+        assert candidate is settings
+        assert not stop_event.is_set()
+        events.append("worker")
+
+    monkeypatch.setenv("CF_GATEWAY_STARTUP_MIGRATION_MODE", "check")
+    monkeypatch.delenv("CF_GATEWAY_WORKER_HEARTBEAT_PATH", raising=False)
+    monkeypatch.setattr(worker, "load_settings", lambda path: settings)
+    monkeypatch.setattr(worker, "configure_logging", lambda level: None)
+    monkeypatch.setattr(worker, "run_database_startup", check_database)
+    monkeypatch.setattr(worker, "run_worker", run_worker)
+
+    assert worker.main() == 0
+    assert events == ["database", "worker"]
+
+
+def test_main_does_not_poll_when_database_startup_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "postgresql://user:secret-password@database/gateway"
+    logged_errors: list[tuple[str, dict[str, Any]]] = []
+
+    def fail_database_check(settings: Settings) -> None:
+        del settings
+        raise RuntimeError(secret)
+
+    def forbidden_worker(settings: Settings, *, stop_event: Event) -> None:
+        del settings, stop_event
+        raise AssertionError("worker must not start after a database check failure")
+
+    def log_error(message: str, *, extra: dict[str, Any]) -> None:
+        logged_errors.append((message, extra))
+
+    monkeypatch.setenv("CF_GATEWAY_STARTUP_MIGRATION_MODE", "check")
+    monkeypatch.setattr(worker, "load_settings", lambda path: Settings())
+    monkeypatch.setattr(worker, "configure_logging", lambda level: None)
+    monkeypatch.setattr(worker, "run_database_startup", fail_database_check)
+    monkeypatch.setattr(worker, "run_worker", forbidden_worker)
+    monkeypatch.setattr(worker.logger, "error", log_error)
+
+    assert worker.main() == 1
+    assert logged_errors == [
+        (
+            "worker failed",
+            {"fields": {"error_code": "database_migration_required"}},
+        )
+    ]
+    assert secret not in str(logged_errors)
 
 
 @pytest.mark.parametrize("shutdown_signal", [signal.SIGINT, signal.SIGTERM])
@@ -216,3 +277,54 @@ def test_python_module_entrypoint_exits_two_when_runtime_is_disabled(tmp_path: P
         "worker failed",
     ]
     assert payloads[-1]["error_code"] == "wechat_runtime_disabled"
+
+
+def test_main_sigterm_waits_for_the_in_flight_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = RecordingSignalRegistry()
+    settings = Settings()
+    poll_started = Event()
+    release_poll = Event()
+    poll_finished = Event()
+    observations: list[tuple[str, bool]] = []
+
+    def blocked_poll(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        poll_started.set()
+        release_poll.wait(timeout=2)
+        poll_finished.set()
+        return PollResult(logged_in=True)
+
+    def send_sigterm() -> None:
+        started = poll_started.wait(timeout=2)
+        observations.append(("poll_started", started))
+        if started:
+            registry.invoke(signal.SIGTERM)
+            observations.append(("finished_after_signal", poll_finished.is_set()))
+        release_poll.set()
+
+    monkeypatch.setattr(worker, "load_settings", lambda path: settings)
+    monkeypatch.setattr(worker, "configure_logging", lambda level: None)
+    monkeypatch.setattr(worker.signal, "signal", registry.signal)
+    monkeypatch.setattr(worker, "run_wechat_poll_once", blocked_poll)
+    monkeypatch.setattr(
+        worker,
+        "create_worker_heartbeat_from_environment",
+        lambda **kwargs: None,
+    )
+
+    signal_thread = Thread(target=send_sigterm, daemon=True)
+    signal_thread.start()
+    try:
+        assert worker.main() == 0
+    finally:
+        release_poll.set()
+        signal_thread.join(timeout=2)
+
+    assert observations == [
+        ("poll_started", True),
+        ("finished_after_signal", False),
+    ]
+    assert poll_finished.is_set()
+    assert registry.current_handlers == registry.original_handlers

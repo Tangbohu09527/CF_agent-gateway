@@ -11,6 +11,7 @@ from time import sleep
 
 from alembic import command
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import Request
 from sqlalchemy import Engine, create_engine, event, inspect, text
@@ -86,13 +87,24 @@ def load_model_metadata() -> None:
     load_database_models()
 
 
+def check_database_migrations(engine: Engine) -> None:
+    """Verify without mutation that the database matches this build's migration head."""
+
+    load_database_models()
+    config = _create_alembic_config()
+    _validate_migration_tree(config)
+    with engine.connect() as connection:
+        current_heads = set(MigrationContext.configure(connection).get_current_heads())
+    if current_heads != {_EXPECTED_MIGRATION_HEAD}:
+        raise DatabaseSchemaError("database migration is not at the required head")
+    _validate_conversation_binding_constraints(engine)
+
+
 def initialize_database(engine: Engine) -> None:
     ensure_database_directory(engine)
     load_database_models()
     config = _create_alembic_config()
-    if set(ScriptDirectory.from_config(config).get_heads()) != {_EXPECTED_MIGRATION_HEAD}:
-        location = config.config_file_name or _PACKAGED_SCRIPT_LOCATION
-        raise DatabaseSchemaError(f"unexpected Alembic migration tree configured by {location}")
+    _validate_migration_tree(config)
     with _locked_migration_connection(engine) as connection:
         existing_tables = set(inspect(connection).get_table_names())
         if existing_tables and "alembic_version" not in existing_tables:
@@ -107,7 +119,7 @@ def initialize_database(engine: Engine) -> None:
             connection.rollback()
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
-    _validate_conversation_binding_constraints(engine)
+    check_database_migrations(engine)
 
 
 def _create_alembic_config() -> Config:
@@ -124,6 +136,12 @@ def _create_alembic_config() -> Config:
         config.set_main_option("script_location", _PACKAGED_SCRIPT_LOCATION)
     config.attributes["configure_logger"] = False
     return config
+
+
+def _validate_migration_tree(config: Config) -> None:
+    if set(ScriptDirectory.from_config(config).get_heads()) != {_EXPECTED_MIGRATION_HEAD}:
+        location = config.config_file_name or _PACKAGED_SCRIPT_LOCATION
+        raise DatabaseSchemaError(f"unexpected Alembic migration tree configured by {location}")
 
 
 @contextmanager

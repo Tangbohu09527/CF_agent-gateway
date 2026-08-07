@@ -29,6 +29,10 @@ from cf_agent_gateway.runtime.errors import (
     HermesClientInitializationError,
     HermesRuntimeDisabledError,
 )
+from cf_agent_gateway.runtime.startup import (
+    check_database_migrations,
+    database_startup_check_enabled,
+)
 from cf_agent_gateway.runtime.wechat import (
     ClosableHermesChatClient,
     WechatMessageSenderFactory,
@@ -54,10 +58,11 @@ def build_dispatch_worker(
     *,
     session_factory: sessionmaker[Session],
     hermes_client: HermesChatClient,
-    sender_factory: WechatMessageSenderFactory,
+    sender_factory: WechatMessageSenderFactory | None,
 ) -> HermesDispatchWorker:
     """Build the public worker core around injected runtime dependencies."""
 
+    del sender_factory
     return HermesDispatchWorker(
         session_factory,
         lambda session: HermesDispatchService(session, hermes_client),
@@ -103,7 +108,10 @@ def run_dispatch_worker(
             raise HermesClientInitializationError()
 
         engine = engine_factory(settings.database.url)
-        initialize_database(engine)
+        if database_startup_check_enabled():
+            check_database_migrations(engine)
+        else:
+            initialize_database(engine)
         session_factory = create_database_session_factory(engine)
         worker = build_dispatch_worker(
             settings,

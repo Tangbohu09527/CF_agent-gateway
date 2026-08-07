@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event, Thread
 
 import pytest
@@ -14,6 +16,12 @@ from cf_agent_gateway.runtime.errors import (
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
 )
+from cf_agent_gateway.runtime.heartbeat import (
+    FileHeartbeat,
+    HeartbeatError,
+    HeartbeatPublisher,
+    check_heartbeat,
+)
 
 
 class RecordingEvent(Event):
@@ -24,6 +32,23 @@ class RecordingEvent(Event):
     def wait(self, timeout: float | None = None) -> bool:
         self.wait_timeouts.append(timeout)
         return self.is_set()
+
+
+class RecordingHeartbeat:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def start(self) -> None:
+        self.events.append("start")
+
+    def update(self, state: str, **details: object) -> None:
+        self.events.append(("update", state, details))
+
+    def stop(self, state: str = "stopped") -> None:
+        self.events.append(("stop", state))
+
+    def wait(self, stop_event: Event, timeout_seconds: float) -> bool:
+        return stop_event.wait(timeout_seconds)
 
 
 @pytest.fixture
@@ -72,6 +97,39 @@ def test_worker_starts_polls_logs_result_and_stops(
         "messages_seen": 5,
         "messages_processed": 2,
     }
+
+
+def test_worker_publishes_heartbeat_for_a_successful_cycle(settings: Settings) -> None:
+    stop_event = Event()
+    heartbeat = RecordingHeartbeat()
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        stop_event.set()
+        return PollResult(logged_in=True, messages_processed=1)
+
+    worker.run_worker(
+        settings,
+        stop_event=stop_event,
+        poll_once=poll_once,
+        heartbeat=heartbeat,  # type: ignore[arg-type]
+    )
+
+    assert heartbeat.events == [
+        "start",
+        ("update", "running", {"phase": "idle", "cycle_sequence": 0}),
+        ("update", "running", {"phase": "polling", "cycle_sequence": 1}),
+        (
+            "update",
+            "running",
+            {
+                "phase": "waiting",
+                "cycle_sequence": 1,
+                "last_cycle_succeeded": True,
+            },
+        ),
+        ("stop", "stopped"),
+    ]
 
 
 def test_worker_does_not_poll_when_stop_is_already_set(
@@ -139,6 +197,64 @@ def test_stop_interrupts_interval_wait() -> None:
     finally:
         stop_event.set()
         thread.join(timeout=2)
+
+
+def test_stop_during_poll_waits_for_the_in_flight_cycle_to_finish() -> None:
+    settings = Settings(runtime=RuntimeSettings(polling_interval_seconds=60))
+    stop_event = Event()
+    poll_started = Event()
+    release_poll = Event()
+    poll_calls = 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal poll_calls
+        assert candidate is settings
+        poll_calls += 1
+        poll_started.set()
+        assert release_poll.wait(timeout=2)
+        return PollResult(logged_in=True)
+
+    thread = Thread(
+        target=worker.run_worker,
+        kwargs={
+            "settings": settings,
+            "stop_event": stop_event,
+            "poll_once": poll_once,
+        },
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert poll_started.wait(timeout=2)
+        stop_event.set()
+        thread.join(timeout=0.05)
+        assert thread.is_alive()
+
+        release_poll.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert poll_calls == 1
+    finally:
+        stop_event.set()
+        release_poll.set()
+        thread.join(timeout=2)
+
+
+def test_fatal_poll_failure_marks_heartbeat_failed(settings: Settings) -> None:
+    heartbeat = RecordingHeartbeat()
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        raise WechatRuntimeDisabledError()
+
+    with pytest.raises(WechatRuntimeDisabledError):
+        worker.run_worker(
+            settings,
+            poll_once=poll_once,
+            heartbeat=heartbeat,  # type: ignore[arg-type]
+        )
+
+    assert heartbeat.events[-1] == ("stop", "failed")
 
 
 def test_worker_retries_an_ordinary_poll_error_without_leaking_it(
@@ -212,3 +328,61 @@ def test_worker_propagates_permanent_poll_errors(
         "poll cycle started",
         "worker stopped",
     ]
+
+
+def test_stuck_poll_does_not_renew_the_worker_heartbeat(tmp_path: Path) -> None:
+    settings = Settings(runtime=RuntimeSettings(polling_interval_seconds=60))
+    heartbeat_path = tmp_path / "worker.json"
+    current_time = [datetime(2026, 8, 7, 9, 30, tzinfo=UTC)]
+    heartbeat = HeartbeatPublisher(
+        FileHeartbeat(
+            heartbeat_path,
+            clock=lambda: current_time[0],
+            process_id=123,
+            worker_id="worker-a",
+        ),
+        interval_seconds=0.01,
+    )
+    stop_event = Event()
+    poll_started = Event()
+    release_poll = Event()
+
+    def stuck_poll(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        poll_started.set()
+        release_poll.wait(timeout=2)
+        return PollResult(logged_in=True)
+
+    thread = Thread(
+        target=worker.run_worker,
+        kwargs={
+            "settings": settings,
+            "stop_event": stop_event,
+            "poll_once": stuck_poll,
+            "heartbeat": heartbeat,
+        },
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert poll_started.wait(timeout=2)
+        polling_payload = check_heartbeat(
+            heartbeat_path,
+            max_age_seconds=30,
+            clock=lambda: current_time[0],
+        )
+        assert polling_payload["details"] == {"phase": "polling", "cycle_sequence": 1}
+
+        current_time[0] += timedelta(seconds=31)
+
+        with pytest.raises(HeartbeatError, match="stale"):
+            check_heartbeat(
+                heartbeat_path,
+                max_age_seconds=30,
+                clock=lambda: current_time[0],
+            )
+    finally:
+        stop_event.set()
+        release_poll.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
