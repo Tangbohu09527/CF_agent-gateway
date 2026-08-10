@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from cf_agent_gateway.admin.routes import router as admin_router
 from cf_agent_gateway.config import Settings
 from cf_agent_gateway.database import (
     create_database_engine,
@@ -62,4 +63,5 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.settings = settings
     app.include_router(router)
+    app.include_router(admin_router)
     return app
