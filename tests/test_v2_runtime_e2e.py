@@ -25,8 +25,13 @@ from cf_agent_gateway.config import (
     RuntimeSettings,
     Settings,
     WechatSettings,
+    WorkerSettings,
 )
-from cf_agent_gateway.database import create_database_engine, initialize_database
+from cf_agent_gateway.database import (
+    create_database_engine,
+    create_database_session_factory,
+    initialize_database,
+)
 from cf_agent_gateway.delivery import (
     DeliveryOutboxRecord,
     DeliveryReceipt,
@@ -46,6 +51,8 @@ from cf_agent_gateway.response import (
     ResponseStatus,
 )
 from cf_agent_gateway.runtime import run_wechat_poll_once
+from cf_agent_gateway.runtime.delivery import drain_wechat_delivery_outbox
+from cf_agent_gateway.runtime.dispatch_worker import build_dispatch_worker
 from cf_agent_gateway.runtime.worker import run_worker
 from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.workspace.models import AIThread, ThreadPolicy, ThreadType
@@ -121,6 +128,7 @@ class RecordingHermesMock:
         profile_revision: int | None = None,
         thread_id: str | None = None,
         session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> HermesChatResult:
         assert hermes_thread_id is not None
         self.calls.append(
@@ -131,6 +139,7 @@ class RecordingHermesMock:
                 "profile_revision": profile_revision,
                 "thread_id": thread_id,
                 "session_metadata": session_metadata,
+                "idempotency_key": idempotency_key,
             }
         )
         response = self.scripted_responses.get(content)
@@ -210,6 +219,12 @@ class RuntimeHarness:
             runtime=RuntimeSettings(
                 polling_interval_seconds=0.001,
                 v2_routing_enabled=True,
+            ),
+            worker=WorkerSettings(
+                enabled=True,
+                concurrency=1,
+                lease_seconds=5,
+                retry_limit=3,
             ),
             wechat=WechatSettings(
                 enabled=True,
@@ -331,7 +346,7 @@ class RuntimeHarness:
             self.hermes_factory_calls.append((base_url, api_key, model))
             return self.hermes
 
-        return run_wechat_poll_once(
+        result = run_wechat_poll_once(
             self.settings,
             client_factory=create_wechat_client,
             hermes_client_factory=create_hermes_client,
@@ -341,6 +356,29 @@ class RuntimeHarness:
                 HERMES_API_KEY_ENV: HERMES_API_KEY,
             }.get,
         )
+        self._drain_runtime()
+        return result
+
+    def _drain_runtime(self) -> None:
+        engine = create_database_engine(self.database_url)
+        try:
+            session_factory = create_database_session_factory(engine)
+            worker = build_dispatch_worker(
+                self.settings,
+                session_factory=session_factory,
+                hermes_client=self.hermes,
+                sender_factory=self.sender_factory,
+            )
+            while worker.run_once() is not None:
+                pass
+
+            drain_wechat_delivery_outbox(
+                session_factory,
+                self.settings,
+                sender_factory=self.sender_factory,
+            )
+        finally:
+            engine.dispose()
 
     @staticmethod
     def _provision_sender(session: Session, sender_id: str) -> str:
@@ -383,12 +421,14 @@ def assert_v2_hermes_call(
     message: Message,
     thread: AIThread,
     identity_id: str,
+    idempotency_key: str,
     policy: ThreadPolicy,
 ) -> None:
     assert call["hermes_thread_id"] == f"v1:cf-agent-gateway:{thread.id}"
     assert call["profile_reference"] == PROFILE_REFERENCE
     assert call["profile_revision"] == PROFILE_REVISION
     assert call["thread_id"] == thread.id
+    assert call["idempotency_key"] == idempotency_key
     assert call["session_metadata"] == {
         "message_id": message.id,
         "source": "wechat",
@@ -524,6 +564,7 @@ def test_private_senders_are_isolated_through_v2_runtime(tmp_path: Path) -> None
                 message=message,
                 thread=thread,
                 identity_id=identity_id,
+                idempotency_key=record.idempotency_key,
                 policy=ThreadPolicy.PRIVATE_SENDER,
             )
         assert_text_responses_delivered(session, messages=messages)
@@ -590,6 +631,7 @@ def test_group_sender_policy_isolates_members_through_v2_runtime(tmp_path: Path)
                 message=message,
                 thread=thread,
                 identity_id=identity_id,
+                idempotency_key=record.idempotency_key,
                 policy=ThreadPolicy.GROUP_SENDER,
             )
         assert_text_responses_delivered(session, messages=messages)
@@ -663,6 +705,7 @@ def test_duplicate_source_message_is_archived_dispatched_and_delivered_once(
             message=message,
             thread=thread,
             identity_id=identity_id,
+            idempotency_key=record.idempotency_key,
             policy=ThreadPolicy.PRIVATE_SENDER,
         )
         assert_text_responses_delivered(session, messages=[message])
@@ -743,7 +786,8 @@ def test_worker_recovers_archived_message_after_private_route_is_configured(
     assert recovered_result.chats_failed == 0
     assert recovered_result.failures == []
     assert len(harness.hermes.calls) == 1
-    assert harness.hermes.close_calls == 2
+    assert harness.hermes.close_calls == 0
+    assert harness.hermes_factory_calls == []
     assert all(client.close_calls == 1 for client in harness.polling_clients)
     assert harness.sender_factory.send_calls == [
         (
@@ -775,6 +819,7 @@ def test_worker_recovers_archived_message_after_private_route_is_configured(
             message=message,
             thread=thread,
             identity_id=identity_id,
+            idempotency_key=record.idempotency_key,
             policy=ThreadPolicy.PRIVATE_SENDER,
         )
         assert_text_responses_delivered(session, messages=[message])
@@ -881,6 +926,7 @@ def test_artifact_only_file_response_is_persisted_and_delivered(
             message=message,
             thread=thread,
             identity_id=identity_id,
+            idempotency_key=record.idempotency_key,
             policy=ThreadPolicy.PRIVATE_SENDER,
         )
 
@@ -1007,5 +1053,6 @@ def test_text_and_image_response_preserves_delivery_order(
             message=message,
             thread=thread,
             identity_id=identity_id,
+            idempotency_key=record.idempotency_key,
             policy=ThreadPolicy.PRIVATE_SENDER,
         )
