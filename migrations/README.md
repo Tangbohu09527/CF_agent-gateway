@@ -38,7 +38,8 @@ instead of guessing their revision. The single packaged chain is:
 
 ```text
 20260806_01 -> 20260806_0001 -> 20260806_0002 -> 20260806_02 -> 20260806_03
-    -> 20260806_04 -> 20260807_01 -> 20260807_02 -> 20260807_03 (head)
+    -> 20260806_04 -> 20260807_01 -> 20260807_02 -> 20260807_03
+    -> 20260810_01 (head)
 ```
 
 `20260806_01` retains the migration-foundation marker without business DDL.
@@ -62,8 +63,12 @@ claim/FIFO indexes, and the partial unique index that permits at most one `runni
 record per AIThread. It also creates `hermes_dispatch_responses`. Existing pre-worker
 `running` rows are migrated conservatively to `uncertain`, because their external
 Hermes outcome cannot be proven during upgrade.
-`20260807_03` is the current head. It adds persisted Hermes responses and ordered parts together with the delivery
-outbox, per-part attempts, and receipts.
+`20260807_03` adds persisted Hermes responses and ordered parts together with the delivery
+outbox, per-part attempts, and receipts. `20260810_01` is the current head. It adds
+versioned, per-thread Context Snapshots with an exclusive integer Dispatch ID cursor and an
+indexed thread Timeline access path. Snapshots are append-only derived summaries: the
+migration does not remove or rewrite Message Archive rows, dispatch records, responses, or
+any other source Timeline data.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or

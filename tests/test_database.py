@@ -72,7 +72,7 @@ def test_check_database_migrations_rejects_missing_thread_binding_constraints() 
                 text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
             )
             connection.execute(
-                text("INSERT INTO alembic_version (version_num) VALUES ('20260807_03')")
+                text("INSERT INTO alembic_version (version_num) VALUES ('20260810_01')")
             )
             connection.execute(
                 text(

@@ -83,6 +83,7 @@ def test_chat_carries_v2_profile_thread_and_session_metadata() -> None:
         "conversation_id": "private-001",
         "enterprise_identity_id": "identity-001",
         "message_id": 42,
+        "available_tools": ["context.read", "context.search"],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:

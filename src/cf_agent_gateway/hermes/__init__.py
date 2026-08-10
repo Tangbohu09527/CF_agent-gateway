@@ -18,6 +18,7 @@ from cf_agent_gateway.hermes.errors import (
     HermesTransportError,
 )
 from cf_agent_gateway.hermes.models import (
+    HERMES_CONTEXT_TOOL_NAMES,
     ArtifactRefPart,
     HermesAssistantMessage,
     HermesChatCompletionChoice,
@@ -52,6 +53,7 @@ from cf_agent_gateway.hermes.worker import (
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "HERMES_CONTEXT_TOOL_NAMES",
     "HERMES_IDEMPOTENCY_HEADER",
     "HERMES_SESSION_HEADER",
     "ArtifactRefPart",

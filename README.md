@@ -34,7 +34,7 @@ accepts and persists eligible messages, applies identity and access policy, prov
 authorized workspaces and AI threads, dispatches allowed text content to Hermes, and
 routes successful assistant responses to the external `agent-wechat` service.
 Allowed admissions first create a durable Hermes dispatch record with a stable idempotency
-key. Context construction, a standalone task worker, and provider routing remain future work.
+key. General AI provider routing remains future work.
 
 ## Non-goals
 
@@ -70,6 +70,8 @@ implemented:
 - OpenAI-compatible `HermesClient` with Hermes session ids, profile/thread metadata, and
   upstream `Idempotency-Key` propagation
 - Claim-token-fenced dispatch response persistence
+- Authorized, Dispatch-ID-bounded Context Timeline reads and explicit, versioned Context
+  Snapshots that retain every original message and response
 - Durable response parts, delivery outbox, per-part attempts, receipts, and media delivery
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle and resident WeChat polling runtimes that stop after dispatch enqueue
@@ -103,7 +105,7 @@ known implementation deviation, not a design change. No code or schema correctio
 included in this documentation update.
 
 The standalone dispatch worker, durable response store, delivery outbox, and channel
-delivery worker are implemented. Context Builder and general AI Provider routing are not.
+delivery worker are implemented. General AI Provider routing is not.
 The resident WeChat polling worker and Hermes dispatch worker are separate processes;
 neither is embedded in FastAPI.
 

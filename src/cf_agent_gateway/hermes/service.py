@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
 from cf_agent_gateway.agent_profile import AgentProfile, AgentProfileStatus
 from cf_agent_gateway.hermes.errors import HermesDispatchError
-from cf_agent_gateway.hermes.models import HermesChatResult, HermesDispatchOutcome
+from cf_agent_gateway.hermes.models import (
+    HERMES_CONTEXT_TOOL_NAMES,
+    HermesChatResult,
+    HermesDispatchOutcome,
+)
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
@@ -22,6 +26,9 @@ from cf_agent_gateway.workspace.store import WorkspaceStore
 from cf_agent_gateway.workspace.thread_keys import build_v2_thread_key
 
 HERMES_THREAD_NAMESPACE = "v1:cf-agent-gateway"
+
+if TYPE_CHECKING:
+    from cf_agent_gateway.context.policy import ContextAccessPolicy
 
 
 class HermesChatClient(Protocol):
@@ -52,6 +59,8 @@ class HermesDispatchService:
         *,
         message_store: MessageStore | None = None,
         workspace_store: WorkspaceStore | None = None,
+        context_access_policy: ContextAccessPolicy | None = None,
+        available_tools: tuple[str, ...] = (),
     ) -> None:
         self._session = session
         self._client = client
@@ -59,6 +68,8 @@ class HermesDispatchService:
         self._workspace_store = (
             workspace_store if workspace_store is not None else WorkspaceStore(session)
         )
+        self._context_access_policy = context_access_policy
+        self._available_tools = _context_tool_names(available_tools)
 
     def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
         return self._dispatch(admission, idempotency_key=None)
@@ -223,25 +234,52 @@ class HermesDispatchService:
             raise HermesDispatchError(reason="message_thread_mismatch")
         return profile
 
-    @staticmethod
     def _session_metadata(
+        self,
         message: Message,
         thread: AIThread,
         admission: AdmissionOutcome,
     ) -> dict[str, object]:
         if admission.enterprise_identity_id is None or thread.thread_policy is None:
             raise HermesDispatchError(reason="v2_route_snapshot_invalid")
+        context_available = self._context_available(
+            thread_id=thread.id,
+            enterprise_identity_id=admission.enterprise_identity_id,
+        )
         return {
             "message_id": message.id,
             "source": message.source,
+            "channel": message.source,
             "source_account_id": message.source_account_id,
             "conversation_id": message.conversation_id,
             "conversation_type": message.conversation_type,
             "enterprise_identity_id": admission.enterprise_identity_id,
             "sender_identity_id": admission.enterprise_identity_id,
             "sender_id": message.sender_id,
+            "thread_id": thread.id,
             "thread_policy": thread.thread_policy.value,
+            "context_available": context_available,
+            "available_tools": list(self._available_tools) if context_available else [],
         }
+
+    def _context_available(
+        self,
+        *,
+        enterprise_identity_id: str,
+        thread_id: str,
+    ) -> bool:
+        if self._context_access_policy is None:
+            return False
+        try:
+            return (
+                self._context_access_policy.allows(
+                    enterprise_identity_id=enterprise_identity_id,
+                    thread_id=thread_id,
+                )
+                is True
+            )
+        except Exception:
+            return False
 
     @staticmethod
     def _allowed_target(admission: AdmissionOutcome) -> tuple[str, str]:
@@ -262,3 +300,16 @@ def _hermes_thread_id_for_dispatch(thread: AIThread) -> str:
 
 def _initial_hermes_thread_id(thread: AIThread) -> str:
     return f"{HERMES_THREAD_NAMESPACE}:{thread.id}"
+
+
+def _context_tool_names(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError("available_tools must be a tuple")
+    if any(not isinstance(name, str) or not name.strip() for name in value):
+        raise ValueError("available_tools must contain non-empty strings")
+    normalized = tuple(name.strip() for name in value)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("available_tools must not contain duplicates")
+    if any(name not in HERMES_CONTEXT_TOOL_NAMES for name in normalized):
+        raise ValueError("available_tools contains an unsupported context tool")
+    return normalized

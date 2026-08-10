@@ -19,12 +19,17 @@ from cf_agent_gateway.agent_profile import (
     AgentProfileStore,
     PrivateConversationProfileNotConfiguredError,
 )
+from cf_agent_gateway.context import (
+    EnabledContextAccessPolicy,
+    ThreadContextAccessPolicy,
+)
 from cf_agent_gateway.database import (
     create_database_engine,
     create_database_session_factory,
     initialize_database,
 )
 from cf_agent_gateway.hermes import (
+    HERMES_CONTEXT_TOOL_NAMES,
     HermesChatResult,
     HermesDispatchService,
 )
@@ -208,6 +213,17 @@ class RecordingV2HermesClient:
             assistant_content="V2 response",
             hermes_thread_id=hermes_thread_id,
         )
+
+
+class RaisingContextAccessPolicy:
+    def allows(
+        self,
+        *,
+        enterprise_identity_id: str,
+        thread_id: str,
+    ) -> bool:
+        del enterprise_identity_id, thread_id
+        raise RuntimeError("context policy unavailable")
 
 
 class RecordingWechatSender:
@@ -504,7 +520,12 @@ def test_v2_worker_dispatch_preserves_profile_thread_and_idempotency_metadata(
         claim_token="worker-metadata-contract",
     )
 
-    dispatched = HermesDispatchService(session, client).dispatch_record(record)
+    dispatched = HermesDispatchService(
+        session,
+        client,
+        context_access_policy=EnabledContextAccessPolicy(),
+        available_tools=HERMES_CONTEXT_TOOL_NAMES,
+    ).dispatch_record(record)
 
     assert dispatched.message_id == outcome.message_id
     assert len(client.calls) == 1
@@ -516,12 +537,72 @@ def test_v2_worker_dispatch_preserves_profile_thread_and_idempotency_metadata(
     assert call["session_metadata"] == {
         "message_id": outcome.message_id,
         "source": SOURCE,
+        "channel": SOURCE,
         "source_account_id": SOURCE_ACCOUNT_ID,
         "conversation_id": conversation.conversation_id,
         "conversation_type": "private",
         "enterprise_identity_id": identity.id,
         "sender_identity_id": identity.id,
         "sender_id": "employee-a",
+        "thread_id": outcome.ai_thread_id,
         "thread_policy": ThreadPolicy.PRIVATE_SENDER.value,
+        "context_available": True,
+        "available_tools": ["context.read", "context.search"],
     }
     assert record.status is HermesDispatchStatus.RUNNING
+
+
+@pytest.mark.parametrize("policy_mode", ["missing", "denied", "error"])
+def test_v2_worker_marks_context_unavailable_when_policy_fails_closed(
+    session: Session,
+    policy_mode: str,
+) -> None:
+    allow_gateway(session)
+    identity = provision_sender(session, "employee-context-denied")
+    conversation = create_conversation(
+        session,
+        "dispatch-context-denied",
+        conversation_type="private",
+    )
+    profile = create_profile(session, revision=4)
+    bind_private_profile(session, conversation, profile)
+    client = RecordingV2HermesClient()
+    outcome = MessageAdmissionService(session, v2_routing_enabled=True).process(
+        message(
+            sequence=12,
+            sender_id="employee-context-denied",
+            conversation_id=conversation.conversation_id,
+            conversation_type=WechatConversationType.PRIVATE,
+        )
+    )
+    assert outcome.dispatch_record_id is not None
+    assert outcome.ai_thread_id is not None
+    record = HermesDispatchRecordStore(session).claim(
+        outcome.dispatch_record_id,
+        claim_token="worker-context-denied",
+    )
+    if policy_mode == "missing":
+        access_policy = None
+    elif policy_mode == "denied":
+        access_policy = ThreadContextAccessPolicy(
+            enterprise_identity_id=identity.id,
+            thread_id=outcome.ai_thread_id,
+            allowed=False,
+        )
+    else:
+        access_policy = RaisingContextAccessPolicy()
+
+    dispatched = HermesDispatchService(
+        session,
+        client,
+        context_access_policy=access_policy,
+        available_tools=HERMES_CONTEXT_TOOL_NAMES,
+    ).dispatch_record(record)
+
+    assert dispatched.assistant_content == "V2 response"
+    assert len(client.calls) == 1
+    metadata = client.calls[0]["session_metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["thread_id"] == outcome.ai_thread_id
+    assert metadata["context_available"] is False
+    assert metadata["available_tools"] == []

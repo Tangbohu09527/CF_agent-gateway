@@ -432,13 +432,17 @@ def assert_v2_hermes_call(
     assert call["session_metadata"] == {
         "message_id": message.id,
         "source": "wechat",
+        "channel": "wechat",
         "source_account_id": SOURCE_ACCOUNT_ID,
         "conversation_id": message.conversation_id,
         "conversation_type": message.conversation_type,
         "enterprise_identity_id": identity_id,
         "sender_identity_id": identity_id,
         "sender_id": message.sender_id,
+        "thread_id": thread.id,
         "thread_policy": policy.value,
+        "context_available": True,
+        "available_tools": ["context.read", "context.search"],
     }
 
 

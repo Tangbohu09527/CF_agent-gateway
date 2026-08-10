@@ -14,6 +14,11 @@ from pydantic import (
     model_validator,
 )
 
+HERMES_CONTEXT_TOOL_NAMES = (
+    "context.read",
+    "context.search",
+)
+
 
 class HermesRequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

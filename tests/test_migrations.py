@@ -12,7 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Integer, create_engine, inspect, text
 
 from cf_agent_gateway.database import (
     Base,
@@ -24,7 +24,7 @@ from cf_agent_gateway.database import (
 BASELINE_REVISION = "20260806_0001"
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
-HEAD_REVISION = "20260807_03"
+HEAD_REVISION = "20260810_01"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -78,6 +78,29 @@ def test_upgrade_empty_database_to_head(tmp_path: Path) -> None:
         assert {
             constraint["name"] for constraint in inspector.get_check_constraints("messages")
         } >= {"ck_message_direction"}
+        snapshot_column_types = {
+            column["name"]: column["type"] for column in inspector.get_columns("context_snapshots")
+        }
+        assert set(snapshot_column_types) == {
+            "thread_id",
+            "snapshot_version",
+            "summary",
+            "covered_until",
+            "created_at",
+        }
+        assert isinstance(snapshot_column_types["covered_until"], Integer)
+        assert inspector.get_pk_constraint("context_snapshots")["constrained_columns"] == [
+            "thread_id",
+            "snapshot_version",
+        ]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("context_snapshots")
+        } >= {
+            "ck_context_snapshot_positive_version",
+            "ck_context_snapshot_nonempty_summary",
+            "ck_context_snapshot_positive_covered_until",
+        }
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
             assert current_revision == HEAD_REVISION
@@ -344,12 +367,17 @@ def test_migrations_render_for_postgresql() -> None:
     assert "CREATE TABLE hermes_dispatch_records" in ddl
     assert "CREATE TABLE hermes_dispatch_responses" in ddl
     assert "CREATE TABLE artifacts" in ddl
+    assert "CREATE TABLE context_snapshots" in ddl
+    assert "ck_context_snapshot_positive_version" in ddl
+    assert "ck_context_snapshot_nonempty_summary" in ddl
+    assert "ck_context_snapshot_positive_covered_until" in ddl
     assert "ck_message_direction" in ddl
     assert "uq_hermes_dispatch_idempotency_key" in ddl
     assert "uq_hermes_dispatch_message" in ddl
     assert "ck_hermes_dispatch_state_fields" in ddl
     assert "ix_hermes_dispatch_queue" in ddl
     assert "ix_hermes_dispatch_thread_queue" in ddl
+    assert "ix_hermes_dispatch_context_timeline" in ddl
     assert "ix_hermes_dispatch_claim" in ddl
     assert "ix_hermes_dispatch_fifo" in ddl
     assert "uq_hermes_dispatch_running_thread" in ddl

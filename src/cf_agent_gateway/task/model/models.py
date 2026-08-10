@@ -101,6 +101,12 @@ class HermesDispatchRecord(Base):
             "id",
         ),
         Index(
+            "ix_hermes_dispatch_context_timeline",
+            "ai_thread_id",
+            "status",
+            "id",
+        ),
+        Index(
             "ix_hermes_dispatch_claim",
             "status",
             "lease_expires_at",

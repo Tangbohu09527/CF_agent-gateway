@@ -82,7 +82,7 @@ attempt, so the maximum attempt count is `retry_limit + 1`.
 Delivery failure after response persistence does not revert dispatch success and does not
 call Hermes again. The response remains available for a future durable delivery runtime,
 but delivery-attempt scheduling and automatic delivery retry are not implemented here.
-Artifact fetching, Context Runtime, Memory, RAG, and Skill authorization are also outside
+Artifact fetching, Memory, RAG, and Skill authorization are also outside
 this runtime.
 
 ## Target thread isolation and V1 deviation
@@ -103,8 +103,8 @@ This whole-room behavior is a known implementation deviation. Recording it here 
 change the target design. Correcting it requires a reviewed code, constraint, and data
 migration change outside this documentation update.
 
-The next planned stages include Context Runtime, general provider routing, Artifact
-ingestion, a durable delivery worker, and media/file workflows. Image understanding,
+The next planned stages include general provider routing, Artifact ingestion, a durable
+delivery worker, and media/file workflows. Image understanding,
 file-message processing, OCR, archive or ZIP parsing, enterprise knowledge-base access,
 Memory, RAG, and automatic Skill execution are not implemented by this runtime.
 
@@ -125,10 +125,37 @@ Memory, RAG, and automatic Skill execution are not implemented by this runtime.
 | `admission` | Identity/access orchestration and admission outcomes | Implemented |
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
 | `hermes` | Client, dispatch worker, response persistence, and delivery handoff | Implemented |
-| `context` | Context construction | Reserved |
+| `context` | Authorized Timeline projection and explicit versioned Snapshots | Implemented |
 | `task.model` | Durable dispatch claims, leases, FIFO, retries, and terminal states | Implemented |
 | `task.queue` | Task scheduling and delivery | Reserved |
 | `provider.router` | Provider registry and routing | Reserved |
+
+## Context Snapshot runtime
+
+The `context` package projects complete successful Hermes turns from durable Message Archive,
+dispatch, response, and artifact records. Every Provider operation is authorized against one
+exact enterprise identity and AIThread before storage is read.
+
+`ContextSnapshotStore.create()` persists only a caller-supplied summary and an exclusive,
+positive integer Dispatch ID cursor. A Snapshot covers complete turns whose
+`dispatch_id < covered_until`; every `ContextEntry` for a turn exposes and shares that
+Dispatch ID. Versions increase independently per thread. Creation rejects a cursor beyond
+that thread's current Dispatch high-water mark, across an unfinished older dispatch, or across
+an Artifact reference whose ID and response ownership have not been persisted yet. After the
+first version, stability checks scan only the newly covered Dispatch interval and resolve
+deduplicated Artifact ownership in bounded batches.
+
+`read_snapshot()` returns the latest version for that exact thread. `read_timeline()` reads
+the authoritative Timeline by Dispatch ID over the half-open `[from, to)` interval. Because
+the Dispatch ID is assigned only when a turn is durably enqueued, a message persisted before
+enqueue remains in the tail, even when its source event time is older.
+`read_range()` retains its separate event-time range semantics for the existing Context Tool.
+
+Snapshots are append-only derived data. Creating or reading one never updates, deletes, or
+replaces Message Archive, dispatch, response, artifact, or Timeline records; the complete
+Timeline remains authoritative and available through `read()`. This runtime does not create
+summaries automatically and contains no embeddings, vector database, RAG, or automatic
+long-term Memory behavior.
 
 ## WeChat runtime boundary
 

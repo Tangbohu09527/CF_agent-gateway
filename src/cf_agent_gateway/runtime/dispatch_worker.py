@@ -13,12 +13,18 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from cf_agent_gateway.config import Settings, load_settings
+from cf_agent_gateway.context import EnabledContextAccessPolicy
 from cf_agent_gateway.database import (
     create_database_engine,
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesChatClient, HermesClient, HermesDispatchService
+from cf_agent_gateway.hermes import (
+    HERMES_CONTEXT_TOOL_NAMES,
+    HermesChatClient,
+    HermesClient,
+    HermesDispatchService,
+)
 from cf_agent_gateway.hermes.worker import HermesDispatchWorker
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.response import ResponsePersistenceProcessor
@@ -65,7 +71,12 @@ def build_dispatch_worker(
     del sender_factory
     return HermesDispatchWorker(
         session_factory,
-        lambda session: HermesDispatchService(session, hermes_client),
+        lambda session: HermesDispatchService(
+            session,
+            hermes_client,
+            context_access_policy=EnabledContextAccessPolicy(),
+            available_tools=HERMES_CONTEXT_TOOL_NAMES,
+        ),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,
         response_processor_factory=ResponsePersistenceProcessor,
