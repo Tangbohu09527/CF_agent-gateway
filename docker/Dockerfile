@@ -15,7 +15,8 @@ RUN python -m pip install --no-cache-dir .
 
 COPY alembic.ini ./
 COPY config ./config
-RUN mkdir -p /app/data && chown -R gateway:gateway /app
+RUN mkdir -p /app/data /var/lib/cf-agent-gateway \
+    && chown -R gateway:gateway /app /var/lib/cf-agent-gateway
 
 USER gateway
 EXPOSE 8080

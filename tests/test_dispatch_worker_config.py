@@ -62,3 +62,75 @@ def test_worker_settings_reject_invalid_values(
 
     with pytest.raises(ValueError, match=message):
         WorkerSettings(**values)
+
+
+def test_worker_environment_overrides_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "worker.yaml"
+    config_path.write_text(
+        "worker:\n  enabled: true\n  concurrency: 8\n  lease_seconds: 45\n"
+        "  retry_limit: 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CF_GATEWAY_WORKER_CONCURRENCY", " 6 ")
+    monkeypatch.setenv("CF_GATEWAY_WORKER_LEASE_SECONDS", " 90.5 ")
+    monkeypatch.setenv("CF_GATEWAY_WORKER_RETRY_LIMIT", " 5 ")
+
+    settings = load_settings(config_path)
+
+    assert settings.worker == WorkerSettings(
+        enabled=True,
+        concurrency=6,
+        lease_seconds=90.5,
+        retry_limit=5,
+    )
+
+
+def test_single_worker_environment_override_preserves_other_yaml_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "worker.yaml"
+    config_path.write_text(
+        "worker:\n  enabled: true\n  concurrency: 8\n  lease_seconds: 45\n"
+        "  retry_limit: 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CF_GATEWAY_WORKER_CONCURRENCY", "6")
+
+    settings = load_settings(config_path)
+
+    assert settings.worker == WorkerSettings(
+        enabled=True,
+        concurrency=6,
+        lease_seconds=45,
+        retry_limit=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("CF_GATEWAY_WORKER_CONCURRENCY", "true", "must be an integer"),
+        ("CF_GATEWAY_WORKER_CONCURRENCY", "0", "worker.concurrency"),
+        ("CF_GATEWAY_WORKER_LEASE_SECONDS", "nan", "worker.lease_seconds"),
+        ("CF_GATEWAY_WORKER_LEASE_SECONDS", "0", "worker.lease_seconds"),
+        ("CF_GATEWAY_WORKER_RETRY_LIMIT", "1.5", "must be an integer"),
+        ("CF_GATEWAY_WORKER_RETRY_LIMIT", "-1", "worker.retry_limit"),
+    ],
+)
+def test_worker_environment_rejects_invalid_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    config_path = tmp_path / "worker.yaml"
+    config_path.write_text("worker:\n  enabled: true\n", encoding="utf-8")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        load_settings(config_path)

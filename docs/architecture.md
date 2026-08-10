@@ -12,13 +12,15 @@ Employee WeChat
     -> Message Archive + Dispatch DB
     -> Gateway dispatch worker
     -> Hermes API
+    -> Delivery Outbox
+    -> Gateway delivery worker
     -> durable response
     -> agent-wechat outbound sender
     -> Employee WeChat
 ```
 
-`agent-wechat` and Hermes remain external components. Polling and Hermes execution are
-separate Gateway processes coordinated through durable database records.
+`agent-wechat` and Hermes remain external components. Polling, Hermes execution, and
+response delivery are separate Gateway processes coordinated through durable database records.
 
 ## Request flow and status
 
@@ -35,7 +37,12 @@ Hermes dispatch worker
   -> claim token + renewable lease
   -> Hermes API with stable idempotency key
   -> durable Hermes response + success transition
-  -> response delivery pipeline
+  -> queued response delivery
+
+Response delivery worker
+  -> claim delivery outbox record
+  -> ordered text and artifact parts
+  -> durable attempts and receipts
 ```
 
 The stages are:
@@ -72,18 +79,19 @@ The stages are:
    release the next head.
 9. A successful `ResponseEnvelope` is inserted into `hermes_dispatch_responses` in the
    same claim-token-fenced transaction that changes the dispatch from `running` to
-   `success`. Only after commit does the account-scoped response processor invoke
-   `HermesResponseHandler` and the WeChat sender.
+   `success`. Only after commit does the account-scoped response processor persist
+   ordered response parts and enqueue the WeChat delivery target.
 
 Different AI threads can execute concurrently up to `worker.concurrency`; one AIThread
 cannot have overlapping Hermes calls. `worker.retry_limit` counts retries after the first
 attempt, so the maximum attempt count is `retry_limit + 1`.
 
 Delivery failure after response persistence does not revert dispatch success and does not
-call Hermes again. The response remains available for a future durable delivery runtime,
-but delivery-attempt scheduling and automatic delivery retry are not implemented here.
-Artifact fetching, Memory, RAG, and Skill authorization are also outside
-this runtime.
+call Hermes again. `ChannelDeliveryWorker` claims the durable outbox independently,
+sends response parts in order, and records each attempt and provider receipt. Retryable
+failures are scheduled with bounded backoff; permanent or ambiguous outcomes become
+terminal delivery states without changing the successful dispatch. Artifact fetching,
+Memory, RAG, and Skill authorization remain outside this runtime.
 
 ## Target thread isolation and V1 deviation
 
@@ -103,8 +111,8 @@ This whole-room behavior is a known implementation deviation. Recording it here 
 change the target design. Correcting it requires a reviewed code, constraint, and data
 migration change outside this documentation update.
 
-The next planned stages include general provider routing, Artifact ingestion, a durable
-delivery worker, and media/file workflows. Image understanding,
+The next planned stages include general provider routing, Artifact ingestion, and richer
+inbound media/file workflows. Image understanding,
 file-message processing, OCR, archive or ZIP parsing, enterprise knowledge-base access,
 Memory, RAG, and automatic Skill execution are not implemented by this runtime.
 
@@ -115,7 +123,7 @@ Memory, RAG, and automatic Skill execution are not implemented by this runtime.
 | `gateway` | HTTP transport and service lifecycle | Foundation implemented |
 | `adapters.wechat` | agent-wechat client, normalization, polling, outbound protocol | Implemented |
 | `adapters.wechat.polling_store` | Durable account/conversation checkpoints | Implemented |
-| `runtime` | Independent WeChat polling and Hermes dispatch process assembly | Implemented |
+| `runtime` | Independent WeChat polling, Hermes dispatch, and response delivery processes | Implemented |
 | `ingestion` | Persist-first admission and polling-compatible sinks | Implemented |
 | `message.models` | Conversation, message, and attachment metadata ORM models | Implemented |
 | `message.schemas` | Message API input and output contracts | Implemented |
@@ -189,9 +197,19 @@ Claim-token fencing prevents an expired worker from committing over a newer owne
 upstream idempotency limits duplicate external effects when a process dies after calling
 Hermes but before local response persistence.
 
-Both runtimes are standalone processes and are not FastAPI background tasks. Runtime and
-CLI output is restricted to aggregate status and stable error codes. Service-manager
-integration and production deployment automation remain separate work.
+## Delivery worker boundary
+
+`run_delivery_worker` repeatedly invokes the existing bounded
+`run_wechat_delivery_once` assembly and maps `SIGINT` and `SIGTERM` to a
+shared stop event. It does not alter delivery claim, retry, ordering, or receipt rules.
+
+`ChannelDeliveryWorker` owns delivery outbox, attempt, and receipt state. It reads
+persisted response parts and artifacts, sends them through an account-scoped WeChat
+sender, and never calls Hermes or changes dispatch status.
+
+All three workers are standalone processes and are not FastAPI background tasks.
+Runtime and CLI output is restricted to aggregate status and stable error codes.
+Production Compose and the checked-in systemd units manage them independently.
 
 ## Persistence direction
 

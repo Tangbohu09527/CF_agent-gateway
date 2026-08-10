@@ -1,0 +1,46 @@
+[Unit]
+Description=CF Agent response delivery worker
+Wants=network-online.target
+After=network-online.target cf-agent-gateway-migrate.service
+Requires=cf-agent-gateway-migrate.service
+
+[Service]
+Type=simple
+User=cf-agent-gateway
+Group=cf-agent-gateway
+WorkingDirectory=/opt/cf-agent-gateway
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/cf-agent-gateway/gateway.env
+Environment=CF_GATEWAY_CONFIG=/etc/cf-agent-gateway/production.yaml
+Environment=CF_GATEWAY_STARTUP_MIGRATION_MODE=check
+Environment=CF_GATEWAY_SERVICE=cf-agent-delivery-worker
+Environment=CF_GATEWAY_WORKER_ID=cf-agent-delivery-worker
+Environment=CF_GATEWAY_WORKER_HEARTBEAT_PATH=/run/cf-agent-delivery-worker/heartbeat.json
+Environment=CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS=10
+ExecStart=/opt/cf-agent-gateway/.venv/bin/cf-agent-delivery-worker
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=120s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cf-agent-delivery-worker
+UMask=0027
+StateDirectory=cf-agent-gateway
+StateDirectoryMode=0750
+RuntimeDirectory=cf-agent-delivery-worker
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

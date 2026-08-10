@@ -7,11 +7,11 @@ import os
 import socket
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event, Lock
+from threading import TIMEOUT_MAX, Event, Lock, Thread
 from typing import Any, Literal
 
 HeartbeatState = Literal["starting", "running", "stopping", "stopped", "failed"]
@@ -130,7 +130,7 @@ class HeartbeatPublisher:
         self.update(state, phase="shutdown")
 
     def wait(self, stop_event: Event, timeout_seconds: float) -> bool:
-        """Wait in bounded slices so only the worker main loop can renew the lease."""
+        """Wait in bounded slices and publish at each configured interval."""
 
         remaining = _positive_seconds(timeout_seconds, "timeout_seconds")
         while remaining > 0:
@@ -171,6 +171,39 @@ def create_worker_heartbeat_from_environment(
         interval_seconds=interval,
         error_handler=error_handler,
     )
+
+
+@contextmanager
+def resident_heartbeat(
+    heartbeat: HeartbeatPublisher | None,
+    **details: object,
+) -> Iterator[None]:
+    """Publish process liveness while a resident worker owns its blocking loop."""
+
+    monitor_stop = Event()
+    monitor_thread: Thread | None = None
+    final_state: Literal["stopped", "failed"] = "stopped"
+    try:
+        if heartbeat is not None:
+            heartbeat.start()
+            heartbeat.update("running", **details)
+            monitor_thread = Thread(
+                target=heartbeat.wait,
+                args=(monitor_stop, TIMEOUT_MAX),
+                name="resident-worker-heartbeat",
+                daemon=True,
+            )
+            monitor_thread.start()
+        yield
+    except BaseException:
+        final_state = "failed"
+        raise
+    finally:
+        monitor_stop.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=1.0)
+        if heartbeat is not None:
+            heartbeat.stop(final_state)
 
 
 def check_heartbeat(

@@ -227,3 +227,91 @@ def test_python_module_entrypoint_exits_two_when_worker_is_disabled(tmp_path: Pa
     payloads = [json.loads(line) for line in completed.stderr.splitlines()]
     assert payloads[-1]["message"] == "dispatch worker failed"
     assert payloads[-1]["error_code"] == "dispatch_worker_disabled"
+
+
+class RecordingDispatchHeartbeat:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+        self.wait_started = Event()
+
+    def start(self) -> None:
+        self.events.append("start")
+
+    def update(self, state: str, **details: object) -> None:
+        self.events.append(("update", state, details))
+
+    def wait(self, stop_event: Event, timeout_seconds: float) -> bool:
+        self.events.append(("wait", timeout_seconds))
+        self.wait_started.set()
+        return stop_event.wait(timeout=1)
+
+    def stop(self, state: str = "stopped") -> None:
+        self.events.append(("stop", state))
+
+
+def test_dispatch_worker_publishes_heartbeat_while_core_loop_runs() -> None:
+    stop_event = Event()
+    heartbeat = RecordingDispatchHeartbeat()
+    calls: list[tuple[Event, int]] = []
+
+    class TrackingWorker:
+        def run(self, *, stop_event: Event, concurrency: int) -> None:
+            assert heartbeat.wait_started.wait(timeout=1)
+            calls.append((stop_event, concurrency))
+
+    dispatch_worker._run_resident_worker(
+        TrackingWorker(),  # type: ignore[arg-type]
+        stop_event=stop_event,
+        concurrency=3,
+        heartbeat=heartbeat,  # type: ignore[arg-type]
+    )
+
+    assert calls == [(stop_event, 3)]
+    assert heartbeat.events[0:2] == [
+        "start",
+        ("update", "running", {"phase": "dispatching", "concurrency": 3}),
+    ]
+    wait_event = heartbeat.events[2]
+    assert isinstance(wait_event, tuple)
+    assert wait_event[0] == "wait"
+    assert isinstance(wait_event[1], float)
+    assert wait_event[1] > 0
+    assert heartbeat.events[-1] == ("stop", "stopped")
+
+
+def test_dispatch_worker_marks_heartbeat_failed_when_core_loop_raises() -> None:
+    heartbeat = RecordingDispatchHeartbeat()
+
+    class FailingWorker:
+        def run(self, *, stop_event: Event, concurrency: int) -> None:
+            del stop_event, concurrency
+            assert heartbeat.wait_started.wait(timeout=1)
+            raise RuntimeError("dispatch loop failed")
+
+    with pytest.raises(RuntimeError, match="dispatch loop failed"):
+        dispatch_worker._run_resident_worker(
+            FailingWorker(),  # type: ignore[arg-type]
+            stop_event=Event(),
+            concurrency=2,
+            heartbeat=heartbeat,  # type: ignore[arg-type]
+        )
+
+    assert heartbeat.events[-1] == ("stop", "failed")
+
+
+def test_dispatch_worker_without_heartbeat_keeps_existing_core_contract() -> None:
+    stop_event = Event()
+    calls: list[tuple[Event, int]] = []
+
+    class TrackingWorker:
+        def run(self, *, stop_event: Event, concurrency: int) -> None:
+            calls.append((stop_event, concurrency))
+
+    dispatch_worker._run_resident_worker(
+        TrackingWorker(),  # type: ignore[arg-type]
+        stop_event=stop_event,
+        concurrency=4,
+        heartbeat=None,
+    )
+
+    assert calls == [(stop_event, 4)]

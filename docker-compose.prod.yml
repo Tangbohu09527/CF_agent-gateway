@@ -12,6 +12,7 @@ x-runtime: &runtime
     CF_GATEWAY_STARTUP_MIGRATION_MODE: check
   volumes:
     - ./config/production.yaml:/app/config/production.yaml:ro
+    - gateway-state:/var/lib/cf-agent-gateway
   tmpfs:
     - /tmp:size=64m,mode=1777
   cap_drop:
@@ -98,3 +99,81 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  dispatch-worker:
+    <<: *runtime
+    profiles:
+      - worker
+    command:
+      - python
+      - -m
+      - cf_agent_gateway.runtime.dispatch_worker
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    environment:
+      <<: *runtime-environment
+      CF_GATEWAY_SERVICE: cf-agent-dispatch-worker
+      CF_GATEWAY_WORKER_CONCURRENCY: ${CF_GATEWAY_WORKER_CONCURRENCY:-4}
+      CF_GATEWAY_WORKER_LEASE_SECONDS: ${CF_GATEWAY_WORKER_LEASE_SECONDS:-60}
+      CF_GATEWAY_WORKER_RETRY_LIMIT: ${CF_GATEWAY_WORKER_RETRY_LIMIT:-3}
+      CF_GATEWAY_WORKER_ID: cf-agent-dispatch-worker
+      CF_GATEWAY_WORKER_HEARTBEAT_PATH: /run/cf-agent-gateway/dispatch-worker-heartbeat.json
+      CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/cf-agent-gateway:size=1m,mode=1777
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - cf_agent_gateway.runtime.heartbeat
+        - --file
+        - /run/cf-agent-gateway/dispatch-worker-heartbeat.json
+        - --max-age-seconds
+        - ${CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  delivery-worker:
+    <<: *runtime
+    profiles:
+      - worker
+    command:
+      - python
+      - -m
+      - cf_agent_gateway.runtime.delivery_worker
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    environment:
+      <<: *runtime-environment
+      CF_GATEWAY_SERVICE: cf-agent-delivery-worker
+      CF_GATEWAY_WORKER_ID: cf-agent-delivery-worker
+      CF_GATEWAY_WORKER_HEARTBEAT_PATH: /run/cf-agent-gateway/delivery-worker-heartbeat.json
+      CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/cf-agent-gateway:size=1m,mode=1777
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - cf_agent_gateway.runtime.heartbeat
+        - --file
+        - /run/cf-agent-gateway/delivery-worker-heartbeat.json
+        - --max-age-seconds
+        - ${CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  gateway-state:

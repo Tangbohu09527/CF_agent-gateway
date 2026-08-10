@@ -105,9 +105,10 @@ known implementation deviation, not a design change. No code or schema correctio
 included in this documentation update.
 
 The standalone dispatch worker, durable response store, delivery outbox, and channel
-delivery worker are implemented. General AI Provider routing is not.
-The resident WeChat polling worker and Hermes dispatch worker are separate processes;
-neither is embedded in FastAPI.
+delivery worker, and Context Runtime with versioned snapshots are implemented. General
+AI Provider routing is not.
+The resident WeChat polling worker, Hermes dispatch worker, and response delivery worker
+are separate processes; none is embedded in FastAPI.
 
 ## V1 Staging validation
 
@@ -310,34 +311,39 @@ docker compose --env-file .env -f docker-compose.prod.yml run --rm migration
 docker compose --env-file .env -f docker-compose.prod.yml up --no-deps -d gateway
 ```
 
-The worker is opt-in because the checked-in production configuration disables external
-adapters. After enabling the WeChat adapter and installing its reviewed URL and credentials,
-start the worker profile:
+Workers are opt-in because the checked-in production configuration disables external
+adapters. After enabling WeChat and Hermes and installing their reviewed URLs and
+credentials, start the worker profile:
 
 ```bash
 docker compose --env-file .env -f docker-compose.prod.yml --profile worker \
-  up --no-deps -d worker
+  up --no-deps -d worker dispatch-worker delivery-worker
 ```
 
-The production `worker` service is the resident WeChat polling runtime. The checked-in
-Compose and systemd templates do not launch the standalone Hermes dispatch worker or a
-resident delivery consumer.
+The production `worker` service remains the resident WeChat polling runtime.
+`dispatch-worker` runs durable Hermes dispatch, and `delivery-worker` drains the
+response outbox. Dispatch concurrency, lease, and retry values can be overridden with
+`CF_GATEWAY_WORKER_CONCURRENCY`, `CF_GATEWAY_WORKER_LEASE_SECONDS`, and
+`CF_GATEWAY_WORKER_RETRY_LIMIT`.
 
 The production topology uses an immutable image reference, a read-only root filesystem,
 dropped Linux capabilities, bounded Docker logs, explicit stop grace periods, a DB-aware
-gateway healthcheck, and a worker heartbeat healthcheck. Normal gateway and worker startup
-use `CF_GATEWAY_STARTUP_MIGRATION_MODE=check`; only the explicit migration command may
-change the schema.
+gateway healthcheck, and independent heartbeat healthchecks for all workers. Normal gateway
+and worker startup use `CF_GATEWAY_STARTUP_MIGRATION_MODE=check`; only the explicit
+migration command may change the schema.
 
 Operational probes are:
 
 ```bash
 curl --fail --max-time 3 http://127.0.0.1:8080/ready
 python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/worker-heartbeat.json --max-age-seconds 30
+python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/dispatch-worker-heartbeat.json --max-age-seconds 30
+python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/delivery-worker-heartbeat.json --max-age-seconds 30
 ```
 
 See [docs/systemd-deployment.md](docs/systemd-deployment.md) for a hardened systemd
-installation, migration ordering, graceful stop behavior, and journald operation.
+installation, the checked-in Worker units, migration ordering, graceful stop behavior,
+and journald operation.
 
 See [docs/architecture.md](docs/architecture.md) for module boundaries and the implemented
 and planned request flow, and

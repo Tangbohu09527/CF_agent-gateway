@@ -35,6 +35,11 @@ from cf_agent_gateway.runtime.errors import (
     HermesClientInitializationError,
     HermesRuntimeDisabledError,
 )
+from cf_agent_gateway.runtime.heartbeat import (
+    HeartbeatPublisher,
+    create_worker_heartbeat_from_environment,
+    resident_heartbeat,
+)
 from cf_agent_gateway.runtime.startup import (
     check_database_migrations,
     database_startup_check_enabled,
@@ -91,6 +96,7 @@ def run_dispatch_worker(
     sender_factory: WechatMessageSenderFactory | None = None,
     engine_factory: Callable[[str], Engine] = create_database_engine,
     environment_reader: Callable[[str], str | None] = os.getenv,
+    heartbeat: HeartbeatPublisher | None = None,
 ) -> None:
     """Run the independent durable Hermes dispatch worker process."""
 
@@ -140,13 +146,12 @@ def run_dispatch_worker(
                 }
             },
         )
-        try:
-            worker.run(
-                stop_event=stop_event,
-                concurrency=settings.worker.concurrency,
-            )
-        finally:
-            logger.info("dispatch worker stopped")
+        _run_resident_worker(
+            worker,
+            stop_event=stop_event,
+            concurrency=settings.worker.concurrency,
+            heartbeat=heartbeat,
+        )
     finally:
         if hermes_client is not None:
             with suppress(Exception):
@@ -157,6 +162,7 @@ def run_dispatch_worker(
 
 def main() -> int:
     stop_event: Event | None = None
+    heartbeat: HeartbeatPublisher | None = None
     try:
         config_path = os.getenv("CF_GATEWAY_CONFIG", DEFAULT_CONFIG_PATH)
         try:
@@ -170,9 +176,16 @@ def main() -> int:
             return 1
 
         configure_logging(settings.logging.level)
+        heartbeat = create_worker_heartbeat_from_environment(
+            error_handler=_log_heartbeat_failure,
+        )
         stop_event = Event()
         with _shutdown_signal_handlers(stop_event):
-            run_dispatch_worker(settings, stop_event=stop_event)
+            run_dispatch_worker(
+                settings,
+                stop_event=stop_event,
+                heartbeat=heartbeat,
+            )
     except KeyboardInterrupt:
         if stop_event is not None:
             stop_event.set()
@@ -201,6 +214,31 @@ def _log_worker_failure(error: Exception) -> None:
     logger.error(
         "dispatch worker failed",
         extra={"fields": {"error_code": error_code}},
+    )
+
+
+def _run_resident_worker(
+    worker: HermesDispatchWorker,
+    *,
+    stop_event: Event,
+    concurrency: int,
+    heartbeat: HeartbeatPublisher | None,
+) -> None:
+    try:
+        with resident_heartbeat(
+            heartbeat,
+            phase="dispatching",
+            concurrency=concurrency,
+        ):
+            worker.run(stop_event=stop_event, concurrency=concurrency)
+    finally:
+        logger.info("dispatch worker stopped")
+
+
+def _log_heartbeat_failure() -> None:
+    logger.error(
+        "dispatch worker heartbeat write failed",
+        extra={"fields": {"error_code": "worker_heartbeat_write_failed"}},
     )
 
 

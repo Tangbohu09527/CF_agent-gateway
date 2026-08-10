@@ -9,9 +9,19 @@ database:
 logging:
   level: INFO
 
+artifact:
+  storage_root: /var/lib/cf-agent-gateway/artifacts
+
 runtime:
   polling_interval_seconds: 3
   v2_routing_enabled: true
+
+# Dispatch worker settings can be overridden with CF_GATEWAY_WORKER_*.
+worker:
+  enabled: true
+  concurrency: 4
+  lease_seconds: 60
+  retry_limit: 3
 
 wechat:
   enabled: false

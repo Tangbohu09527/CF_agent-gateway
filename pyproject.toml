@@ -24,6 +24,8 @@ cf-agent-gateway-startup = "cf_agent_gateway.runtime.startup:main"
 cf-agent-gateway-worker-heartbeat = "cf_agent_gateway.runtime.heartbeat:main"
 cf-agent-gateway-wechat-poll-once = "cf_agent_gateway.wechat_poll_once:main"
 cf-agent-gateway-dispatch-worker = "cf_agent_gateway.runtime.dispatch_worker:main"
+cf-agent-dispatch-worker = "cf_agent_gateway.runtime.dispatch_worker:main"
+cf-agent-delivery-worker = "cf_agent_gateway.runtime.delivery_worker:main"
 
 [project.optional-dependencies]
 dev = [

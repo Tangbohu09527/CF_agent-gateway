@@ -14,6 +14,10 @@ _POLLING_INTERVAL_ERROR = (
     "runtime.polling_interval_seconds must be within the supported positive timeout range"
 )
 
+WORKER_CONCURRENCY_ENV = "CF_GATEWAY_WORKER_CONCURRENCY"
+WORKER_LEASE_SECONDS_ENV = "CF_GATEWAY_WORKER_LEASE_SECONDS"
+WORKER_RETRY_LIMIT_ENV = "CF_GATEWAY_WORKER_RETRY_LIMIT"
+
 
 @dataclass(frozen=True, slots=True)
 class ServerSettings:
@@ -275,9 +279,18 @@ def load_settings(path: str | Path) -> Settings:
         ),
         worker=WorkerSettings(
             enabled=worker.get("enabled", False),
-            concurrency=worker.get("concurrency", 4),
-            lease_seconds=worker.get("lease_seconds", 60.0),
-            retry_limit=worker.get("retry_limit", 3),
+            concurrency=_environment_integer(
+                WORKER_CONCURRENCY_ENV,
+                worker.get("concurrency", 4),
+            ),
+            lease_seconds=_environment_float(
+                WORKER_LEASE_SECONDS_ENV,
+                worker.get("lease_seconds", 60.0),
+            ),
+            retry_limit=_environment_integer(
+                WORKER_RETRY_LIMIT_ENV,
+                worker.get("retry_limit", 3),
+            ),
         ),
     )
 
@@ -287,3 +300,23 @@ def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be a YAML mapping")
     return value
+
+
+def _environment_integer(name: str, default: Any) -> Any:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be an integer") from None
+
+
+def _environment_float(name: str, default: Any) -> Any:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a number") from None

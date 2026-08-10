@@ -1,12 +1,11 @@
 # systemd production deployment
 
-This deployment runs the HTTP gateway, the WeChat polling worker, and database migrations as
-separate systemd units. PostgreSQL must be reachable before migration starts. The
-gateway can run with all adapters disabled; start the worker only after the WeChat
-adapter is enabled and its external service is reachable. Hermes is required only
-when its matching integration is enabled.
-The template does not define units for the standalone Hermes dispatch worker or a
-resident delivery consumer.
+This deployment runs database migrations, the HTTP gateway, the WeChat polling
+worker, the Hermes dispatch worker, and the response delivery worker as separate
+systemd units. PostgreSQL must be reachable before migration starts. The gateway
+can run with all adapters disabled. Start the polling and delivery workers only
+after WeChat is enabled and reachable, and start the dispatch worker only after
+Hermes is enabled and reachable.
 
 ## Filesystem layout
 
@@ -18,6 +17,7 @@ application release:
 /opt/cf-agent-gateway/.venv/        Python virtual environment
 /etc/cf-agent-gateway/production.yaml
 /etc/cf-agent-gateway/gateway.env   secrets and environment overrides (0600)
+/etc/systemd/system/                 installed service units
 /var/lib/cf-agent-gateway/          service-owned state
 ```
 
@@ -39,11 +39,14 @@ sudo install -o root -g cf-agent-gateway -m 0600 \
   .env /etc/cf-agent-gateway/gateway.env
 ```
 
-Set `CF_AGENT_GATEWAY_DATABASE_URL` in `gateway.env` to a PostgreSQL URL, for
-example:
+Set `CF_AGENT_GATEWAY_DATABASE_URL` and the optional dispatch worker overrides
+in `gateway.env`, for example:
 
 ```text
-postgresql+psycopg://cf_agent_gateway:password@database.internal:5432/cf_agent_gateway?connect_timeout=5
+CF_AGENT_GATEWAY_DATABASE_URL=postgresql+psycopg://cf_agent_gateway:password@database.internal:5432/cf_agent_gateway?connect_timeout=5
+CF_GATEWAY_WORKER_CONCURRENCY=4
+CF_GATEWAY_WORKER_LEASE_SECONDS=60
+CF_GATEWAY_WORKER_RETRY_LIMIT=3
 ```
 
 URI encode reserved characters in usernames and passwords. `connect_timeout`
@@ -52,7 +55,14 @@ Keep `CF_GATEWAY_STARTUP_MIGRATION_MODE=check`; only the migration unit is
 allowed to mutate the schema. Set adapter credentials only when their matching
 adapter is enabled in `production.yaml`. The checked-in production template
 keeps WeChat and Hermes disabled so an unedited deployment cannot contact
-external systems. A worker with WeChat disabled exits deliberately.
+external systems. The production template enables the dispatch worker switch so
+enabling Hermes is sufficient to activate it; Hermes remaining disabled still
+causes the dispatch worker to exit deliberately. The polling and delivery
+workers likewise exit when WeChat is disabled.
+
+The three `CF_GATEWAY_WORKER_*` execution settings override the `worker` YAML
+section and apply to Hermes dispatch only. Delivery keeps the outbox retry and
+claim rules implemented by the delivery runtime.
 
 ## Migration unit
 
@@ -65,6 +75,7 @@ Description=CF Agent Gateway database migration
 Wants=network-online.target
 After=network-online.target
 Before=cf-agent-gateway.service cf-agent-gateway-worker.service
+Before=cf-agent-dispatch-worker.service cf-agent-delivery-worker.service
 
 [Service]
 Type=oneshot
@@ -199,36 +210,71 @@ CapabilityBoundingSet=
 WantedBy=multi-user.target
 ```
 
+## Dispatch worker unit
+
+Install the checked-in unit as
+`/etc/systemd/system/cf-agent-dispatch-worker.service`:
+
+```bash
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/cf-agent-dispatch-worker.service \
+  /etc/systemd/system/cf-agent-dispatch-worker.service
+```
+
+The unit starts `cf-agent-dispatch-worker`, requires the migration unit, reads
+concurrency, lease, and retry overrides from `gateway.env`, and writes its
+heartbeat to `/run/cf-agent-dispatch-worker/heartbeat.json`.
+
+## Delivery worker unit
+
+Install the checked-in unit as
+`/etc/systemd/system/cf-agent-delivery-worker.service`:
+
+```bash
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/cf-agent-delivery-worker.service \
+  /etc/systemd/system/cf-agent-delivery-worker.service
+```
+
+The unit starts `cf-agent-delivery-worker`, requires the migration unit, and
+writes its heartbeat to `/run/cf-agent-delivery-worker/heartbeat.json`.
+Delivery reads and writes artifacts under `/var/lib/cf-agent-gateway`, which is
+created for the service account by `StateDirectory=cf-agent-gateway`.
+
 `TimeoutStopSec` must remain longer than the longest bounded in-flight request
 or poll. systemd sends `SIGTERM` first, allowing the gateway and worker to stop
 accepting work and finish in-flight operations before a forced kill.
 
 ## Deploy and upgrade
 
-Back up PostgreSQL before applying a release. If the worker is already enabled,
-stop it first so no old process can consume jobs while the schema changes. Then
-stop the gateway and run migration exactly once:
+Back up PostgreSQL before applying a release. If workers are already enabled,
+stop all consumers first so no old process can claim work while the schema
+changes. Then stop the gateway and run migration exactly once:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable cf-agent-gateway-migrate.service \
-  cf-agent-gateway.service
+  cf-agent-gateway.service cf-agent-gateway-worker.service \
+  cf-agent-dispatch-worker.service cf-agent-delivery-worker.service
 
+sudo systemctl stop cf-agent-delivery-worker.service \
+  cf-agent-dispatch-worker.service cf-agent-gateway-worker.service
 sudo systemctl stop cf-agent-gateway.service
 sudo systemctl restart cf-agent-gateway-migrate.service
 sudo systemctl start cf-agent-gateway.service
 ```
 
-On hosts where the worker was already running, stop it before the commands above
-and start it again only after the migration and gateway readiness checks pass.
-For a new worker deployment, first enable the WeChat adapter, verify its URL and
-credentials, then opt in:
+On hosts where workers were already running, start them again only after the
+migration and gateway readiness checks pass. For a new V2 worker deployment,
+enable WeChat and Hermes, verify their URLs and credentials, then start all
+three consumers:
 
 ```bash
-sudo systemctl enable --now cf-agent-gateway-worker.service
+sudo systemctl start cf-agent-gateway-worker.service \
+  cf-agent-dispatch-worker.service cf-agent-delivery-worker.service
 ```
 
-If migration fails, do not start either runtime process. Inspect the structured
+If migration fails, do not start any runtime process. Inspect the structured
 journal records, fix the database or release, and rerun the migration unit.
 
 ## Verify and operate
@@ -241,30 +287,41 @@ cannot accumulate blocked readiness requests:
 curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/ready
 ```
 
-When the worker is enabled, check that its heartbeat is fresh:
+When workers are enabled, check that each heartbeat is fresh:
 
 ```bash
-sudo -u cf-agent-gateway \
-  /opt/cf-agent-gateway/.venv/bin/python \
+sudo -u cf-agent-gateway /opt/cf-agent-gateway/.venv/bin/python \
   -m cf_agent_gateway.runtime.heartbeat \
   --file /run/cf-agent-gateway/worker-heartbeat.json \
   --max-age-seconds 30
+
+sudo -u cf-agent-gateway /opt/cf-agent-gateway/.venv/bin/python \
+  -m cf_agent_gateway.runtime.heartbeat \
+  --file /run/cf-agent-dispatch-worker/heartbeat.json \
+  --max-age-seconds 30
+
+sudo -u cf-agent-gateway /opt/cf-agent-gateway/.venv/bin/python \
+  -m cf_agent_gateway.runtime.heartbeat \
+  --file /run/cf-agent-delivery-worker/heartbeat.json \
+  --max-age-seconds 30
 ```
 
-Monitor readiness and, when the worker is enabled, its heartbeat. A stale
-heartbeat should page the operator and restart the worker according to the
-site's policy; do not use process existence as a worker health signal.
+Monitor readiness and each enabled worker heartbeat. A stale heartbeat should
+page the operator and restart only the affected worker according to the site's
+policy; do not use process existence as a worker health signal.
 
 Logs are newline-delimited structured records on stdout/stderr and are captured
 by journald:
 
 ```bash
 journalctl -u cf-agent-gateway.service -u cf-agent-gateway-worker.service \
+  -u cf-agent-dispatch-worker.service -u cf-agent-delivery-worker.service \
   --since today --output=cat
 ```
-To stop cleanly, stop the worker first when it is enabled, then stop the gateway:
+To stop cleanly, stop all consumers before the gateway:
 
 ```bash
-sudo systemctl stop cf-agent-gateway-worker.service \
-  cf-agent-gateway.service
+sudo systemctl stop cf-agent-delivery-worker.service \
+  cf-agent-dispatch-worker.service cf-agent-gateway-worker.service
+sudo systemctl stop cf-agent-gateway.service
 ```
