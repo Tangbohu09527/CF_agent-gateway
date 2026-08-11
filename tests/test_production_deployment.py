@@ -61,9 +61,7 @@ def test_production_compose_defines_independent_v2_workers() -> None:
         service = services[service_name]
         assert service["command"] == ["python", "-m", expected["module"]]
         assert service["profiles"] == ["worker"]
-        assert service["depends_on"]["migration"]["condition"] == (
-            "service_completed_successfully"
-        )
+        assert service["depends_on"]["migration"]["condition"] == ("service_completed_successfully")
         assert service["restart"] == "unless-stopped"
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
@@ -129,16 +127,10 @@ def test_worker_systemd_units_are_installable_and_hardened(
 ) -> None:
     unit = _parse_unit(SYSTEMD_DIRECTORY / f"{unit_name}.service")
 
-    assert unit["Unit"]["After"] == [
-        "network-online.target cf-agent-gateway-migrate.service"
-    ]
+    assert unit["Unit"]["After"] == ["network-online.target cf-agent-gateway-migrate.service"]
     assert unit["Unit"]["Requires"] == ["cf-agent-gateway-migrate.service"]
-    assert unit["Service"]["ExecStart"] == [
-        f"/opt/cf-agent-gateway/.venv/bin/{command}"
-    ]
-    assert unit["Service"]["EnvironmentFile"] == [
-        "/etc/cf-agent-gateway/gateway.env"
-    ]
+    assert unit["Service"]["ExecStart"] == [f"/opt/cf-agent-gateway/.venv/bin/{command}"]
+    assert unit["Service"]["EnvironmentFile"] == ["/etc/cf-agent-gateway/gateway.env"]
     environment = unit["Service"]["Environment"]
     assert "CF_GATEWAY_STARTUP_MIGRATION_MODE=check" in environment
     assert f"CF_GATEWAY_SERVICE={unit_name}" in environment

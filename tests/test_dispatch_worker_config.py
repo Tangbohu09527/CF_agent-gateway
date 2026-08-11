@@ -70,8 +70,7 @@ def test_worker_environment_overrides_yaml(
 ) -> None:
     config_path = tmp_path / "worker.yaml"
     config_path.write_text(
-        "worker:\n  enabled: true\n  concurrency: 8\n  lease_seconds: 45\n"
-        "  retry_limit: 2\n",
+        "worker:\n  enabled: true\n  concurrency: 8\n  lease_seconds: 45\n  retry_limit: 2\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CF_GATEWAY_WORKER_CONCURRENCY", " 6 ")
@@ -94,8 +93,7 @@ def test_single_worker_environment_override_preserves_other_yaml_values(
 ) -> None:
     config_path = tmp_path / "worker.yaml"
     config_path.write_text(
-        "worker:\n  enabled: true\n  concurrency: 8\n  lease_seconds: 45\n"
-        "  retry_limit: 2\n",
+        "worker:\n  enabled: true\n  concurrency: 8\n  lease_seconds: 45\n  retry_limit: 2\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CF_GATEWAY_WORKER_CONCURRENCY", "6")
