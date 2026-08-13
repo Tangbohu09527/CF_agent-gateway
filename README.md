@@ -1,23 +1,26 @@
 # CF_agent-gateway
 
-Enterprise AI Message Gateway.
+Enterprise AI message and control gateway between enterprise channels and Hermes.
 
-> Status: The V1 Staging text-message AI round trip is validated. Resident WeChat
-> polling, identity and permission admission, Workspace/AIThread resolution, Hermes
-> dispatch and thread binding, concrete WeChat response delivery, and polling-level
-> self-message echo filtering are implemented.
+> **Production status (2026-08-13).** CFserver runs the V2 Runtime at commit
+> `2ac4c86` and tag `v2-enterprise-runtime-20260811`. Five long-running services are
+> healthy: `postgres`, `gateway`, `wechat-worker`, `dispatch-worker`, and
+> `delivery-worker`. WeChat connectivity, authentication, polling, Checkpoint,
+> Message Store, persist-first ingestion, fail-closed unauthorized admission, Hermes
+> connectivity, and Worker Heartbeat are live verified. The authorized end-to-end path
+> through V2 Routing, Hermes Dispatch, response persistence, Delivery Outbox, and an
+> actual WeChat reply is **not** yet live verified.
 
-CF_agent-gateway is the message and control plane between enterprise message
-entry points and Hermes.
+CF_agent-gateway owns durable channel ingestion, identity and policy admission,
+conversation routing, Hermes dispatch coordination, response persistence, and outbound
+delivery state. `agent-wechat` is the external WeChat adapter, Hermes is the external
+AI runtime, and PostgreSQL is the production system of record.
 
 ```text
-Entry points
-     |
-     v
-CF_agent-gateway
-     |
-     v
-Hermes
+Employee WeChat -> agent-wechat -> wechat-worker -> Message Store -> Admission
+    -> V2 Routing -> Hermes Dispatch Record -> dispatch-worker -> Hermes
+    -> Response Persistence -> Delivery Outbox -> delivery-worker
+    -> agent-wechat -> WeChat reply
 ```
 
 ## Responsibilities
@@ -29,12 +32,15 @@ Hermes
 - AI Router
 - AI Provider Registry
 
-These are the gateway's intended responsibilities. The current implementation
-accepts and persists eligible messages, applies identity and access policy, provisions
-authorized workspaces and AI threads, dispatches allowed text content to Hermes, and
-routes successful assistant responses to the external `agent-wechat` service.
-Allowed admissions first create a durable Hermes dispatch record with a stable idempotency
-key. General AI provider routing remains future work.
+These are the gateway's intended responsibilities. V2 Runtime implements the durable
+WeChat-to-Hermes path, while general AI provider routing remains future work. The three
+resident workers are standalone processes:
+
+| CFserver service | Entrypoint | Responsibility |
+| --- | --- | --- |
+| `wechat-worker` | `python -m cf_agent_gateway.runtime.worker` | Poll, Checkpoint, Message Store, Admission, and Dispatch enqueue |
+| `dispatch-worker` | `python -m cf_agent_gateway.runtime.dispatch_worker` | Dispatch claim, Hermes call, result persistence, and delivery handoff |
+| `delivery-worker` | `python -m cf_agent_gateway.runtime.delivery_worker` | Delivery Outbox consumption, text/media send, Attempt, and Receipt |
 
 ## Non-goals
 
@@ -48,23 +54,22 @@ CF_agent-gateway does not provide:
 
 ## Current scope
 
-The service foundation and the V1 WeChat text-message request/response path are
-implemented:
+The V2 service foundation and durable runtime are implemented:
 
 - YAML configuration loading
 - JSON structured logging
 - FastAPI application lifecycle
 - SQLAlchemy engine configuration
 - SQLAlchemy models for conversations, messages, and attachment metadata
-- SQLite schema initialization and session management
+- PostgreSQL production persistence and SQLite local/test support
 - Idempotent message creation by unique `event_id` and source-message identity
 - Message and account-scoped conversation-message query APIs
 - `AgentWechatClient`, WeChat normalization, and explicit Message Store event conversion
 - Finite WeChat polling with `latest` and `backfill` bootstrap modes
-- Durable per-account, per-conversation polling checkpoints and at-least-once delivery
+- Durable per-account, per-conversation polling checkpoints and at-least-once sink redelivery
 - Polling-level `is_self=true` filtering that bypasses the sink and advances the checkpoint
 - Persist-first message admission, including identity and access-policy evaluation
-- Workspace creation and conversation-scoped AI-thread reuse for authorized messages
+- V2 Agent Profile, Group Type, Workspace, AI Thread, and route-snapshot resolution
 - Durable Hermes dispatch records with CAS claims, leases, fencing, retry, and FIFO
 - Standalone concurrent `HermesDispatchWorker` with crash recovery and graceful shutdown
 - OpenAI-compatible `HermesClient` with Hermes session ids, profile/thread metadata, and
@@ -82,6 +87,11 @@ implemented:
 - Newline-delimited JSON logs with protected core fields and service/process metadata
 - Development Compose plus hardened production Compose and systemd deployment guidance
 
+Implementation does not equal live validation. The deployed unauthorized path is
+verified, but configured Admission Allowed, V2 Routing, Hermes response persistence,
+Delivery Outbox consumption, and the resulting WeChat reply remain to be exercised
+end-to-end on CFserver.
+
 Conversation determines context; sender identity determines permission. Admission resolves
 each human message's `sender_id` to an Identity and evaluates its User Access Policy with
 the Gateway Policy. A group conversation adds only the requirement for an explicit
@@ -93,16 +103,18 @@ still advanced. Senderless system messages and unauthorized human messages are p
 without dispatch. Eligible messages stop at a committed `queued` dispatch record.
 The dispatch worker owns execution state but does not mutate Message Archive rows. It reads
 the archived source message, preserves profile and thread facts, and sends the stable
-idempotency key to Hermes. After durable response and outbox persistence,
-`ChannelDeliveryWorker` sends ordered text, artifact, and media parts through an
+idempotency key to Hermes. On success, it persists the raw Hermes result and dispatch
+transition atomically. A second transaction creates the business response and Delivery
+Outbox; current code does not automatically reconstruct that handoff if it fails. See the
+[V2 Runtime transaction boundaries](docs/architecture/v2-runtime.md#transaction-boundaries).
+`ChannelDeliveryWorker` then sends ordered text, artifact, and media parts through an
 account-scoped sender. Skill execution is not connected.
 
-The target group-thread design remains
-`bot_account_id + group_chat_id + sender_id`, with different senders isolated. The current
-V1 implementation instead binds one AIThread to the source account and physical group
-conversation, so authorized senders in one group reuse a whole-room thread. This is a
-known implementation deviation, not a design change. No code or schema correction is
-included in this documentation update.
+The implemented V2 route supports explicit Thread Policy:
+`private_sender` and `group_sender` isolate sender identities, while `group_shared`
+deliberately shares one group thread. The older V1 compatibility path used a physical
+conversation binding. Because current production route configuration is empty, no
+authorized route policy has yet been exercised on CFserver.
 
 The standalone dispatch worker, durable response store, delivery outbox, and channel
 delivery worker, and Context Runtime with versioned snapshots are implemented. General
@@ -110,9 +122,18 @@ AI Provider routing is not.
 The resident WeChat polling worker, Hermes dispatch worker, and response delivery worker
 are separate processes; none is embedded in FastAPI.
 
-## V1 Staging validation
+## Validation status
 
-The text-message AI round trip was validated with this topology:
+The 2026-08-13 CFserver run verified five healthy services, the `cf-internal`
+network, agent-wechat token authentication, 17 initial Checkpoints, 151 historical
+messages skipped as the `latest` baseline, persist-first storage of a later private
+message, fail-closed unauthorized Admission, Hermes connectivity, and Worker Heartbeat.
+It did not verify the authorized reply path. See the
+[current validation record](docs/validation/2026-08-13-wechat-runtime.md).
+
+### V1 Staging history
+
+An older V1 text-message AI round trip was validated with this topology:
 
 - Debian 13 running Dockerized `agent-wechat`
 - `CF_agent-gateway` resident Worker on Debian
@@ -126,11 +147,11 @@ and dispatch, Hermes thread binding, response relay, outbound WeChat delivery, a
 echo protection. The recorded verification result is `393 passed` for `pytest`, with Ruff
 and `git diff --check` also passing.
 
-This validation is text-only. It does not establish image understanding, image attachment
+That historical validation is text-only. It does not establish image understanding, image attachment
 delivery, file-message processing, OCR, archive or ZIP parsing, an enterprise knowledge
 base, automatic Skill execution, or production automated deployment. See
-[docs/v1-staging-validation.md](docs/v1-staging-validation.md) for the validation boundary
-and evidence.
+[docs/v1-staging-validation.md](docs/v1-staging-validation.md) for its historical
+validation boundary and evidence. It must not be used as the current production status.
 
 ## Message API
 
@@ -166,15 +187,17 @@ stable relationship parsing is available.
 ### Development database schema
 
 Alembic owns the database schema through packaged migrations and the
-`cf-agent-gateway-migrate` command. The service upgrades empty and versioned databases to
-the current migration head during startup; it never deletes `gateway.db`. A database
-created before migration support must be backed up, verified against the main-schema
-baseline, stamped with `20260806_0001`, and upgraded to `head`. See
+`cf-agent-gateway-migrate` command. The explicit migration path upgrades empty and
+versioned databases to the current head; production resident processes use
+`CF_GATEWAY_STARTUP_MIGRATION_MODE=check` and do not mutate the schema. The runtime never
+deletes `gateway.db`. A database created before migration support must be backed up,
+verified against the main-schema baseline, stamped with `20260806_0001`, and upgraded to
+`head`. See
 [`migrations/README.md`](migrations/README.md) for commands and safeguards.
 
 Attachment content is not stored; only metadata and a storage path can be persisted through
-the Message API. The V1 WeChat polling path does not populate attachment rows or pass image
-or file bytes to Hermes.
+the Message API. The current inbound WeChat polling path does not populate attachment rows
+or pass image or file bytes to Hermes.
 
 ## Technology baseline
 
@@ -182,7 +205,7 @@ or file bytes to Hermes.
 - FastAPI and Uvicorn
 - SQLAlchemy 2.x
 - Alembic database migrations
-- SQLite for local and phase-one persistence
+- SQLite for local and test persistence
 - PostgreSQL support through Psycopg 3
 - YAML configuration
 - Docker and Compose packaging
@@ -214,37 +237,33 @@ Expected response:
 
 ## Run one WeChat polling cycle
 
-Set `wechat.enabled: true` in the selected YAML configuration. The YAML stores only
-the name of the token environment variable in `wechat.token_env`; it must never store
-the token itself. With the default `token_env`, set `CF_AGENT_WECHAT_TOKEN` in the
-process environment. A missing or empty variable fails closed.
+Set `wechat.enabled: true` in the selected YAML configuration. YAML stores only the
+name of the token environment variable in `wechat.token_env`; it must never store the
+token value. The selected environment must define that variable; a missing or empty
+value fails closed.
 
-To dispatch allowed messages and send Hermes replies back to their source conversations,
-also set `hermes.enabled: true`, configure
-`hermes.base_url`, and set the environment variable named by `hermes.api_key_env`
-(`HERMES_API_KEY` by default). The API key must not be stored in YAML. When Hermes is
-disabled, polling continues through admission and leaves allowed dispatch records queued.
+The polling worker does not read Hermes credentials. The separate dispatch worker
+requires `hermes.enabled: true`, `hermes.base_url`, and the environment variable
+named by `hermes.api_key_env`. The API key must not be stored in YAML.
 
 Linux or macOS:
 
 ```bash
 export CF_GATEWAY_CONFIG=config/config.yaml
-export CF_AGENT_WECHAT_TOKEN='<agent-wechat-token>'
-export HERMES_API_KEY='<hermes-api-key>'
+# Set the WeChat credential to <AGENT_WECHAT_TOKEN> in the process environment.
+# Set the Hermes credential to <HERMES_API_KEY> only for dispatch-worker.
 python -m cf_agent_gateway.wechat_poll_once
 ```
 
-Windows PowerShell:
+Windows PowerShell (set credentials separately in the process environment):
 
 ```powershell
 $env:CF_GATEWAY_CONFIG = "config/config.yaml"
-$env:CF_AGENT_WECHAT_TOKEN = "<agent-wechat-token>"
-$env:HERMES_API_KEY = "<hermes-api-key>"
 python -m cf_agent_gateway.wechat_poll_once
 ```
 
-Replace the placeholder only in the local environment and do not commit the token.
-If `wechat.token_env` names a different variable, set that variable instead.
+Configure `<AGENT_WECHAT_TOKEN>` and `<HERMES_API_KEY>` only in a local process
+environment or protected environment file. Never commit their values.
 `CF_GATEWAY_CONFIG` is optional and defaults to `config/config.yaml`.
 
 The command performs exactly one polling cycle and prints only aggregate, redacted
@@ -257,8 +276,9 @@ cookies, or file data. Exit codes are:
 
 ## Run the resident WeChat worker
 
-Use the same WeChat and optional Hermes environment variables described above, then set
-the delay between completed polling cycles in the selected configuration:
+Use the same WeChat environment described above, then set the delay between completed
+polling cycles in the selected configuration. Hermes credentials belong only to the
+separate `dispatch-worker`; the polling worker does not read them.
 
 ```yaml
 runtime:
@@ -291,7 +311,7 @@ ruff format --check .
 git diff --check
 ```
 
-## Docker
+## Compose and production
 
 The development Compose file starts the HTTP gateway with local SQLite storage:
 
@@ -299,10 +319,10 @@ The development Compose file starts the HTTP gateway with local SQLite storage:
 docker compose up --build
 ```
 
-For production, publish the image, prepare a protected `.env` from `.env.example`, and
-review `config/production.yaml`. Set the external PostgreSQL URL and adapter credentials.
-The template leaves external adapters disabled; enable only integrations whose endpoints
-and credentials have been reviewed.
+The checked-in `docker-compose.prod.yml` is a reusable template, not the current
+CFserver Compose file. It names the polling process `worker`, includes a one-shot
+`migration` service, and does not define the CFserver `postgres` service or
+`cf-internal` network. Its commands below are template examples only.
 
 Run the one-shot migration before the long-running services:
 
@@ -320,13 +340,13 @@ docker compose --env-file .env -f docker-compose.prod.yml --profile worker \
   up --no-deps -d worker dispatch-worker delivery-worker
 ```
 
-The production `worker` service remains the resident WeChat polling runtime.
+The template `worker` service remains the resident WeChat polling runtime.
 `dispatch-worker` runs durable Hermes dispatch, and `delivery-worker` drains the
 response outbox. Dispatch concurrency, lease, and retry values can be overridden with
 `CF_GATEWAY_WORKER_CONCURRENCY`, `CF_GATEWAY_WORKER_LEASE_SECONDS`, and
 `CF_GATEWAY_WORKER_RETRY_LIMIT`.
 
-The production topology uses an immutable image reference, a read-only root filesystem,
+The checked-in template uses an immutable image reference, a read-only root filesystem,
 dropped Linux capabilities, bounded Docker logs, explicit stop grace periods, a DB-aware
 gateway healthcheck, and independent heartbeat healthchecks for all workers. Normal gateway
 and worker startup use `CF_GATEWAY_STARTUP_MIGRATION_MODE=check`; only the explicit
@@ -341,10 +361,20 @@ python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/dispat
 python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/delivery-worker-heartbeat.json --max-age-seconds 30
 ```
 
-See [docs/systemd-deployment.md](docs/systemd-deployment.md) for a hardened systemd
-installation, the checked-in Worker units, migration ordering, graceful stop behavior,
-and journald operation.
+Current CFserver operation uses five long-running services in its separate deployed
+Compose file. See [CFserver production deployment](docs/deployment/cfserver-production.md).
 
-See [docs/architecture.md](docs/architecture.md) for module boundaries and the implemented
-and planned request flow, and
-[docs/v1-staging-validation.md](docs/v1-staging-validation.md) for the V1 Staging record.
+## Documentation
+
+- [Overall architecture](docs/architecture.md)
+- [V2 Runtime architecture](docs/architecture/v2-runtime.md)
+- [CFserver production deployment](docs/deployment/cfserver-production.md)
+- [WeChat polling runtime](docs/runtime/wechat-runtime.md)
+- [Identity, access, and V2 routing](docs/security/identity-access-routing.md)
+- [2026-08-13 live validation](docs/validation/2026-08-13-wechat-runtime.md)
+- [V1 Staging historical validation](docs/v1-staging-validation.md)
+- [V2 integration alpha historical snapshot](docs/v2-integration-alpha-status.md)
+- [Alternative systemd deployment](docs/systemd-deployment.md)
+- [Debian staging deployment preparation](docs/deployment/staging-debian.md)
+- [WeChat Media Adapter V2](docs/wechat-media-adapter-v2.md)
+- [Database migration safeguards](migrations/README.md)

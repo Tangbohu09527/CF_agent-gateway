@@ -1,5 +1,9 @@
 # Debian staging deployment preparation
 
+> **Alternative staging runbook.** This document records a prepared systemd staging
+> topology, not the current CFserver production deployment. For the deployed five-service
+> Compose topology, see [CFserver production deployment](cfserver-production.md).
+
 This document prepares the `v2-enterprise-runtime-20260811` release for a Debian
 staging host. It is a runbook only: no staging deployment was performed while
 preparing this release.
@@ -104,8 +108,8 @@ hardening, set `ARTIFACT_STORAGE=/var/lib/cf-agent-gateway/artifacts`.
 
 ```text
 CF_AGENT_GATEWAY_DATABASE_URL=<DATABASE_URL>
-HERMES_API_KEY=<staging-secret>
-CF_AGENT_WECHAT_TOKEN=<staging-secret>
+HERMES_API_KEY=<HERMES_API_KEY>
+CF_AGENT_WECHAT_TOKEN=<AGENT_WECHAT_TOKEN>
 CF_GATEWAY_STARTUP_MIGRATION_MODE=check
 ```
 

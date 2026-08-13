@@ -6,8 +6,8 @@
 `file` messages. `WechatHttpMediaSender` implements that boundary and retains the inherited
 text sender without changing `WechatMessageSender` or its `send_text` contract.
 
-Both media types call `POST /api/messages/send` with the same Bearer token configuration as
-text delivery. The V2 wire payloads are:
+Both media types call `POST /api/messages/send` with the same authorization-header
+credential configuration as text delivery. The V2 wire payloads are:
 
 ```json
 {"chatId":"...","image":{"data":"<base64>","mimeType":"image/png"}}
@@ -32,7 +32,10 @@ the declared file MIME type before sending it.
 - Files require a cross-platform safe basename of at most 255 UTF-8 bytes. Known filename
   extensions require their concrete MIME type; unknown extensions use
   `application/octet-stream` for opaque data.
-- Validation and adapter errors never include media data, response bodies, or Bearer tokens.
+- Validation and adapter errors never include media data, response bodies, or authorization
+  credentials.
 
-This adapter establishes the outbound HTTP capability only. It does not wire media into the
-current Hermes text response flow and does not claim live WeChat media-delivery validation.
+The current V2 delivery worker uses this adapter for ordered image and file response parts;
+that is an implemented code capability. Live WeChat media delivery has not been validated
+on the current CFserver production deployment, so this document does not claim a verified
+media round trip.
