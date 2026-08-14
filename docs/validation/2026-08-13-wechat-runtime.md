@@ -7,8 +7,14 @@ deployed code and basic runtime evidence from the authorization-dependent reply 
 has not yet been exercised. All identity values and message content are omitted or
 represented by approved placeholders.
 
+> **Historical boundary.** Every validation conclusion below is limited to 2026-08-13.
+> Authorized private and group text paths were exercised on 2026-08-14; see the
+> [dated follow-up record](2026-08-14-wechat-private-group-media-runtime.md). That later
+> evidence does not change what had or had not been observed on this date.
+
 Related documents:
 
+- [2026-08-14 private, group, reply, and media-boundary validation](2026-08-14-wechat-private-group-media-runtime.md)
 - [V2 Runtime architecture](../architecture/v2-runtime.md)
 - [CFserver production deployment](../deployment/cfserver-production.md)
 - [WeChat runtime operations](../runtime/wechat-runtime.md)
@@ -115,7 +121,7 @@ The following behavior was observed:
 This is the expected persist-first, fail-closed result. Identity discovery and durable
 message retention do not grant access.
 
-## Empty Authorization and Routing Configuration
+## Empty Authorization and Routing Configuration on 2026-08-13
 
 At validation time, the following business-configuration tables were empty:
 
@@ -130,20 +136,6 @@ At validation time, the following business-configuration tables were empty:
 - `employee_workspaces`
 - `ai_threads`
 - `thread_source_bindings`
-
-### 2026-08-14 Read-only policy count confirmation
-
-On 2026-08-14, a separate read-only SQL count check reconfirmed only these production
-values:
-
-| Table | Row count |
-| --- | ---: |
-| `user_access_policies` | 0 |
-| `gateway_access_policies` | 0 |
-
-The query used aggregate counts only; it did not retrieve policy-row contents or identity
-values. No database URL, host, username, password, or other connection detail is included.
-The other tables listed above were not independently rechecked on 2026-08-14.
 
 These empty tables explain the unauthorized result and prevent this observation from being
 used as evidence for an allowed V2 route.

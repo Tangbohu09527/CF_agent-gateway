@@ -2,14 +2,17 @@
 
 Enterprise AI message and control gateway between enterprise channels and Hermes.
 
-> **Production status (2026-08-13).** CFserver runs the V2 Runtime at commit
-> `2ac4c86` and tag `v2-enterprise-runtime-20260811`. Five long-running services are
-> healthy: `postgres`, `gateway`, `wechat-worker`, `dispatch-worker`, and
-> `delivery-worker`. WeChat connectivity, authentication, polling, Checkpoint,
-> Message Store, persist-first ingestion, fail-closed unauthorized admission, Hermes
-> connectivity, and Worker Heartbeat are live verified. The authorized end-to-end path
-> through V2 Routing, Hermes Dispatch, response persistence, Delivery Outbox, and an
-> actual WeChat reply is **not** yet live verified.
+> **Production status (2026-08-14).** CFserver runs the V2 Runtime at deployment baseline
+> commit `2ac4c86`, tag `v2-enterprise-runtime-20260811`. The 2026-08-13 baseline
+> verified five healthy services, polling, Checkpoint, Message Store, persist-first
+> ingestion, unauthorized rejection, Hermes connectivity, and Worker Heartbeat. The
+> 2026-08-14 follow-up live verified authorized private and explicitly mentioned group
+> **text** paths through Hermes, Response Persistence, Delivery Outbox, Receipt, and an
+> actual WeChat reply. Private and `group_sender` context reuse and application-process
+> restart persistence were also verified, and no reply echo was observed to Dispatch again.
+> Reply recognition and `reply_context` persistence, plus separate image recognition and
+> media-byte retrieval, were verified at their stated boundaries. The complete AI media
+> path, `reply_context` injection, and automatic `uncertain` recovery remain open.
 
 CF_agent-gateway owns durable channel ingestion, identity and policy admission,
 conversation routing, Hermes dispatch coordination, response persistence, and outbound
@@ -77,7 +80,8 @@ The V2 service foundation and durable runtime are implemented:
 - Claim-token-fenced dispatch response persistence
 - Authorized, Dispatch-ID-bounded Context Timeline reads and explicit, versioned Context
   Snapshots that retain every original message and response
-- Durable response parts, delivery outbox, per-part attempts, receipts, and media delivery
+- Durable response parts, delivery outbox, per-part attempts, receipts, and outbound
+  media-delivery code paths
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle and resident WeChat polling runtimes that stop after dispatch enqueue
 - Resident WeChat worker with configurable polling interval and graceful shutdown
@@ -87,10 +91,14 @@ The V2 service foundation and durable runtime are implemented:
 - Newline-delimited JSON logs with protected core fields and service/process metadata
 - Development Compose plus hardened production Compose and systemd deployment guidance
 
-Implementation does not equal live validation. The deployed unauthorized path is
-verified, but configured Admission Allowed, V2 Routing, Hermes response persistence,
-Delivery Outbox consumption, and the resulting WeChat reply remain to be exercised
-end-to-end on CFserver.
+Implementation does not equal live validation. The deployed unauthorized path and the
+authorized private and explicitly mentioned group text paths are live verified. The
+`private_sender` and `group_sender` policies were exercised; `group_shared` was not.
+Inbound Attachment/private-storage integration, Hermes multimodal input, output Artifact
+materialization, `reply_context` injection, and a supported `uncertain` management path
+are not implemented or connected. Conditional outbound image/file sending is implemented
+in code, but no live media response part was exercised. The complete media path is neither
+integrated nor live verified.
 
 Conversation determines context; sender identity determines permission. Admission resolves
 each human message's `sender_id` to an Identity and evaluates its User Access Policy with
@@ -110,11 +118,25 @@ Outbox; current code does not automatically reconstruct that handoff if it fails
 `ChannelDeliveryWorker` then sends ordered text, artifact, and media parts through an
 account-scoped sender. Skill execution is not connected.
 
+The 2026-08-14 text tests observed the normal response handoff, Delivery Attempt, Receipt,
+and final WeChat delivery for both a private route and an explicitly mentioned group route.
+That evidence does not establish live artifact or media delivery and does not remove the
+known dispatch-result-to-business-response reconciliation gap.
+
 The implemented V2 route supports explicit Thread Policy:
 `private_sender` and `group_sender` isolate sender identities, while `group_shared`
 deliberately shares one group thread. The older V1 compatibility path used a physical
-conversation binding. Because current production route configuration is empty, no
-authorized route policy has yet been exercised on CFserver.
+conversation binding. On 2026-08-14, the private route exercised `private_sender`; an
+active `cf-authorized-group-sender` Group Type exercised `group_sender`. The same
+employee Workspace was reused across private and group routes, while each conversation kept
+its own AI Thread, Thread Key, and Hermes Thread ID.
+
+A Gateway Agent Profile selects an already existing Hermes profile through
+`external_profile_ref`, sent as `profile_reference`. Gateway does not create, clone, or
+modify Hermes profiles. The Hermes profile carries its configuration, skills, and
+`SOUL.md`; Thread Policy independently controls context isolation. The validated private
+and group routes both selected `external_profile_ref=default` while retaining distinct
+threads.
 
 The standalone dispatch worker, durable response store, delivery outbox, and channel
 delivery worker, and Context Runtime with versioned snapshots are implemented. General
@@ -128,8 +150,31 @@ The 2026-08-13 CFserver run verified five healthy services, the `cf-internal`
 network, agent-wechat token authentication, 17 initial Checkpoints, 151 historical
 messages skipped as the `latest` baseline, persist-first storage of a later private
 message, fail-closed unauthorized Admission, Hermes connectivity, and Worker Heartbeat.
-It did not verify the authorized reply path. See the
-[current validation record](docs/validation/2026-08-13-wechat-runtime.md).
+See the
+[dated baseline record](docs/validation/2026-08-13-wechat-runtime.md).
+
+The [2026-08-14 follow-up](docs/validation/2026-08-14-wechat-private-group-media-runtime.md)
+verified:
+
+- one authorized private text route and one explicitly mentioned group text route through
+  actual WeChat receipt, including successful Attempts and Receipts, with no observed echo
+  redispatch;
+- reuse of the same private thread after an application-process restart, and reuse of the
+  same `group_sender` thread for a second group request;
+- fail-closed persistence of group messages without a structured mention;
+- reply-message recognition and `reply_context` persistence; and
+- image-message persistence plus independent retrieval of valid JPEG bytes through the
+  `agent-wechat` media API.
+
+The restart covered only `gateway`, `wechat-worker`, `dispatch-worker`, and
+`delivery-worker` processes in their existing containers. Container IDs remained the
+same; PostgreSQL, `agent-wechat`, Hermes, and the CFserver host were not restarted.
+
+One private reply Dispatch became `uncertain` while Hermes Gateway was offline. After
+backup and strict evidence guards, an operator performed a one-off manual recovery and the
+same Dispatch succeeded on its second attempt. This was not automatic recovery, is not a
+routine database procedure, and does not replace the missing supported `uncertain`
+management API.
 
 ### V1 Staging history
 
@@ -198,6 +243,14 @@ verified against the main-schema baseline, stamped with `20260806_0001`, and upg
 Attachment content is not stored; only metadata and a storage path can be persisted through
 the Message API. The current inbound WeChat polling path does not populate attachment rows
 or pass image or file bytes to Hermes.
+
+On 2026-08-14, one non-mentioned group image was classified as `image`, persisted with
+its raw channel facts and Raw Payload, and created neither an Attachment nor a Dispatch.
+The `agent-wechat` media API independently returned 5,712 valid JPEG bytes whose signature
+and SHA-256 were checked without publishing the digest. Gateway private media storage,
+Attachment creation, Hermes multimodal input, output Artifact materialization, and complete
+image/file WeChat delivery are not connected by this observation. The AI did not see the
+image.
 
 ## Technology baseline
 
@@ -374,7 +427,9 @@ Compose file. See [CFserver production deployment](docs/deployment/cfserver-prod
 - [CFserver production deployment](docs/deployment/cfserver-production.md)
 - [WeChat polling runtime](docs/runtime/wechat-runtime.md)
 - [Identity, access, and V2 routing](docs/security/identity-access-routing.md)
-- [2026-08-13 live validation](docs/validation/2026-08-13-wechat-runtime.md)
+- [Runtime validation index](docs/validation/README.md)
+- [2026-08-14 private, group, reply, and media validation](docs/validation/2026-08-14-wechat-private-group-media-runtime.md)
+- [2026-08-13 baseline and unauthorized-path validation](docs/validation/2026-08-13-wechat-runtime.md)
 - [V1 Staging historical validation](docs/v1-staging-validation.md)
 - [V2 integration alpha historical snapshot](docs/v2-integration-alpha-status.md)
 - [Alternative systemd deployment](docs/systemd-deployment.md)

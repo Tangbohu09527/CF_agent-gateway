@@ -9,8 +9,11 @@ It does not call Hermes and does not send replies inline.
 
 The 2026-08-13 CFserver validation proved login-aware polling, Token authentication,
 Checkpoint creation, Message Store persistence, and unauthorized safe rejection. The
-authorized Hermes-to-WeChat reply path has not yet been validated on production data. See
-[the validation record](../validation/2026-08-13-wechat-runtime.md).
+2026-08-14 follow-up live verified authorized private and explicitly mentioned group text
+paths through Hermes and actual WeChat receipt, plus thread reuse; no reply echo was observed
+to Dispatch again. See the [baseline record](../validation/2026-08-13-wechat-runtime.md) and
+the
+[follow-up record](../validation/2026-08-14-wechat-private-group-media-runtime.md).
 
 ## Startup and configuration
 
@@ -131,6 +134,11 @@ This filter is intentionally before Persist-first ingestion. It prevents an outb
 reply from being consumed as a new inbound request and prevents consecutive self messages
 from being reconsidered on every cycle.
 
+The rule is independent of raw message type. A self-originated text, reply, image, or file
+advances its Checkpoint without entering Message Store, Admission, or Dispatch. The
+2026-08-14 private and group text replies were observed upstream without being dispatched
+again.
+
 ## Persist-first Admission
 
 For each non-self message above the Checkpoint, the ingestion sink first commits the
@@ -151,6 +159,63 @@ the Message Store row remains available for audit, but no Hermes Dispatch Record
 Delivery Outbox record are created. This is a successful safe rejection, so the Checkpoint
 advances. Adding a policy afterward does not automatically replay that denied message; send
 a new test message after configuration is complete.
+
+## Private and group message behavior
+
+### Private messages
+
+Private messages persist `is_mentioned=null`; they do not need a bot mention. On
+2026-08-14, one configured private route passed both policy layers, selected its explicit
+Conversation-AgentProfile Binding and `private_sender`, and completed the text path through
+Response, Delivery, Receipt, and actual WeChat receipt. The first allowed message created
+the Employee Workspace and private AI Thread; configuration alone had not created them.
+
+After the four Gateway application processes were restarted in their existing containers,
+a second context-dependent private request reused the same Workspace, AI Thread, Thread Key,
+and Hermes Thread ID. This is live thread-reuse evidence, not a claim that
+`reply_context` or a Context Snapshot supplied the prior context.
+
+### Group messages and `is_mentioned`
+
+Group messages persist an explicit boolean `is_mentioned`. Only a normalized literal
+`true` satisfies Admission. Missing, false, or otherwise unusable values become
+`is_mentioned=false`; Message Store does not infer a mention from message text, quoted
+content, or manually typed `@` characters.
+
+A live ordinary group message was persisted with `is_mentioned=false` and denied with
+`bot_not_mentioned`, creating no Dispatch. After an active
+`cf-authorized-group-sender` Group Type and Conversation-GroupType Binding selected
+`group_sender`, a mention created with WeChat's member-selection function was stored as
+`is_mentioned=true`, admitted, and completed the text reply path. It reused the employee
+Workspace but used a group-specific AI Thread, Thread Key, and Hermes Thread ID. A second
+mentioned request reused that group thread and received the correct context-dependent text.
+
+### Reply messages
+
+Raw reply messages can normalize to `message_type=reply`. Private and group examples were
+live verified with non-empty `reply_context`, which retains a summary of quoted content.
+That summary does not establish a stable Gateway message relationship, so
+`reply_to_message_id` remains `null`.
+
+The group reply did not include a structured mention; it remained
+`is_mentioned=false` and created no Dispatch. The private reply passed Admission and reused
+its `private_sender` thread. Its first Hermes attempt became `uncertain` while Hermes was
+offline; after health restoration, backup, and strict evidence guards, a one-off manual
+recovery allowed the same Dispatch to succeed on attempt two and deliver its text reply.
+That was not automatic recovery. Current dispatch sends `message.content` only and does
+not inject `reply_context` into the Hermes request.
+
+### Image messages
+
+A live non-mentioned group image was classified as `message_type=image` with
+`raw_type=3`, persisted with source identifiers and Raw Payload, and created neither an
+Attachment nor a Dispatch. A separate `agent-wechat` media API call returned 5,712 valid
+JPEG bytes and a verified, unpublished SHA-256 digest.
+
+The resident poller does not call that media endpoint. It does not create an Attachment,
+store inbound media in Gateway private storage, create an Artifact, or construct a Hermes
+multimodal request. Therefore this observation proves image discovery and independent
+media-byte retrieval only; it does not mean that Hermes saw the image.
 
 ## At-least-once behavior and idempotency
 
@@ -222,9 +287,19 @@ Before restarting, verify that:
 - the existing Checkpoints are present unless a reviewed bootstrap reset is intended;
 - worker logs and heartbeat health are monitored after startup.
 
+On 2026-08-14, only the `gateway`, `wechat-worker`, `dispatch-worker`, and
+`delivery-worker` processes were restarted in their existing containers. Their container
+IDs remained unchanged and all four returned healthy. PostgreSQL, `agent-wechat`, Hermes,
+and the CFserver host were not restarted. Persisted private route and delivery facts remained
+unchanged, and the next private request reused its existing thread. This does not validate
+container recreation, PostgreSQL restart, or host reboot.
+
 ## Related documentation
 
 - [V2 Runtime Architecture](../architecture/v2-runtime.md)
 - [Identity, access, and V2 routing](../security/identity-access-routing.md)
 - [CFserver production deployment](../deployment/cfserver-production.md)
-- [2026-08-13 runtime validation](../validation/2026-08-13-wechat-runtime.md)
+- [Runtime validation index](../validation/README.md)
+- [2026-08-14 private, group, reply, and media validation](../validation/2026-08-14-wechat-private-group-media-runtime.md)
+- [2026-08-13 baseline and unauthorized-path validation](../validation/2026-08-13-wechat-runtime.md)
+- [WeChat Media Adapter V2](../wechat-media-adapter-v2.md)

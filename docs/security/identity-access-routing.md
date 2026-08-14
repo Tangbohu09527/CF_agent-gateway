@@ -5,6 +5,15 @@ fail-closed pipeline: a source identity mapping identifies a sender, but it neve
 permission by itself. Authorization must succeed before the runtime resolves an AI route or
 creates a Hermes Dispatch record.
 
+The [2026-08-14 live validation](../validation/2026-08-14-wechat-private-group-media-runtime.md)
+configured one Enterprise Identity, Source Identity Mapping, User Access Policy, Gateway
+Access Policy, Agent Profile, and private Conversation-AgentProfile Binding. A private
+Admission dry-run returned `allowed`; subsequent real private and explicitly mentioned
+group text requests completed through actual WeChat receipt after the group route added an
+active Group Type and explicit Conversation-GroupType Binding. The earlier
+[2026-08-13 record](../validation/2026-08-13-wechat-runtime.md) remains the historical
+empty-configuration and unauthorized-path baseline.
+
 ## Security invariants
 
 - Persist the normalized inbound message before Admission. Rejection and downstream
@@ -167,16 +176,27 @@ A private message is eligible only when all of the following are true:
 Private conversation facts must not carry group mention state. A private message does not
 need to mention the bot.
 
+The live private route selected `thread_policy=private_sender`. Configuration did not
+pre-create a Workspace, AI Thread, Dispatch, Response, or Delivery Outbox; the first real
+allowed message created the runtime objects.
+
 ### Group conversations
 
 Group Admission applies the same identity, user, gateway, risk, scope, and skill checks. It
 also requires normalized `is_mentioned=true`. A general group message, inferred relevance,
 quoted history, or a missing mention flag is not sufficient.
 
-After Admission, the persisted group conversation resolves a Group Type. An explicit
-Conversation-GroupType Binding takes precedence. If none exists, the resolver may use the
-configured `unknown_group` Group Type; if that fallback is absent or inactive, routing
-fails closed. Both the Group Type and its referenced Agent Profile must be active.
+Private mention state is persisted as `null`. Group mention state is an explicit boolean:
+only normalized literal `true` satisfies the rule; false, missing, or unusable values
+become `false`. Message Store does not infer a mention from body text, quoted content, or
+manually typed `@` characters. A 2026-08-14 non-mentioned group message and group reply
+were both persisted and denied with `bot_not_mentioned`, with zero Dispatches.
+
+After access authorization succeeds, V2 Routing resolves a Group Type before the final
+allowed Admission outcome. An explicit Conversation-GroupType Binding takes precedence. If
+none exists, the resolver may use the configured `unknown_group` Group Type; if that
+fallback is absent or inactive, routing fails closed. Both the Group Type and its referenced
+Agent Profile must be active.
 
 ## Routing entities
 
@@ -190,11 +210,25 @@ publish a new revision instead.
 Status is operational and still checked at route resolution. A disabled or archived
 revision is not a valid route.
 
+The Gateway Agent Profile does not contain or manage the Hermes profile's configuration
+lifecycle. Its `external_profile_ref` selects an already existing Hermes profile and is
+sent as `profile_reference`. Gateway does not create, clone, modify, or delete that Hermes
+profile. The selected Hermes profile carries its own configuration, skills, and `SOUL.md`;
+Thread Policy independently controls context isolation. The live private and group routes
+both used `external_profile_ref=default` while keeping different AI Threads and Hermes
+Thread IDs.
+
 ### Group Type
 
 `group_types` classifies a group route. Each Group Type selects one Agent Profile revision
 and one group Thread Policy, either `group_shared` or `group_sender`. Its status must be
 active.
+
+A Group Type selects routing after access authorization and before the final allowed
+Admission outcome; it is not an identity or permission grant. The live group test used the
+active key `cf-authorized-group-sender`, selected the existing Agent Profile, and set
+`thread_policy=group_sender`. Preflight denied `is_mentioned=false` with
+`bot_not_mentioned` and allowed `is_mentioned=true`.
 
 `unknown_group` is a deliberate configured fallback, not an implicit permissive default.
 Do not create a broad fallback unless its profile and shared-context behavior have been
@@ -218,8 +252,13 @@ and group Thread Policy selected for new route resolution.
 ### Employee Workspace
 
 `employee_workspaces` provides one stable workspace per Enterprise Identity. It is created
-or reused only after the caller has authorized the identity. Workspace lookup is not an
-authorization mechanism and must never be called as a substitute for Admission.
+or reused during V2 Routing only after access authorization succeeds and before the final
+allowed Admission outcome. Workspace lookup is not an authorization mechanism and must
+never be called as a substitute for Admission.
+
+The first live private allowed message lazily created the employee Workspace. The later
+group route for the same Enterprise Identity reused that Workspace. Workspace reuse did not
+merge conversation context.
 
 ### AI Thread
 
@@ -231,10 +270,17 @@ snapshot. Only active threads are usable.
 conversation, and applicable sender relationship for a thread. These are routing facts;
 they do not grant access.
 
+The live private and group routes used different AI Threads, Thread Keys, and Hermes Thread
+IDs even though they shared one employee Workspace and selected the same Agent Profile. A
+second request in each conversation reused that conversation's existing AI Thread and
+Hermes Thread ID. Application-process restart did not change the private binding. These
+observations prove thread isolation and reuse, not Context Snapshot creation.
+
 ### Thread Policy
 
-The V2 thread key includes source account, physical conversation, Agent Profile revision,
-and Thread Policy. Sender identity participation depends on the policy:
+The V2 thread key includes platform, source account, physical conversation, Agent Profile
+identity and revision, and Thread Policy. Sender identity participation depends on the
+policy:
 
 | Policy | Valid conversation | Isolation behavior |
 | --- | --- | --- |
@@ -244,6 +290,11 @@ and Thread Policy. Sender identity participation depends on the policy:
 
 `group_shared` intentionally shares context among authorized group participants. Use it
 only where that disclosure boundary is acceptable; otherwise select `group_sender`.
+
+`private_sender` and `group_sender` were live exercised on 2026-08-14. `group_shared`
+was not. In both sender-scoped policies, Workspace identity does not collapse Thread
+identity: platform, source account, physical conversation, Agent Profile identity and
+revision, Thread Policy, and Enterprise Identity remain part of the isolation decision.
 
 ### V2 Route Snapshot
 
@@ -269,3 +320,14 @@ An empty production configuration is safe by default:
 Provision identities, mappings, both policy layers, profiles, and conversation bindings as
 separate reviewed changes. Validate Admission and routing with placeholder-based audit
 records before enabling a real response test.
+
+This empty-state behavior was observed on 2026-08-13. On 2026-08-14, reviewed configuration
+replaced that test state for one private route and one explicitly bound group route; it did
+not weaken the default-deny behavior for unconfigured identities or conversations.
+
+## Related documentation
+
+- [V2 Runtime architecture](../architecture/v2-runtime.md)
+- [WeChat polling runtime](../runtime/wechat-runtime.md)
+- [2026-08-14 private, group, reply, and media validation](../validation/2026-08-14-wechat-private-group-media-runtime.md)
+- [2026-08-13 baseline and unauthorized-path validation](../validation/2026-08-13-wechat-runtime.md)

@@ -20,7 +20,21 @@ credential configuration as text delivery. The V2 wire payloads are:
 The upstream file schema does not accept a MIME field. Gateway still requires and validates
 the declared file MIME type before sending it.
 
-## Validation
+## Inbound read boundary
+
+`AgentWechatClient.get_media` can call
+`GET /api/messages/{chat_id}/media/{local_id}`, recognize an upstream unsupported result,
+and strictly Base64-decode supported media bytes. On 2026-08-14, an independent call for one
+non-sensitive group image returned `supported=true`, `media_type=image`, `format=jpeg`,
+a filename, and 5,712 bytes. The JPEG signature and SHA-256 digest were verified without
+publishing the image or digest.
+
+The resident WeChat poller does not call `get_media`. Its normalized inbound event currently
+contains no Attachments, so an image or file message does not create an Attachment row,
+write bytes to Gateway private storage, or create an Artifact. Hermes dispatch sends the
+stored message content; it does not construct a multimodal request from the upstream media.
+
+## Outbound adapter validation
 
 - `media_type` is exactly `image` or `file`.
 - Callers may provide raw bytes or canonical RFC 4648 Base64. Base64 is length-checked before
@@ -35,7 +49,15 @@ the declared file MIME type before sending it.
 - Validation and adapter errors never include media data, response bodies, or authorization
   credentials.
 
-The current V2 delivery worker uses this adapter for ordered image and file response parts;
-that is an implemented code capability. Live WeChat media delivery has not been validated
-on the current CFserver production deployment, so this document does not claim a verified
-media round trip.
+## Integration status
+
+The V2 delivery worker can call this adapter for an image or file response part only when a
+persisted `ArtifactRefPart` already resolves to a readable Artifact. That is an implemented
+and code-tested conditional outbound capability. The current inbound path does not create
+such an Artifact, and the normal Hermes response path does not automatically materialize one.
+
+Live WeChat image/file delivery and a complete media round trip have not been validated on
+the current CFserver production deployment. In particular, the 2026-08-14 media API byte
+retrieval does not mean that Hermes saw the image or that Gateway can return a generated
+image to WeChat. See the
+[dated validation boundary](validation/2026-08-14-wechat-private-group-media-runtime.md).

@@ -27,10 +27,14 @@ system of record. Polling, Hermes execution, and response delivery are separate 
 processes coordinated through durable records and monitored through Worker Heartbeats.
 
 The current code and deployment baseline is commit `2ac4c86`, tag
-`v2-enterprise-runtime-20260811`. Five CFserver services are deployed and the
-fail-closed unauthorized path is live verified. The authorized V2 Routing through actual
-WeChat reply is not yet live verified; see the
-[2026-08-13 validation record](validation/2026-08-13-wechat-runtime.md).
+`v2-enterprise-runtime-20260811`. Five CFserver services and the fail-closed unauthorized
+path were live verified on 2026-08-13. On 2026-08-14, authorized private and explicitly
+mentioned group text routes were live verified through V2 Routing, Hermes, durable response
+and delivery state, and actual WeChat receipt. See the
+[2026-08-13 baseline](validation/2026-08-13-wechat-runtime.md) and the
+[2026-08-14 follow-up](validation/2026-08-14-wechat-private-group-media-runtime.md).
+The complete media path, automatic `uncertain` recovery, and host-level recovery remain
+outside that verified scope.
 
 ## Request flow and status
 
@@ -81,8 +85,9 @@ The stages are:
    reclaimable with a new token while attempts remain.
 7. `HermesDispatchService.dispatch_record()` reads the archived message without inserting
    or updating Message Archive. It validates Workspace, AIThread, profile snapshot, and
-   source binding, then preserves the profile reference/revision, Gateway thread id,
-   Hermes session id, and dispatch `Idempotency-Key` in the Hermes call.
+   source binding, then sends the Gateway Agent Profile's `external_profile_ref` as Hermes
+   `profile_reference`, along with the profile revision, Gateway thread id, Hermes session
+   id, and dispatch `Idempotency-Key`.
 8. Definite pre-response failures become retryable `failed` records until the configured
    budget is exhausted, then become `dead`. Timeouts, transport ambiguity, invalid
    responses after a possible call, and post-call thread-binding conflicts become
@@ -98,7 +103,8 @@ The response processor uses a second transaction to create `hermes_responses`, i
 ordered parts, and `delivery_outbox`. If this handoff fails after Dispatch is already
 `success`, the internal dispatch response remains durable, but current code only logs
 the handoff error; it does not automatically rebuild the missing Delivery Outbox record.
-This state requires operational investigation.
+This state requires operational investigation. The 2026-08-14 text runs observed the normal
+handoff succeed; they did not exercise or close this reconciliation gap.
 
 Different AI threads can execute concurrently up to `worker.concurrency`; one AIThread
 cannot have overlapping Hermes calls. `worker.retry_limit` counts retries after the first
@@ -108,9 +114,10 @@ Delivery failure after response persistence does not revert dispatch success and
 call Hermes again. `ChannelDeliveryWorker` claims the durable outbox independently,
 sends response parts in order, and records each attempt and provider receipt. Retryable
 failures are scheduled with bounded backoff; permanent or ambiguous outcomes become
-terminal delivery states without changing the successful dispatch. Inbound Artifact
-acquisition and understanding, Memory, RAG, and Skill authorization remain outside this
-runtime.
+terminal delivery states without changing the successful dispatch. The worker's outbound
+Artifact/media handling is a code capability, not evidence of a complete live media path.
+Inbound Artifact acquisition and understanding, Memory, RAG, and Skill authorization remain
+outside this runtime.
 
 Local uniqueness and idempotency keys make database replay safe. The WeChat sender does
 not propagate a provider idempotency key, so end-to-end exactly-once delivery is not
@@ -124,13 +131,26 @@ deliberately omits it. Agent Profile identity and revision are also part of the 
 
 The older V1 compatibility path uses a source-account and physical-conversation binding.
 That behavior is retained for compatibility and historical audit, but it is not the V2
-thread model. Current CFserver route configuration is empty, so none of these authorized
-Thread Policies has yet been exercised in the 2026-08-13 live validation.
+thread model. The 2026-08-14 live tests exercised `private_sender` for the private route
+and `group_sender` through an active, explicitly bound Group Type. They reused one Employee
+Workspace for the same Enterprise Identity while keeping private and group AI Threads,
+Thread Keys, and Hermes Thread IDs separate. A second request on each route reused its
+existing thread and Hermes session. `group_shared` was not exercised.
+
+Gateway Agent Profile and Hermes profile are separate concepts. Gateway stores an immutable
+route revision whose `external_profile_ref` selects an existing Hermes profile. Gateway
+sends the value as `profile_reference`; it does not create, clone, update, or delete the
+Hermes profile. The selected Hermes profile carries Hermes configuration, skills, and
+`SOUL.md`. Thread Policy independently defines context isolation. Both live-tested routes
+selected `external_profile_ref=default` without sharing their AI or Hermes threads.
 
 The next planned stages include general provider routing, Artifact ingestion, and richer
-inbound media/file workflows. Image understanding,
-file-message processing, OCR, archive or ZIP parsing, enterprise knowledge-base access,
-Memory, RAG, and automatic Skill execution are not implemented by this runtime.
+inbound media/file workflows. On 2026-08-14, the poller persisted one non-mentioned group
+image and its Raw Payload, and the `agent-wechat` media API independently returned valid
+JPEG bytes. The poller created no Attachment or Dispatch and did not store or send those
+bytes to Hermes. Image understanding, file-message processing, OCR, archive or ZIP parsing,
+enterprise knowledge-base access, Memory, RAG, and automatic Skill execution are not
+implemented by this runtime.
 
 ## Package boundaries
 
@@ -150,7 +170,7 @@ Memory, RAG, and automatic Skill execution are not implemented by this runtime.
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
 | `hermes` | Client, dispatch worker, and raw dispatch-result persistence | Implemented |
 | `response` | Durable business response parts and Delivery Outbox handoff | Implemented |
-| `delivery` | Delivery Outbox, attempts, receipts, Artifact reads, and channel worker | Implemented |
+| `delivery` | Outbound Delivery Outbox, attempts, receipts, conditional Artifact reads, and channel worker | Implemented |
 | `context` | Authorized Timeline projection and explicit versioned Snapshots | Implemented |
 | `task.model` | Durable dispatch claims, leases, FIFO, retries, and terminal states | Implemented |
 | `task.queue` | Task scheduling and delivery | Reserved |
@@ -244,6 +264,13 @@ aggregate counters.
 current synchronous poll, the Dispatch Worker stops claiming and drains active calls,
 and the Delivery Worker finishes its current bounded batch before exiting.
 
+On 2026-08-14, the `gateway`, `wechat-worker`, `dispatch-worker`, and
+`delivery-worker` processes were restarted inside their existing containers. Container
+IDs remained unchanged, all four services returned healthy, and durable private-route,
+Dispatch, Response, Delivery, Attempt, and Receipt facts remained unchanged. PostgreSQL,
+`agent-wechat`, Hermes, and the CFserver host were not restarted. This validates
+application-process continuity only, not container recreation or host/database recovery.
+
 ## Persistence direction
 
 SQLAlchemy 2.x provides the persistence boundary. PostgreSQL is current production
@@ -277,9 +304,17 @@ Private-message mention state is `null`; group-message mention state is an expli
 and defaults to `false` when absent. The store does not inspect message content to infer
 mentions. Direct Message API or sink calls can save `is_self=true`; the active WeChat
 polling path filters self messages before the sink. Senderless system messages are saved.
-Verified reply summaries are stored as JSON context, not as inferred message relationships.
-Attachment rows contain metadata only; the current WeChat polling path does not populate them
-or deliver file bytes to Hermes.
+Private and group reply messages were live observed with `message_type=reply` and non-empty
+`reply_context`. Those summaries are stored as JSON context, not as inferred message
+relationships, and current Hermes dispatch sends only the message content; it does not
+inject `reply_context`.
+
+Attachment rows contain metadata only; the current WeChat polling path does not populate
+them or deliver image/file bytes to Hermes. A live inbound image was classified and stored
+with its channel identifiers and Raw Payload, but produced zero Attachment rows and zero
+Dispatches because it did not mention the bot. Independent media-API byte retrieval does
+not connect that message to Gateway private storage, Hermes multimodal input, or Artifact
+materialization.
 
 Legacy databases created before Alembic must be backed up, verified against the
 main-schema baseline, stamped with revision `20260806_0001`, and upgraded to

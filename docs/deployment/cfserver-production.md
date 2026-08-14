@@ -1,7 +1,8 @@
 # CFserver production deployment
 
-This runbook documents the CFserver deployment verified on 2026-08-13. It applies to
-Gateway release commit `2ac4c86`, tagged `v2-enterprise-runtime-20260811`.
+This runbook documents the CFserver deployment baseline verified on 2026-08-13 and the
+application-operation evidence added on 2026-08-14. It applies to Gateway release commit
+`2ac4c86`, tagged `v2-enterprise-runtime-20260811`.
 
 The facts marked as verified describe that host at the validation date. Commands in this
 runbook are operating procedures; run them under the site's change-control and backup
@@ -93,9 +94,9 @@ wechat:
   token_env: CF_AGENT_WECHAT_TOKEN
 ```
 
-Before an authorized V2 validation, confirm the remaining rendered configuration. The
-following is the code-supported shape required for that path, not evidence that every value
-was observed during the unauthorized-message validation:
+Authorized V2 routing also requires the following rendered configuration shape. The
+2026-08-14 private and mentioned-group text tests confirmed that the effective route could
+complete, but this example remains non-secret and does not disclose the site values:
 
 ```yaml
 database:
@@ -221,9 +222,27 @@ sudo docker compose --env-file .env -f compose.yaml exec -T dispatch-worker \
   python -c "import urllib.request; print(urllib.request.urlopen('http://<AI_HOST_LAN_IP>:<HERMES_GATEWAY_PORT>/health', timeout=3).status)"
 ```
 
+The `exec` probes above are for services that are already running. Before starting the
+resident `dispatch-worker`, use a one-off command override on the same Compose network so
+the probe cannot claim application work:
+
+```bash
+cd /opt/cf-agent-gateway/deploy
+sudo docker compose --env-file .env -f compose.yaml run --rm --no-deps \
+  --entrypoint python dispatch-worker \
+  -c "import urllib.request; print(urllib.request.urlopen('http://<AI_HOST_LAN_IP>:<HERMES_GATEWAY_PORT>/health', timeout=3).status)"
+```
+
 The agent-wechat TCP probe above proves DNS and network reachability only. Use the
 application worker or an approved secret-aware probe to verify HTTP authentication; do not
 paste the token into shell history.
+
+Treat the one-off Hermes `/health` probe as the readiness gate before starting or
+restarting dispatch consumption; use the resident `exec` form for ongoing monitoring. A
+Windows login startup entry is configuration, not evidence that Hermes Gateway is running.
+If the probe fails, keep dispatch consumption stopped, investigate the AI-host process, and
+restore health before allowing new external calls. Do not assume that restarting
+`dispatch-worker` repairs Hermes availability.
 
 ## Logs and routine operation
 
@@ -245,7 +264,7 @@ sensitive operational data. Redact them before sharing a log extract. Monitor at
 - Poll failures and checkpoint progress.
 - Dispatch queue age, retries, `uncertain`, and `dead` records.
 - Delivery queue age, attempts, uncertain outcomes, and receipts.
-- agent-wechat login state and Hermes health.
+- agent-wechat login state and Hermes health observed from the consuming container.
 
 To stop safely, stop consumers before the Gateway and PostgreSQL. `SIGTERM` allows the
 workers to finish their bounded in-flight operation; do not immediately force-kill them:
@@ -257,6 +276,70 @@ sudo docker compose --env-file .env -f compose.yaml stop \
 sudo docker compose --env-file .env -f compose.yaml stop gateway
 sudo docker compose --env-file .env -f compose.yaml stop postgres
 ```
+
+## Application-process restart evidence
+
+On 2026-08-14, operators performed a controlled restart of `gateway`,
+`wechat-worker`, `dispatch-worker`, and `delivery-worker`. All four returned healthy.
+Their existing container IDs remained unchanged and only `StartedAt` changed. PostgreSQL,
+`agent-wechat`, Hermes, and the CFserver host were not restarted.
+
+The private route's Workspace, AI Thread, Thread Key, Thread Policy, Agent Profile, Hermes
+Thread ID, original Dispatch and raw response, business Response, Delivery, Attempt, Receipt,
+and related table totals remained identical. A later private request reused the same thread
+and Hermes session and completed successfully.
+
+The accurate conclusion is application-process restart recovery inside existing containers.
+It is not evidence for container deletion/recreation, PostgreSQL restart, CFserver reboot,
+AI-host reboot, or external-service recovery.
+
+## Hermes outage and guarded `uncertain` recovery
+
+On 2026-08-14, a private reply Dispatch encountered `hermes_timeout_error` while Hermes
+Gateway was not running. The Windows login startup entry existed, but CFserver could not
+reach `http://<AI_HOST_LAN_IP>:<HERMES_GATEWAY_PORT>`. The Dispatch became
+`uncertain` after one attempt and produced no dispatch response, business Response, or
+Delivery. Starting Hermes Gateway manually restored `/health` from the AI host and
+CFserver.
+
+An `uncertain` Dispatch is intentionally not retried automatically and blocks later work
+on the same AI Thread. Restarting `dispatch-worker` alone does not make it eligible.
+
+The observed recovery was an exceptional, manually approved incident action. It proceeded
+only after all of these guards were independently confirmed:
+
+- a verified PostgreSQL backup existed;
+- the original Dispatch was still in the expected `uncertain` state;
+- its attempt count was exactly one;
+- no Hermes Dispatch Response existed;
+- no business Response or Delivery existed;
+- no later Dispatch existed on the same AI Thread;
+- the Hermes session contained no matching request or reply; and
+- Hermes `/health` had been restored.
+
+For any future exceptional review, stop `dispatch-worker` first and keep it stopped during
+backup, evidence collection, guard evaluation, and any approved state repair. This prevents
+the record from being claimed between the repair commit and the operator's final decision.
+Start the worker only after every guard and the approved repair have completed.
+
+In the observed incident, under the combined guards above, an operator manually reclassified
+the original Dispatch from `uncertain` to `failed` and restarted `dispatch-worker`. The
+same persisted Dispatch was then claimed for attempt two, succeeded, and produced a
+delivered Response and Delivery that the WeChat user received. This incident involved only
+the existing `dispatch-worker` application service; it is not evidence of container
+recreation or PostgreSQL, CFserver-host, or AI-host restart recovery.
+
+This result must not be described as automatic recovery or turned into routine direct
+database editing. This runbook intentionally provides no SQL. If any guard is absent or
+ambiguous, leave the record `uncertain`, keep the thread blocked, and escalate for evidence
+review instead of risking a duplicate external effect. The current release has no supported
+`uncertain` management API or administrator recovery command; that capability remains to
+be implemented. These dispatch-specific facts also do not authorize reclassifying a
+Delivery Outbox record in an `uncertain` state.
+
+See the
+[2026-08-14 validation record](../validation/2026-08-14-wechat-private-group-media-runtime.md)
+for the redacted evidence boundary.
 
 ## PostgreSQL backup
 
@@ -329,9 +412,10 @@ Do not commit this backup directory or attach `deploy.env` to an incident ticket
    release and configuration. Recheck the Alembic head before allowing writers.
 5. Do not use Alembic downgrade as the routine production rollback. The Message Archive
    migration is intentionally irreversible, and downgrade can destroy retained evidence.
-6. After recovery, reconcile queued/running/uncertain dispatch and delivery records before
-   resuming consumers. Verify agent-wechat login, Hermes health, worker heartbeats, and an
-   approved end-to-end test.
+6. After recovery, reconcile queued and running work before resuming consumers. Quarantine
+   `uncertain` dispatch and delivery records for evidence review; do not reclassify them
+   through a generic rollback step. Verify agent-wechat login, Hermes health, worker
+   heartbeats, and an approved end-to-end test.
 
 Never delete the current database or persistent directory until the replacement has passed
 readiness, integrity, and application-level verification and the incident owner has approved
@@ -342,5 +426,16 @@ the transition.
 Hermes Gateway `0.20.0` was reachable from both the CFserver host and `dispatch-worker`
 during the 2026-08-13 validation. Its Windows login startup entry existed, but Hermes did
 not start automatically after an AI-host reboot; an operator restored it manually. Treat
-Hermes startup reliability as an open operational issue and verify `/health` after every
-AI-host restart before enabling `dispatch-worker`.
+Hermes startup reliability as an open operational issue.
+
+On 2026-08-14, the startup entry again existed while the Hermes Gateway process was absent,
+causing a CFserver timeout and one `uncertain` Dispatch. Manual process start restored
+health. Automatic recovery after an AI-host reboot remains unverified. Verify `/health`
+from `dispatch-worker` after every AI-host restart and before enabling dispatch consumption.
+
+## Related documentation
+
+- [V2 Runtime architecture](../architecture/v2-runtime.md)
+- [WeChat polling runtime](../runtime/wechat-runtime.md)
+- [2026-08-14 private, group, reply, and media validation](../validation/2026-08-14-wechat-private-group-media-runtime.md)
+- [2026-08-13 baseline and unauthorized-path validation](../validation/2026-08-13-wechat-runtime.md)
