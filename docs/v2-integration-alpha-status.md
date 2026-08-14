@@ -1,11 +1,16 @@
 # V2 Integration Alpha Status
 
-> Historical snapshot: this document records `feat/v2-integration` at `afb90d4`.
-> It predates V2 routing runtime `0850eb2` and the standalone dispatch worker.
-> See [architecture.md](architecture.md) and the root README for the current runtime.
+> **Historical alpha snapshot.** Every status, limitation, and next step in this document
+> applies only to `feat/v2-integration` at `afb90d4` and its recorded validation baseline.
+> It predates V2 routing runtime `0850eb2`, the standalone workers, response persistence,
+> and the current CFserver production baseline at `2ac4c86`. See the
+> [V2 Runtime architecture](architecture/v2-runtime.md), the
+> [2026-08-13 production validation](validation/2026-08-13-wechat-runtime.md), and
+> [architecture.md](architecture.md) for current status. Do not use this snapshot as a
+> statement of current production capability.
 
 
-## Current Version
+## Recorded Alpha Version
 
 | Item | Value |
 | --- | --- |
@@ -16,11 +21,11 @@
 | Validation date | 2026-08-07 |
 | Alembic head | `20260806_04` |
 
-This alpha integrates the completed V2 foundations into one reviewed code line. It does
-not yet provide the complete V2 runtime pipeline. The validated production path remains
-the V1-compatible text round trip described below.
+At this alpha snapshot, the branch integrated the completed V2 foundations into one
+reviewed code line but did not yet provide the complete V2 runtime pipeline. The
+then-validated path remained the V1-compatible text round trip described below.
 
-## Migration Status
+## Recorded Migration Status
 
 The packaged Alembic tree has one root, one linear chain, and one head:
 
@@ -47,9 +52,9 @@ locks, and SQLite foreign-key listener are active. SQLite online upgrades and Po
 offline DDL rendering are covered by tests. `Base.metadata.create_all()` is not the
 application schema-evolution path.
 
-## Completed Modules
+## Modules Recorded at This Alpha
 
-### Runtime-connected capabilities
+### Capabilities connected at that baseline
 
 - WeChat polling, normalization, checkpointing, and self-message filtering.
 - Message persistence before admission, with event and physical-message idempotency.
@@ -65,7 +70,7 @@ application schema-evolution path.
 - Hermes parsing for both the legacy completion response and V2 `ResponseEnvelope`.
 - V1-compatible text response delivery to the bound WeChat conversation.
 
-### Integrated foundations not yet connected end to end
+### Foundations not connected at that baseline
 
 - Agent Profile and Group Type persistence, immutable revisions, conversation binding,
   and `unknown_group` fallback.
@@ -76,23 +81,23 @@ application schema-evolution path.
 - WeChat Media Adapter V2 for validated outbound image and file HTTP requests.
 - Message delivery-attempt schema and constraints.
 
-## Runtime Chain Audit
+## Historical Runtime Chain Audit
 
-The requested V2 chain is not fully connected.
+The requested V2 chain was not fully connected at this snapshot.
 
-| Stage | Alpha status | Current behavior |
+| Stage | Alpha status | Behavior at the alpha baseline |
 | --- | --- | --- |
-| WeChat inbound | Connected | Polling and normalization feed the per-message admission sink. |
-| Message Archive | Connected | Raw payload and archive timestamps/direction are persisted by `MessageStore`. |
-| Profile Routing | Foundation only | `AgentProfileStore` and Group Type resolution are not called by active admission. |
-| Thread Resolver V2 | Foundation only | Active admission still calls `WorkspaceService.ensure_thread_for_authorized_request` and the V1 `build_thread_key`. |
-| Dispatch Record | Connected | The record is committed before an optional external Hermes call. |
-| Hermes Client | Connected inline | The inline executor claims the record and calls the synchronous client. |
-| Response Envelope | Parsed in memory | V2 parts are validated and carried in `HermesDispatchOutcome`, but no response record is persisted. |
-| Artifact | Foundation only | No production service consumes `ArtifactRefPart` or invokes `ArtifactRepository`. |
-| WeChat Delivery | Text only | `HermesResponseHandler` uses `send_text`; media delivery is not wired. |
+| WeChat inbound | Connected | Polling and normalization fed the per-message admission sink. |
+| Message Archive | Connected | Raw payload and archive timestamps/direction were persisted by `MessageStore`. |
+| Profile Routing | Foundation only | Active admission did not call `AgentProfileStore` or Group Type resolution. |
+| Thread Resolver V2 | Foundation only | Active admission still called `WorkspaceService.ensure_thread_for_authorized_request` and the V1 `build_thread_key`. |
+| Dispatch Record | Connected | The record was committed before an optional external Hermes call. |
+| Hermes Client | Connected inline | The inline executor claimed the record and called the synchronous client. |
+| Response Envelope | Parsed in memory | V2 parts were validated and carried in `HermesDispatchOutcome`, but no response record was persisted. |
+| Artifact | Foundation only | No service consumed `ArtifactRefPart` or invoked `ArtifactRepository`. |
+| WeChat Delivery | Text only | `HermesResponseHandler` used `send_text`; media delivery was not wired. |
 
-The actual runtime path is:
+The runtime path recorded at that baseline was:
 
 ```text
 WeChat inbound
@@ -105,11 +110,11 @@ WeChat inbound
   -> WeChat send_text
 ```
 
-For a mixed V2 response, only the text projection is delivered and artifact references
-are ignored. An artifact-only response has empty `assistant_content` and is rejected by
-the current text response handler.
+At that baseline, a mixed V2 response delivered only the text projection and ignored
+artifact references. An artifact-only response had empty `assistant_content` and was
+rejected by the alpha text response handler.
 
-## Validation Results
+## Recorded Validation Results
 
 The following checks were run from `feat/v2-integration` at code baseline `a8a2625`:
 
@@ -122,10 +127,10 @@ The following checks were run from `feat/v2-integration` at code baseline `a8a26
 | `git diff --check` | Passed |
 | Full pytest | 605 passed, 2 skipped, 0 failed |
 
-Full pytest used a repository-local `--basetemp` because
-`C:\Users\Admin\AppData\Local\Temp\pytest-of-Admin` retained invalid Windows ACLs
-after an interrupted run. The isolated directory was removed after validation; no
-business-code workaround was introduced.
+Full pytest used a repository-local `<LOCAL_TEST_TEMP_DIR>` as `--basetemp` because the
+default test temporary directory retained invalid Windows ACLs after an interrupted run.
+The isolated directory was removed after validation; no business-code workaround was
+introduced.
 
 The two skips are platform capability checks:
 
@@ -137,37 +142,38 @@ The two skips are platform capability checks:
 The run emitted one existing Starlette/httpx deprecation warning from FastAPI's test
 client.
 
-## Known Alpha Limitations
+## Limitations at That Baseline
 
-- Profile Routing and Thread Resolver V2 are tested standalone but are not wired into
-  active WeChat admission. The current runtime still uses the V1 compatibility thread
-  path.
-- The Dispatch Outbox is an inline executor, not a standalone durable worker. There is
-  no queued-record scanner, per-`ai_thread_id` ordering, lease or heartbeat, stale
+- Profile Routing and Thread Resolver V2 were tested standalone but were not wired into
+  active WeChat admission. That alpha runtime still used the V1 compatibility thread path.
+- The Dispatch Outbox was an inline executor, not a standalone durable worker. It had no
+  queued-record scanner, per-`ai_thread_id` ordering, lease or heartbeat, stale
   running-record recovery, retry backoff, or automatic `uncertain` reconciliation.
-- If Hermes is disabled or the process stops after enqueue, records can remain queued
-  without a consumer. A stop after claim can leave a running record without recovery.
-- The stable local idempotency key is not yet an upstream Hermes idempotency contract.
-- Dispatch is marked successful before WeChat delivery. A delivery failure does not
-  revert dispatch state, and duplicate inbound delivery does not call Hermes or WeChat
-  again.
-- `message_delivery_attempts` is schema/model foundation only; runtime delivery does
-  not write attempts or schedule delivery retries.
-- `ResponseEnvelope` has no durable response repository. Artifact references are not
+- If Hermes was disabled or the process stopped after enqueue, records could remain queued
+  without a consumer. A stop after claim could leave a running record without recovery.
+- The stable local idempotency key was not yet an upstream Hermes idempotency contract.
+- Dispatch was marked successful before WeChat delivery. A delivery failure did not revert
+  dispatch state, and duplicate inbound delivery did not call Hermes or WeChat again.
+- `message_delivery_attempts` was schema/model foundation only; runtime delivery did not
+  write attempts or schedule delivery retries.
+- `ResponseEnvelope` had no durable response repository. Artifact references were not
   fetched, associated with a dispatch/message, or persisted automatically.
-- Artifact V2 is repository/model foundation only. There is no Artifact ingestion job,
+- Artifact V2 was repository/model foundation only. There was no Artifact ingestion job,
   delivery job, delivery worker, retry flow, or lifecycle reconciliation.
-- `WechatHttpMediaSender` is not selected by the active runtime and
-  `HermesResponseHandler` does not process image/file parts. Media delivery has not
-  received live WeChat end-to-end validation.
+- `WechatHttpMediaSender` was not selected by that runtime, and
+  `HermesResponseHandler` did not process image/file parts. Media delivery had not received
+  live WeChat end-to-end validation.
 - Inbound image/file content, OCR, archive or ZIP processing, Context Builder, provider
-  routing, and Skill execution are outside this alpha.
-- PostgreSQL coverage currently validates offline migration DDL; production online
-  runtime validation remains a later environment gate.
-- Worker service management, production deployment automation, Artifact storage
-  volumes, operational reconciliation, and complete observability are not finished.
+  routing, and Skill execution were outside this alpha.
+- PostgreSQL coverage validated offline migration DDL; production online runtime
+  validation remained a later environment gate.
+- Worker service management, production deployment automation, Artifact storage volumes,
+  operational reconciliation, and complete observability were not finished.
 
-## Next Phase
+## Follow-up Planned at the Time
+
+The alpha record proposed the following work. Later baselines supersede this plan; the list
+is retained to explain the evolution of the implementation.
 
 1. Wire Agent Profile and Group Type resolution into admission, then invoke Thread
    Resolver V2 with the selected profile revision and thread policy. Define the reviewed
@@ -188,5 +194,5 @@ client.
 7. Add one complete V2 runtime integration suite and validate PostgreSQL online
    migrations/runtime behavior in an available PostgreSQL environment.
 
-This branch is ready for human alpha review. It has not been merged to `main`, pushed,
-or promoted as a production-ready V2 pipeline.
+At the time of this snapshot, the branch was ready for human alpha review and had not been
+promoted as a production-ready V2 pipeline.

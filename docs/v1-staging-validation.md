@@ -1,5 +1,12 @@
 # V1 Staging Validation
 
+> **Historical validation record.** This document records a V1 Staging exercise only.
+> Current CFserver production is based on commit `2ac4c86`, tagged
+> `v2-enterprise-runtime-20260811`, and runs the V2 Runtime. See the
+> [V2 Runtime architecture](architecture/v2-runtime.md) and the
+> [2026-08-13 production validation](validation/2026-08-13-wechat-runtime.md).
+> Do not use this document as a statement of current production status.
+
 ## Record status
 
 - Validation state: completed
@@ -107,7 +114,7 @@ The target group-thread key remains:
 bot_account_id + group_chat_id + sender_id
 ```
 
-The current V1 implementation instead binds an AIThread to the source account and physical
+The validated V1 implementation instead bound an AIThread to the source account and physical
 conversation. Authorized senders in the same group therefore reuse one whole-room thread,
 although each sender is still independently identity-resolved and permission-checked.
 
@@ -139,19 +146,21 @@ The following capabilities must not be described as implemented or Staging-valid
 - automatic Skill execution
 - production automated deployment
 
-The adapter contains limited media retrieval and message-type foundations, and Message
-Store has attachment metadata models. Those foundations do not form an attachment or file
-processing pipeline. The repository Compose service starts the HTTP application only; it
-does not constitute automated production deployment of the resident Worker.
+At that baseline, the adapter contained limited media retrieval and message-type foundations,
+and Message Store had attachment metadata models. Those foundations did not form an
+attachment or file-processing pipeline. The repository Compose service at that time started
+the HTTP application only; it did not constitute automated production deployment of the
+resident Worker.
 
 ## Known delivery boundary
 
-Message Store idempotency and checkpointing make inbound storage retries safe. At the time
+Message Store idempotency and checkpointing made inbound storage retries safe. At the time
 of this validation, Hermes dispatch and outbound response delivery did not use a durable
-outbox or an upstream idempotency key. The later dispatch-record foundation is not part of
-this Staging evidence, and it still does not provide an upstream idempotency guarantee or a
-delivery worker. An ambiguous external result therefore requires operational review and
-must not be represented as production-grade exactly-once delivery.
+outbox or an upstream idempotency key. Those limitations define this historical evidence;
+they are not statements about the current V2 Runtime. The later V2 implementation added a
+standalone dispatch worker, upstream idempotency propagation, durable response persistence,
+a Delivery Outbox, and a delivery worker. This V1 exercise must still not be represented as
+production-grade exactly-once delivery.
 
 See [architecture.md](architecture.md) for runtime and persistence boundaries and
 [../README.md](../README.md) for setup commands and the current capability summary.

@@ -1,5 +1,11 @@
 # systemd production deployment
 
+> **Alternative deployment topology.** Current CFserver production uses the five-service
+> Compose deployment documented in
+> [CFserver production deployment](deployment/cfserver-production.md). This systemd
+> runbook remains available for separately reviewed hosts; it is not the current CFserver
+> production runbook.
+
 This deployment runs database migrations, the HTTP gateway, the WeChat polling
 worker, the Hermes dispatch worker, and the response delivery worker as separate
 systemd units. PostgreSQL must be reachable before migration starts. The gateway
@@ -43,7 +49,7 @@ Set `CF_AGENT_GATEWAY_DATABASE_URL` and the optional dispatch worker overrides
 in `gateway.env`, for example:
 
 ```text
-CF_AGENT_GATEWAY_DATABASE_URL=postgresql+psycopg://cf_agent_gateway:password@database.internal:5432/cf_agent_gateway?connect_timeout=5
+CF_AGENT_GATEWAY_DATABASE_URL=<DATABASE_URL>
 CF_GATEWAY_WORKER_CONCURRENCY=4
 CF_GATEWAY_WORKER_LEASE_SECONDS=60
 CF_GATEWAY_WORKER_RETRY_LIMIT=3
