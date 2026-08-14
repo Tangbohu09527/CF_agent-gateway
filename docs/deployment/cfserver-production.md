@@ -29,11 +29,19 @@ definition. It names the poller `wechat-worker`, includes PostgreSQL, and joins 
 services to the site's internal network.
 
 All commands below therefore start in the deployment directory and select the site file
-and environment explicitly:
+and environment explicitly. The CFserver host uses rootful Docker, while `.env` is
+`root:root` with mode `0600`. Apply this privilege model throughout the runbook:
+
+- Run host Docker commands as `sudo docker compose`, `sudo docker exec`, or
+  `sudo docker inspect`. Do not relax `.env` permissions to let an unprivileged process
+  read it.
+- Use `sudo` for `install`, `chown`, `chmod`, and copies into root-only directories. Pipe
+  generated content through `sudo tee` when writing it into a root-only backup directory.
+- Run Git repository queries as the ordinary deployment user. Never run `sudo git`.
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml config --quiet
+sudo docker compose --env-file .env -f compose.yaml config --quiet
 ```
 
 ## Runtime services
@@ -127,8 +135,8 @@ Keep the file owned by root and unreadable by other users:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-chown root:root .env
-chmod 0600 .env
+sudo chown root:root .env
+sudo chmod 0600 .env
 ```
 
 Do not print `.env`, pass secrets as command-line values, or include it in routine log
@@ -143,11 +151,11 @@ running:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml stop \
+sudo docker compose --env-file .env -f compose.yaml stop \
   delivery-worker dispatch-worker wechat-worker gateway
-docker compose --env-file .env -f compose.yaml run --rm --no-deps gateway \
+sudo docker compose --env-file .env -f compose.yaml run --rm --no-deps gateway \
   python -m cf_agent_gateway.runtime.startup migrate
-docker compose --env-file .env -f compose.yaml up -d \
+sudo docker compose --env-file .env -f compose.yaml up -d \
   postgres gateway wechat-worker dispatch-worker delivery-worker
 ```
 
@@ -159,7 +167,7 @@ Verify the database revision without exposing the connection URL:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml exec -T postgres \
+sudo docker compose --env-file .env -f compose.yaml exec -T postgres \
   psql --username '<POSTGRES_USER>' --dbname '<POSTGRES_DATABASE>' \
   --tuples-only --no-align --command 'SELECT version_num FROM alembic_version;'
 ```
@@ -173,7 +181,7 @@ Inspect Compose state and the Gateway readiness endpoint:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml ps
+sudo docker compose --env-file .env -f compose.yaml ps
 curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/ready
 ```
 
@@ -183,32 +191,33 @@ The expected resident set is `postgres`, `gateway`, `wechat-worker`, `dispatch-w
 
 Each worker publishes a heartbeat. A healthy process state alone is insufficient: the
 heartbeat must be in `starting` or `running` state and newer than the configured maximum
-age. The commands below use this release's Compose heartbeat-path convention. If the site
-file overrides `CF_GATEWAY_WORKER_HEARTBEAT_PATH`, substitute the effective value reported
-by the rendered Compose configuration; never guess a path. Check each file through its
-owning container:
+age. Run the checker inside each owning container without copying a path from the
+checked-in Compose template. The CLI reads `CF_GATEWAY_WORKER_HEARTBEAT_PATH` and
+`CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS` from that container's own environment:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml exec -T wechat-worker \
-  python -m cf_agent_gateway.runtime.heartbeat \
-  --file /run/cf-agent-gateway/worker-heartbeat.json --max-age-seconds 30
-docker compose --env-file .env -f compose.yaml exec -T dispatch-worker \
-  python -m cf_agent_gateway.runtime.heartbeat \
-  --file /run/cf-agent-gateway/dispatch-worker-heartbeat.json --max-age-seconds 30
-docker compose --env-file .env -f compose.yaml exec -T delivery-worker \
-  python -m cf_agent_gateway.runtime.heartbeat \
-  --file /run/cf-agent-gateway/delivery-worker-heartbeat.json --max-age-seconds 30
+sudo docker compose --env-file .env -f compose.yaml exec -T wechat-worker \
+  python -m cf_agent_gateway.runtime.heartbeat
+sudo docker compose --env-file .env -f compose.yaml exec -T dispatch-worker \
+  python -m cf_agent_gateway.runtime.heartbeat
+sudo docker compose --env-file .env -f compose.yaml exec -T delivery-worker \
+  python -m cf_agent_gateway.runtime.heartbeat
 ```
+
+If a container does not define the heartbeat path, the checker exits with an argument
+error; fix the site Compose environment instead of guessing a file. For an approved
+one-off override, this release supports `--file <PATH>` and
+`--max-age-seconds <SECONDS>`.
 
 Check both external dependencies from the consuming network namespace. Use only
 placeholders for the Hermes host and never echo authorization headers:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml exec -T gateway \
+sudo docker compose --env-file .env -f compose.yaml exec -T gateway \
   python -c "import socket; socket.create_connection(('cf-agent-wechat', 6174), timeout=3).close(); print('reachable')"
-docker compose --env-file .env -f compose.yaml exec -T dispatch-worker \
+sudo docker compose --env-file .env -f compose.yaml exec -T dispatch-worker \
   python -c "import urllib.request; print(urllib.request.urlopen('http://<AI_HOST_LAN_IP>:<HERMES_GATEWAY_PORT>/health', timeout=3).status)"
 ```
 
@@ -222,9 +231,9 @@ Application logs are structured stdout/stderr records collected by Docker:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml logs \
+sudo docker compose --env-file .env -f compose.yaml logs \
   --since 30m --tail 200 gateway wechat-worker dispatch-worker delivery-worker postgres
-docker compose --env-file .env -f compose.yaml logs \
+sudo docker compose --env-file .env -f compose.yaml logs \
   --follow --tail 100 wechat-worker dispatch-worker delivery-worker
 ```
 
@@ -243,10 +252,10 @@ workers to finish their bounded in-flight operation; do not immediately force-ki
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-docker compose --env-file .env -f compose.yaml stop \
+sudo docker compose --env-file .env -f compose.yaml stop \
   delivery-worker dispatch-worker wechat-worker
-docker compose --env-file .env -f compose.yaml stop gateway
-docker compose --env-file .env -f compose.yaml stop postgres
+sudo docker compose --env-file .env -f compose.yaml stop gateway
+sudo docker compose --env-file .env -f compose.yaml stop postgres
 ```
 
 ## PostgreSQL backup
@@ -257,21 +266,19 @@ container:
 
 ```bash
 cd /opt/cf-agent-gateway/deploy
-install -d -o root -g root -m 0700 \
+set -o pipefail
+sudo install -d -o root -g root -m 0700 \
   /srv/storage/cf-agent-gateway/backups/database
 BACKUP_NAME="gateway-$(date -u +%Y%m%dT%H%M%SZ).dump"
-docker compose --env-file .env -f compose.yaml exec -T postgres \
+BACKUP_PATH="/srv/storage/cf-agent-gateway/backups/database/${BACKUP_NAME}"
+sudo docker compose --env-file .env -f compose.yaml exec -T postgres \
   pg_dump --format=custom --no-owner --no-acl \
   --username '<POSTGRES_USER>' --dbname '<POSTGRES_DATABASE>' \
-  --file="/tmp/${BACKUP_NAME}"
-docker compose --env-file .env -f compose.yaml exec -T postgres \
-  pg_restore --list "/tmp/${BACKUP_NAME}"
-docker compose --env-file .env -f compose.yaml cp \
-  "postgres:/tmp/${BACKUP_NAME}" \
-  "/srv/storage/cf-agent-gateway/backups/database/${BACKUP_NAME}"
-docker compose --env-file .env -f compose.yaml exec -T postgres \
-  rm -f "/tmp/${BACKUP_NAME}"
-chmod 0600 "/srv/storage/cf-agent-gateway/backups/database/${BACKUP_NAME}"
+  | sudo tee "${BACKUP_PATH}" >/dev/null
+sudo chmod 0600 "${BACKUP_PATH}"
+sudo cat "${BACKUP_PATH}" \
+  | sudo docker compose --env-file .env -f compose.yaml exec -T postgres \
+    pg_restore --list >/dev/null
 ```
 
 Copy the verified backup to the site's independent encrypted backup system. A backup on the
@@ -286,16 +293,24 @@ release identifiers, and image digests together. The environment copy remains se
 ```bash
 cd /opt/cf-agent-gateway/deploy
 CONFIG_BACKUP="/srv/storage/cf-agent-gateway/backups/config/$(date -u +%Y%m%dT%H%M%SZ)"
-install -d -o root -g root -m 0700 "${CONFIG_BACKUP}"
-install -o root -g root -m 0600 compose.yaml "${CONFIG_BACKUP}/compose.yaml"
-install -o root -g root -m 0600 .env "${CONFIG_BACKUP}/deploy.env"
-install -o root -g root -m 0600 ../config/production.yaml \
+sudo install -d -o root -g root -m 0700 "${CONFIG_BACKUP}"
+sudo install -o root -g root -m 0600 compose.yaml "${CONFIG_BACKUP}/compose.yaml"
+sudo install -o root -g root -m 0600 .env "${CONFIG_BACKUP}/deploy.env"
+sudo install -o root -g root -m 0600 ../config/production.yaml \
   "${CONFIG_BACKUP}/production.yaml"
-git -C ../repo rev-parse HEAD > "${CONFIG_BACKUP}/git-commit.txt"
-git -C ../repo tag --points-at HEAD > "${CONFIG_BACKUP}/git-tags.txt"
-docker compose --env-file .env -f compose.yaml images \
-  > "${CONFIG_BACKUP}/compose-images.txt"
-chmod 0600 "${CONFIG_BACKUP}"/*
+git -C ../repo rev-parse HEAD \
+  | sudo tee "${CONFIG_BACKUP}/git-commit.txt" >/dev/null
+git -C ../repo tag --points-at HEAD \
+  | sudo tee "${CONFIG_BACKUP}/git-tags.txt" >/dev/null
+sudo docker compose --env-file .env -f compose.yaml images \
+  | sudo tee "${CONFIG_BACKUP}/compose-images.txt" >/dev/null
+sudo chmod 0600 \
+  "${CONFIG_BACKUP}/compose.yaml" \
+  "${CONFIG_BACKUP}/deploy.env" \
+  "${CONFIG_BACKUP}/production.yaml" \
+  "${CONFIG_BACKUP}/git-commit.txt" \
+  "${CONFIG_BACKUP}/git-tags.txt" \
+  "${CONFIG_BACKUP}/compose-images.txt"
 ```
 
 Do not commit this backup directory or attach `deploy.env` to an incident ticket.

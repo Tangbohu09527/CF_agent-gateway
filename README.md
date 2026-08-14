@@ -356,9 +356,12 @@ Operational probes are:
 
 ```bash
 curl --fail --max-time 3 http://127.0.0.1:8080/ready
-python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/worker-heartbeat.json --max-age-seconds 30
-python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/dispatch-worker-heartbeat.json --max-age-seconds 30
-python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/delivery-worker-heartbeat.json --max-age-seconds 30
+docker compose --env-file .env -f docker-compose.prod.yml exec -T worker \
+  python -m cf_agent_gateway.runtime.heartbeat
+docker compose --env-file .env -f docker-compose.prod.yml exec -T dispatch-worker \
+  python -m cf_agent_gateway.runtime.heartbeat
+docker compose --env-file .env -f docker-compose.prod.yml exec -T delivery-worker \
+  python -m cf_agent_gateway.runtime.heartbeat
 ```
 
 Current CFserver operation uses five long-running services in its separate deployed
