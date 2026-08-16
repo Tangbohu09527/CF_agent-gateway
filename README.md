@@ -345,6 +345,10 @@ See [docs/systemd-deployment.md](docs/systemd-deployment.md) for a hardened syst
 installation, the checked-in Worker units, migration ordering, graceful stop behavior,
 and journald operation.
 
+For the current-user Windows AI host compensation for the known Hermes Desktop startup
+conflict, see the
+[Hermes Gateway Watchdog runbook](ops/windows/hermes-gateway-watchdog/README.md).
+
 See [docs/architecture.md](docs/architecture.md) for module boundaries and the implemented
 and planned request flow, and
 [docs/v1-staging-validation.md](docs/v1-staging-validation.md) for the V1 Staging record.
