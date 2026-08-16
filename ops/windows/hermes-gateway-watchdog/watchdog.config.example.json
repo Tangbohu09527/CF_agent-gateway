@@ -1,0 +1,16 @@
+{
+  "SchemaVersion": 1,
+  "HealthUrl": "http://<AI_HOST_LAN_IP>:8642/health",
+  "HermesExecutablePath": "<ABSOLUTE_PATH_TO_HERMES_EXE>",
+  "StartupGraceSeconds": 45,
+  "PollIntervalSeconds": 5,
+  "FailureSettleDelaySeconds": 15,
+  "HealthConnectTimeoutSeconds": 3,
+  "HealthTotalTimeoutSeconds": 5,
+  "GatewayStartTimeoutSeconds": 30,
+  "MaximumRestartBackoffSeconds": 60,
+  "RecoveryVerificationTimeoutSeconds": 45,
+  "RequiredConsecutiveHealthyChecks": 3,
+  "LogMaxBytes": 5242880,
+  "LogRetentionCount": 5
+}
