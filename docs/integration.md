@@ -233,7 +233,7 @@ ambiguous external result must be reconciled before automatic stale reclaim.
 Within the resident Worker, a degraded returned `PollResult` and a thrown non-fatal cycle
 exception increment the same consecutive-failure count and use exponential delay capped by
 `runtime.polling_retry_max_seconds`. Only a healthy returned result resets the count.
-Missing required credentials, invalid configuration, a fresh competing resident lease, or
+Missing required credentials, invalid configuration, a fresh competing polling lease, or
 disabled polling stops the Worker.
 
 ## AI execution-node relationship

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from threading import Event, Lock, Thread
 from uuid import uuid4
@@ -105,13 +106,30 @@ class DatabaseWorkerStatusReporter:
 
             self._heartbeat_stop.clear()
             self._lease_lost.clear()
-            heartbeat_thread = Thread(
-                target=self._heartbeat_loop,
-                name=f"{self._worker_name}-heartbeat",
-                daemon=True,
-            )
-            self._heartbeat_thread = heartbeat_thread
-            heartbeat_thread.start()
+            try:
+                heartbeat_thread = Thread(
+                    target=self._heartbeat_loop,
+                    name=f"{self._worker_name}-heartbeat",
+                    daemon=True,
+                )
+                self._heartbeat_thread = heartbeat_thread
+                heartbeat_thread.start()
+            except Exception:
+                self._heartbeat_thread = None
+                self._heartbeat_stop.set()
+                with suppress(Exception):
+                    if self._session_factory is not None and not self._lease_lost.is_set():
+                        self._update_owned(
+                            state="stopped",
+                            heartbeat_at=self._now(),
+                        )
+                engine = self._engine
+                self._session_factory = None
+                self._engine = None
+                with suppress(Exception):
+                    if engine is not None:
+                        engine.dispose()
+                raise
 
     def stop(self) -> None:
         with self._lifecycle_lock:

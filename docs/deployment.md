@@ -45,7 +45,7 @@ No combined production topology is supplied or validated.
 | Worker Compose service or service-manager unit | Not implemented | Not applicable |
 | One-time hardening SQL migration | SQLite and PostgreSQL scripts implemented; no automatic runner or rollback | SQLite baseline upgrade automated; live PostgreSQL unverified |
 | Automated migration, backup, restore, and rollback | Planned; not implemented | Not applicable |
-| Singleton resident Worker lease and stale takeover | Implemented | Automated tests; production failover remains unverified |
+| Singleton polling lease and stale takeover | Implemented for resident and one-cycle entry points | Automated tests; production failover remains unverified |
 | Message API bearer authentication | Implemented and default-on | Automated tests |
 | Production TLS, rate limiting, monitoring, and alerting | Not implemented in this repository | Deployment-environment responsibility |
 
@@ -73,8 +73,8 @@ No combined production topology is supplied or validated.
 - Pre-provisioned enterprise identity mappings, user access policies, and the Gateway
   policy. The runtime does not create them automatically, and this repository provides no
   administrative HTTP endpoint or CLI for provisioning them.
-- One resident Worker sharing the Gateway database. The singleton lease excludes another
-  resident process, but does not coordinate the one-cycle CLI or a different database.
+- One active polling process for the Gateway database. The singleton lease coordinates the
+  resident Worker and one-cycle CLI, but not processes using a different database.
 
 The outbound HTTP clients set `trust_env=False`; environment proxy variables are not used.
 A direct network route is required. HTTP and HTTPS URLs are accepted, but the clients do
@@ -100,7 +100,7 @@ restart the process after a change.
 | `api.bearer_token_env` | Environment-variable name containing the Message API token; default `CF_AGENT_GATEWAY_API_TOKEN` |
 | `runtime.polling_interval_seconds` | Delay after each completed Worker cycle; must be positive |
 | `runtime.polling_retry_max_seconds` | Maximum exponential delay after consecutive thrown failures or degraded returned results; must be at least the polling interval |
-| `runtime.heartbeat_interval_seconds` | Resident lease heartbeat interval |
+| `runtime.heartbeat_interval_seconds` | Singleton polling-lease heartbeat interval |
 | `runtime.heartbeat_stale_after_seconds` | Heartbeat age after which a replacement Worker may take the lease; must exceed twice the heartbeat interval |
 | `runtime.cycle_stale_after_seconds` | Maximum age for the last successful cycle and any in-progress cycle before readiness degrades; must exceed the heartbeat stale threshold |
 | `wechat.enabled` | Enables the Worker message-adapter path; default `false` |
@@ -245,9 +245,10 @@ orchestration, and must not be presented as the shipped production Worker deploy
 8. Observe the first cycles, database growth, and a synthetic text round trip before
    declaring the environment validated.
 
-Do not use multiple Workers as an HA pool. Resident processes sharing the database are
-fenced by the singleton `wechat` lease, but the one-cycle CLI bypasses that lease and must
-not run alongside the resident Worker.
+Do not use multiple Workers as an HA pool. The resident Worker and one-cycle CLI acquire the
+same singleton `wechat` lease when they share a database. A fresh owner rejects the later
+command; a stale owner can be replaced after `runtime.heartbeat_stale_after_seconds`. While
+the diagnostic command runs, `/health` reports its heartbeat through that same Worker lease.
 
 ## Health checks
 
@@ -278,9 +279,11 @@ automatically restart a running container merely because its health becomes `unh
 
 ### Worker health
 
-The resident Worker persists lease, heartbeat, cycle timestamps, source login state,
-aggregate counters, and the latest sanitized error code. `/health` considers the heartbeat
-stale after `runtime.heartbeat_stale_after_seconds`; it also degrades when the last success
+The singleton Worker status row persists lease, heartbeat, cycle timestamps, source login
+state, aggregate counters, and the latest sanitized error code. Both polling entry points
+update the full cycle state; the one-cycle CLI temporarily owns the same row while
+its diagnostic cycle runs, then marks it stopped on orderly exit. `/health` considers the
+heartbeat stale after `runtime.heartbeat_stale_after_seconds`; it also degrades when the last success
 or current polling cycle exceeds `runtime.cycle_stale_after_seconds`, or when the Worker's
 persisted Hermes/delivery capabilities differ from current HTTP settings. This distinguishes
 a live heartbeat thread from a healthy business loop. Also check supervisor state and JSON
@@ -289,7 +292,7 @@ logs for lifecycle, cycle, checkpoint, message, admission, and operation events.
 The one-cycle CLI exits with:
 
 - `0`: external message session logged in, `failure_codes` empty, and no chat failed;
-- `1`: configuration, network, storage, or message processing failed;
+- `1`: configuration, lease acquisition, network, storage, or message processing failed;
 - `2`: polling disabled, or the external message session not logged in with no reported
   failure.
 
@@ -456,7 +459,7 @@ automated migration and rollback remain **Planned**.
 - public OpenAPI and health metadata exposure, which must be accepted or restricted by the
   deployment edge.
 
-A singleton resident lease and stale takeover are implemented, but service-manager
+A singleton polling lease and stale takeover are implemented, but service-manager
 orchestration, multi-replica HA, and automated failover are **Not implemented**.
 Media/file-byte retrieval or processing and business execution are outside the implemented
 Gateway path; an admitted non-text event can still send its normalized non-empty content

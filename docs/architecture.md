@@ -229,14 +229,16 @@ The Worker is a Gateway-owned runtime process, not an AI execution node.
 - invoke Hermes only for allowed messages when Hermes is enabled, then relay successful
   text responses through the source binding;
 - close channel, Hermes, database-session, and engine resources at cycle end;
-- persist a singleton resident lease, heartbeat, and recent cycle outcome;
+- persist a singleton polling lease, heartbeat, and recent cycle outcome;
 - log aggregate counters and redacted failure codes, apply one capped exponential delay to
   consecutive thrown failures and degraded returned results, and honor `SIGINT`/`SIGTERM`
   after synchronous cleanup.
 
-**Implemented operating model:** resident Workers sharing the database compete for the
-singleton `wechat` lease; a fresh lease rejects a second process and a stale lease can be
-replaced. This does not coordinate the one-cycle CLI or provide automated multi-replica HA.
+**Implemented operating model:** resident Workers and the one-cycle CLI sharing the
+database compete for the singleton `wechat` lease; a fresh lease rejects a second polling
+process and a stale or stopped lease can be replaced. The diagnostic CLI briefly exposes
+its heartbeat through the same Worker status row. This does not provide automated
+multi-replica HA or coordinate processes using different databases.
 
 **Not a Worker responsibility:** serving FastAPI routes, running model inference,
 scheduling AI nodes, interpreting business execution logic, or managing a durable Task
@@ -290,7 +292,7 @@ Gateway distinguishes durable domain state from per-call outcomes:
 | Source conversation to AIThread binding | Gateway database | Implemented and validated, with the group-thread deviation |
 | Hermes session ID on AIThread | Gateway database | Implemented and validated for the V1 text path |
 | Hermes dispatch and delivery records | Gateway database, unique by Message | Implemented with status, attempt count, result/error, and 120-second lease |
-| Resident Worker lease, heartbeat, and cycle status | Gateway database | Implemented for the singleton `wechat` Worker |
+| Polling-process lease, heartbeat, and cycle status | Gateway database | Implemented through the singleton `wechat` Worker row; the one-cycle CLI uses the same lease |
 | `AdmissionOutcome`, `should_create_task`, `HermesDispatchOutcome` | In-process return values | Implemented; not a durable Task lifecycle |
 | Task, Task queue item, and general asynchronous outbox | No storage model | Planned; none implemented |
 

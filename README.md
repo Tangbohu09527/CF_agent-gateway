@@ -135,7 +135,7 @@ dispatch outbox, AI Provider routing, and sender-isolated group threads are not 
 The current per-message Hermes/delivery ledger is not a Task Queue or asynchronous outbox.
 
 **Not implemented:** combined HTTP/Worker orchestration, multi-replica HA/failover beyond
-the singleton resident lease, and service-manager integration. The resident Worker is a
+the singleton polling lease, and service-manager integration. The resident Worker is a
 standalone process and is not embedded in FastAPI.
 
 **Unverified:** production readiness, a live PostgreSQL deployment, target-environment
@@ -246,10 +246,12 @@ or file bytes to Hermes.
 | `python -m cf_agent_gateway.runtime.worker` | Serialized resident polling cycles | Implemented and staging-validated as a standalone process; absent from Compose |
 
 The HTTP and Worker processes are independent. If they run together, they must use the
-same database. `GET /health` reads the Worker's persisted heartbeat and lease. Resident
-Workers that share the database use the singleton `wechat` lease, with stale takeover after
-the configured threshold. This is crash fencing, not multi-replica HA. The one-cycle CLI
-does not acquire that lease and must not run alongside the resident Worker.
+same database. Both polling entry points acquire the database-backed singleton `wechat`
+lease. A fresh owner rejects a resident Worker or one-cycle CLI started against the same
+database; a stopped or stale owner can be replaced after the configured threshold. The
+one-cycle CLI holds the lease only for its diagnostic cycle, and `GET /health` observes its
+heartbeat through the same Worker status record while it runs. This is crash fencing, not
+multi-replica HA.
 
 ## Technology baseline
 

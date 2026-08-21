@@ -32,14 +32,16 @@ WeChat adapter                 Gateway database
 `python -m cf_agent_gateway.runtime.worker` is the resident process. It runs one
 serialized polling cycle at a time and waits `runtime.polling_interval_seconds` between
 completed cycles. `python -m cf_agent_gateway.wechat_poll_once` assembles the same path for
-one finite cycle. The FastAPI process is independent; both processes must use the same
-database when they are deployed together.
+one finite diagnostic cycle. The FastAPI process is independent; HTTP and polling
+processes must use the same database when they are deployed together.
 
-The resident process acquires the database-backed singleton lease named `wechat`. A fresh
-heartbeat prevents a second resident process that shares the database from starting; a
-new process may replace a stale or explicitly stopped lease. This is single-active-process
-exclusion, not multi-replica HA or per-account leader election. The one-cycle command does
-not acquire the resident lease and must not run beside the resident Worker.
+Both polling entry points acquire the database-backed singleton lease named `wechat`. A
+fresh heartbeat prevents either a second resident process or the one-cycle CLI from
+starting against the same database; a new owner may replace a stale or explicitly stopped
+lease using `runtime.heartbeat_stale_after_seconds`. The CLI marks the same lease stopped
+after its finite cycle. While it runs, `GET /health` observes that diagnostic process through
+the same Worker lease and heartbeat record. This is single-active-process exclusion, not
+multi-replica HA or per-account leader election.
 
 ## Message flow
 
@@ -165,7 +167,7 @@ three responsibilities, not three executables in this repository:
 
 | Responsibility | Current execution model |
 | --- | --- |
-| WeChat polling | Resident `runtime.worker` process |
+| WeChat polling | Resident `runtime.worker` process, or the lease-protected one-cycle diagnostic CLI |
 | Admission and Hermes dispatch | Inline, once per delivered inbound message |
 | WeChat response delivery | Inline, immediately after a successful Hermes response |
 
@@ -190,8 +192,8 @@ readiness. Its component set covers:
 
 - `database {status}`: a live database query;
 - `worker {status,state,heartbeat_at,last_cycle_started_at,last_success_at,...}`:
-  freshness of the resident heartbeat and business cycle, plus agreement between persisted
-  Worker Hermes/delivery capabilities and current settings;
+  freshness of the current singleton polling owner's heartbeat and business cycle, plus
+  agreement between persisted Worker Hermes/delivery capabilities and current settings;
 - `queue {status,mode,in_progress,stale,failed,missing}`: the `inline_durable` execution
   model and combined dispatch/delivery backlog, including successful dispatches with no
   delivery record;
@@ -222,8 +224,8 @@ WeChat-to-Hermes-to-WeChat round trip succeeds. See
   retry boundary.
 - A supervisor is still required to restart a crashed resident Worker. This repository
   does not ship a systemd unit, Kubernetes deployment, or Worker Compose service.
-- The singleton lease applies only to resident Workers sharing the same database. It does
-  not coordinate the one-cycle CLI or processes using different databases.
+- The singleton lease coordinates resident Workers and the one-cycle CLI when they share
+  the same database. It does not coordinate processes using different databases.
 - Reviewed one-time hardening SQL exists for SQLite and PostgreSQL, with an automated
   SQLite baseline-upgrade test. A migration runner, rollback automation, live PostgreSQL
   migration validation, backup/restore, and disaster-recovery automation are not
@@ -236,8 +238,8 @@ WeChat-to-Hermes-to-WeChat round trip succeeds. See
   evicts it, the bounded operation recovery sweep has no persisted admission decision from
   which to reconstruct the missing dispatch.
 - Dispatch claims are unique per Message, but there is no durable AIThread-scoped lease
-  across different Messages. The singleton resident Worker and its ownership guards are
-  the current serialization boundary; the one-cycle CLI or writers using another database
+  across different Messages. The shared singleton polling lease and its ownership guards
+  are the current serialization boundary for one database; writers using another database
   must not dispatch concurrently into the same Hermes thread.
 - Stable server-message identity deduplicates replay across session resets. When it is
   absent, the generation-scoped `local:v2` fallback isolates local IDs after a detected

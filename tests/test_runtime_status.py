@@ -13,6 +13,7 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
+from cf_agent_gateway.runtime import status as runtime_status
 from cf_agent_gateway.runtime.errors import WechatRuntimeDisabledError
 from cf_agent_gateway.runtime.models import RuntimeWorkerStatus
 from cf_agent_gateway.runtime.status import (
@@ -152,6 +153,70 @@ def test_stopped_worker_can_restart_with_a_new_lease(tmp_path: Path) -> None:
         assert status.state == "starting"
     finally:
         second.stop()
+
+
+def test_heartbeat_thread_start_failure_releases_lease_and_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = database_url(tmp_path)
+    clock = MutableClock(datetime(2026, 8, 21, 9, 0, tzinfo=UTC))
+    start_error = RuntimeError("controlled heartbeat thread start failure")
+
+    class StartFailingThread:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def start(self) -> None:
+            raise start_error
+
+    failed_reporter = reporter(url, clock)
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_status, "Thread", StartFailingThread)
+        with pytest.raises(RuntimeError) as caught:
+            failed_reporter.start()
+
+    assert caught.value is start_error
+    assert read_status(url).state == "stopped"
+    assert failed_reporter._heartbeat_thread is None
+    assert failed_reporter._session_factory is None
+    assert failed_reporter._engine is None
+
+    replacement = reporter(url, clock)
+    replacement.start()
+    try:
+        status = read_status(url)
+        assert status.instance_id == replacement.instance_id
+        assert status.state == "starting"
+    finally:
+        replacement.stop()
+
+
+def test_reporter_can_restart_after_heartbeat_thread_start_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = database_url(tmp_path)
+    clock = MutableClock(datetime(2026, 8, 21, 9, 0, tzinfo=UTC))
+    status_reporter = reporter(url, clock)
+
+    class StartFailingThread:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def start(self) -> None:
+            raise RuntimeError("controlled heartbeat thread start failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_status, "Thread", StartFailingThread)
+        with pytest.raises(RuntimeError):
+            status_reporter.start()
+
+    status_reporter.start()
+    try:
+        assert read_status(url).instance_id == status_reporter.instance_id
+    finally:
+        status_reporter.stop()
 
 
 def test_cycle_status_is_persisted_for_health_checks(tmp_path: Path) -> None:

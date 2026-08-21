@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.config import (
@@ -20,6 +21,7 @@ from cf_agent_gateway.config import (
 from cf_agent_gateway.database import (
     create_database_engine,
     create_database_session_factory,
+    get_database_session,
     initialize_database,
 )
 from cf_agent_gateway.gateway.app import create_app
@@ -311,6 +313,54 @@ def test_health_route_returns_503_for_enabled_runtime_without_worker() -> None:
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
     assert response.json()["components"]["worker"]["status"] == "degraded"
+
+
+class FailingDatabaseSession:
+    def __init__(self) -> None:
+        self.rollback_calls = 0
+
+    def get_bind(self) -> SimpleNamespace:
+        return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    def execute(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OperationalError(
+            "SELECT set_config('statement_timeout', :timeout, true)",
+            {},
+            RuntimeError("controlled database connection failure"),
+        )
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
+def test_database_sql_failure_degrades_health_and_returns_503() -> None:
+    settings = Settings(database=DatabaseSettings(url="sqlite+pysqlite:///:memory:"))
+    failing_session = FailingDatabaseSession()
+
+    result = check_runtime_health(
+        failing_session,  # type: ignore[arg-type]
+        settings,
+        clock=lambda: NOW,
+    )
+
+    assert result.status == "degraded"
+    assert result.components.database.status == "degraded"
+    assert failing_session.rollback_calls == 1
+
+    app = create_app(settings)
+
+    def failed_database_dependency() -> Iterator[FailingDatabaseSession]:
+        yield failing_session
+
+    app.dependency_overrides[get_database_session] = failed_database_dependency
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["components"]["database"]["status"] == "degraded"
+    assert failing_session.rollback_calls == 2
 
 
 @pytest.mark.parametrize(

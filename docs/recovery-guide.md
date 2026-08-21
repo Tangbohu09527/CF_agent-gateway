@@ -23,8 +23,8 @@ The checkpoint, Message, workspace/thread binding, operation ledger, and worker 
 state are persisted. The process itself owns no queue that must be reconstructed in memory.
 
 1. Stop the deployment supervisor from immediately starting another copy.
-2. Confirm no one-cycle command or second resident Worker is running against the same
-   Gateway database.
+2. Confirm the shared singleton lease is not freshly owned by a one-cycle command or second
+   resident Worker against the same Gateway database.
 3. Capture logs, `/health`, the affected checkpoint, and dispatch/delivery operation rows.
 4. Correct a fatal cause such as invalid configuration, an incompatible database schema, a
    missing credential variable, or deterministic client-construction failure. Correct
@@ -35,8 +35,9 @@ state are persisted. The process itself owns no queue that must be reconstructed
    python -m cf_agent_gateway.runtime.worker
    ```
 
-6. If the former process was killed, wait for or explicitly verify expiry of its durable
-   resident lease before replacement. Do not bypass a fresh lease.
+6. If the former process was killed, wait for or explicitly verify expiry of its shared
+   singleton lease before replacement. Both polling entry points reject a fresh owner and
+   may replace a stale one using the configured threshold.
 7. Confirm a fresh worker heartbeat and a completed cycle in `/health` and JSON logs.
 8. Verify that completed per-message operations were not repeated and that failed or stale
    work followed the expected retry path.

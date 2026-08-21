@@ -8,16 +8,17 @@ failed operation: Hermes or WeChat may already have accepted an earlier request.
 
 1. Record the approximate event time, source account, conversation, and the source message
    ID or `localId`. Do not paste message content or credentials into an incident ticket.
-2. Confirm that exactly one resident Worker is intended to own the shared Gateway
-   database.
+2. Confirm that exactly one polling process is intended to own the shared Gateway database.
 3. Read `GET /health` and note every non-healthy component, not only top-level status.
 4. Search JSON logs across HTTP and Worker processes for the same account, conversation,
    source message ID, and resulting Gateway `message_id`.
 5. Decide which boundary was last proven: adapter polling, checkpoint, Message Store,
    admission, Hermes dispatch, or WeChat delivery.
 
-Use the one-cycle command only after stopping the resident Worker that shares its database.
-It performs real work and can recover, dispatch, or send a reply:
+The one-cycle command acquires the same singleton `wechat` lease as the resident Worker. A
+fresh owner causes it to fail; a stale owner can be replaced after the configured threshold.
+While the command runs, `/health` shows its heartbeat through the same Worker status row. It
+performs real work and can recover, dispatch, or send a reply:
 
 ```bash
 python -m cf_agent_gateway.wechat_poll_once
@@ -238,12 +239,12 @@ an expired lease does not prove that WeChat rejected the original send.
 | --- | --- |
 | No process and stale/missing heartbeat | Inspect the supervisor exit code and `worker failed`; correct fatal configuration or credentials, then start one instance after the stale threshold |
 | Process exists but heartbeat is stale | Capture a stack/process diagnostic, inspect database and external-call latency, then perform a controlled restart |
-| `worker_lease_held` at startup | A fresh resident lease already exists; locate that process instead of starting another copy |
+| `worker_lease_held` at startup | A fresh singleton lease owned by a resident or one-cycle process already exists; locate that process instead of starting another copy |
 | Repeated thrown cycle errors | Fix the named failure; it increments the shared failure count and delay up to `runtime.polling_retry_max_seconds` |
 | Repeated degraded `PollResult` | Fix the conversation/stage failure; degraded results use the same capped exponential backoff as thrown non-fatal failures |
 | One conversation repeatedly fails | Use its `conversation_id` and failed `local_id`; later messages in that conversation wait behind the failure for that cycle |
 | Growing failed/stale operation count | Investigate the external system and ambiguous side effects before reclaiming operations |
-| Multiple pollers observed | Stop one-cycle or differently configured extras; the resident lease coordinates only processes sharing its database |
+| Multiple pollers observed | Same-database resident and one-cycle processes should be fenced by the shared lease; look for different databases, an older binary, or lease-loss handling before stopping extras |
 
 ## Evidence to preserve
 

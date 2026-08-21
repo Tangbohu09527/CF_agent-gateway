@@ -328,6 +328,7 @@ def test_reverse_api_order_reaches_sink_in_numeric_local_id_order(
 
 def test_messages_at_or_below_checkpoint_are_not_delivered_again(
     checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     checkpoint_store.initialize(
         source_account_id=ACCOUNT_ID,
@@ -337,14 +338,38 @@ def test_messages_at_or_below_checkpoint_are_not_delivered_again(
     client = FakeWechatClient(messages={CHAT_ID: [raw_message(2), raw_message(1)]})
     sink = RecordingSink()
 
-    result = WechatPollingService(
-        client, checkpoint_store, sink, bootstrap_mode="backfill"
-    ).poll_once()
+    with caplog.at_level(
+        logging.INFO,
+        logger="cf_agent_gateway.adapters.wechat.polling_service",
+    ):
+        result = WechatPollingService(
+            client, checkpoint_store, sink, bootstrap_mode="backfill"
+        ).poll_once()
 
     assert sink.attempts == []
     assert result.messages_processed == 0
     assert result.messages_skipped_by_checkpoint == 2
     assert result.chats_succeeded == 1
+    skipped_fields = [
+        record.fields
+        for record in caplog.records
+        if record.name == "cf_agent_gateway.adapters.wechat.polling_service"
+        and record.getMessage() == "message skipped"
+    ]
+    assert skipped_fields == [
+        {
+            "reason": "checkpoint",
+            "conversation_id": CHAT_ID,
+            "local_id": 1,
+            "checkpoint": 2,
+        },
+        {
+            "reason": "checkpoint",
+            "conversation_id": CHAT_ID,
+            "local_id": 2,
+            "checkpoint": 2,
+        },
+    ]
 
 
 def test_checkpoint_regression_replays_visible_messages(
