@@ -1,5 +1,21 @@
 # Architecture
 
+## Status model
+
+Architecture statements use the repository-wide status terms:
+
+- **Implemented (已实现)** means current code or configuration exists.
+- **Validated (已验证)** means automated or recorded staging evidence exists for the
+  stated boundary.
+- **Unverified (未验证)** means the path exists or is configurable but lacks the stated
+  environment evidence.
+- **Planned (规划)** means the capability is a target and has no current implementation.
+
+An item can be implemented but unverified in production. The historical V1 Staging record
+is text-only and does not establish production readiness.
+**Not implemented** is used for an absent capability when this architecture makes no plan
+claim; it is never interchangeable with Unverified or Planned.
+
 ## Position
 
 CF_agent-gateway is an enterprise AI message gateway. It sits between message
@@ -7,24 +23,62 @@ entry points and Hermes; it is neither a channel-specific bot nor an AI runtime.
 
 ```text
 Employee WeChat
-    -> agent-wechat
+    -> external message adapter
     -> CF_agent-gateway Worker
     -> Hermes API
+    -> AI execution nodes (opaque to Gateway)
+    -> Hermes API
     -> CF_agent-gateway response relay
-    -> agent-wechat outbound sender
+    -> external message adapter
     -> Employee WeChat
+
+CF_agent-gateway HTTP API
+    -> Gateway database
 ```
 
 The V1 Staging validation covers this text-message round trip. It does not turn
-`agent-wechat` or Hermes into Gateway-owned components.
+the external message adapter, Hermes, or any AI execution node into a Gateway-owned
+component.
+
+## Gateway boundary
+
+**Implemented inside Gateway:**
+
+- configuration validation and environment-backed secret lookup;
+- the Gateway side of inbound/outbound message-adapter HTTP contracts;
+- polling checkpoints, normalization, persist-first Message Store ingestion, and
+  idempotency;
+- enterprise identity resolution, access-policy evaluation, admission, Employee Workspace,
+  AIThread, source binding, and Hermes session binding;
+- synchronous Hermes dispatch for eligible non-empty persisted content and text response
+  relay to the source account and conversation;
+- the store/query HTTP API, structured process logs, and shallow HTTP liveness.
+
+**Outside Gateway ownership:**
+
+- employee channel clients and external message-adapter implementation or operation;
+- Hermes internals, inference, execution-node discovery, routing, scheduling, and health;
+- business execution logic and external domain systems;
+- deployment-environment TLS, network access control, secret storage, log collection,
+  alerting, and database service operation.
+
+**Planned inside Gateway:** durable Task records and lifecycle, Task Queue, Context Builder,
+provider/node routing, a durable dispatch outbox, formal migrations, and sender-isolated
+group threads.
+
+The current `should_create_task` field is an admission result only. It is not persisted and
+does not create, queue, execute, retry, cancel, or report a Task.
 
 ## Request flow and status
 
-The implemented WeChat polling path is:
+The following Worker path is **Implemented** and covered by automated tests. The recorded
+V1 Staging evidence **Validated** only the explicitly listed text-round-trip subset; it did
+not exercise every bootstrap, concurrency, rotation, or failure branch below. Production
+behavior remains **Unverified**.
 
-1. Runtime configuration enables WeChat and names the environment variable that
-   contains the agent-wechat token.
-2. `AgentWechatClient` checks authentication and reads visible chats and messages.
+1. Runtime configuration enables polling and names the environment variable that contains
+   the external message-adapter token.
+2. Gateway's adapter client checks authentication and reads visible chats and messages.
 3. `WechatPollingService` applies the durable checkpoint. A first `latest` poll
    atomically checkpoints visible history; `backfill` processes history by ascending
    `localId`. Later polls deliver only messages above the checkpoint.
@@ -46,7 +100,8 @@ The implemented WeChat polling path is:
 8. Unauthorized messages remain stored without a Workspace or AIThread. Authorized
    messages create or reuse an employee Workspace, then resolve one AIThread for the
    source account and physical conversation. Under the current V1 implementation, a group
-   uses one thread for the whole room rather than one thread per sender. No Task is created.
+   uses one thread for the whole room rather than one thread per sender. `should_create_task`
+   is returned for the admitted request, but no Task is created or persisted.
 9. When Hermes is enabled, the dispatch service reloads the persisted message and verifies
    its source binding, AIThread, Workspace, and enterprise identity before calling
    `HermesClient.chat`. Before the first call, an unbound AIThread atomically claims a
@@ -59,8 +114,17 @@ The implemented WeChat polling path is:
    `source_account_id`, and invokes `HermesResponseHandler`. The handler validates the
    local AIThread and exact `ThreadSourceBinding`, verifies the sender's source account,
    and sends the assistant text to the bound conversation. `WechatHttpMessageSender`
-   calls `POST /api/messages/send` with `{"chatId": "...", "text": "..."}`; `content`
-   is not the external API field.
+   calls the external `POST /api/messages/send` contract with
+   `{"chatId": "...", "text": "..."}`; `content` is not the external API field.
+
+The HTTP API follows a separate, shorter path. `POST /internal/messages` validates and
+persists a normalized event, then returns its Message ID. It does not invoke admission,
+Workspace/AIThread resolution, Task creation, Hermes dispatch, or response delivery.
+
+The current dispatch service checks that persisted `content` is non-empty but does not
+require `message_type` to be `text`. An admitted non-system event of another type can
+therefore send its normalized content string to Hermes. Only the text path is validated;
+attachment bytes are not sent.
 
 Delivery of eligible non-self messages from polling to the sink is at least once. A sink
 or checkpoint failure can cause redelivery; Message Store idempotency and admission reuse
@@ -87,17 +151,34 @@ This whole-room behavior is a known implementation deviation. Recording it here 
 change the target design. Correcting it requires a reviewed code, constraint, and data
 migration change outside this documentation update.
 
-The next planned stages include Context Builder, Task Queue, provider routing, durable
-dispatch state, and media/file workflows. Image understanding, image attachment delivery,
-file-message processing, OCR, archive or ZIP parsing, enterprise knowledge-base access,
-and automatic Skill execution are not implemented by the V1 text path.
+The next planned Gateway stages include Context Builder, Task Queue, provider routing,
+and durable dispatch state. Media/file processing and business execution are outside the
+implemented V1 text path and are not specified by this document.
+
+## External-system relationships
+
+Only Gateway-owned behavior is specified here. External implementation details are outside
+this architecture.
+
+| External party | Gateway-side relationship | Gateway does not own | Status |
+| --- | --- | --- | --- |
+| Message adapter | Authenticated HTTP client calls for session status, chat/message polling, and text response delivery; Gateway normalizes returned facts and owns checkpoints | Channel login/session implementation, client UI, or adapter operations | Implemented; recorded V1 text path validated |
+| Hermes | Bearer-authenticated `POST /v1/chat/completions`, request/response validation, and persisted `X-Hermes-Session-Id` binding | Hermes internals, model execution, node selection, tools, or capacity | Implemented; recorded V1 text path validated |
+| AI execution nodes | No direct Gateway connection; reachable only behind the configured Hermes endpoint | Registration, discovery, heartbeat, load balancing, placement, execution, and scaling | Direct connection unimplemented; general routing planned |
+| Database | Gateway owns its schema use, transactions, idempotency, and local state invariants | External PostgreSQL service availability, backup infrastructure, replication, and failover | SQLite behavior automated-test validated; live target databases unverified |
+| Deployment edge | Gateway exposes HTTP on its configured host/port | TLS termination, firewalling, API gateway policy, secret storage, log retention, and alerting | Deployment responsibility; not implemented here |
+
+The supplied FastAPI routes contain no repository-provided authentication or TLS layer.
+They must not be exposed directly to an untrusted network. A trusted network boundary or
+authenticated reverse proxy is a deployment requirement, not a Gateway implementation
+claim.
 
 ## Package boundaries
 
 | Package | Responsibility | Implementation status |
 | --- | --- | --- |
-| `gateway` | HTTP transport and service lifecycle | Foundation implemented |
-| `adapters.wechat` | agent-wechat client, normalization, polling, outbound protocol | Implemented |
+| `gateway` | HTTP transport and service lifecycle | Implemented |
+| `adapters.wechat` | Message-adapter client, normalization, polling, outbound protocol | Implemented |
 | `adapters.wechat.polling_store` | Durable account/conversation checkpoints | Implemented |
 | `runtime` | WeChat cycle assembly, resident scheduling, and cleanup | Implemented |
 | `ingestion` | Persist-first admission and polling-compatible sinks | Implemented |
@@ -109,12 +190,35 @@ and automatic Skill execution are not implemented by the V1 text path.
 | `admission` | Identity/access orchestration and admission outcomes | Implemented |
 | `workspace` | Employee Workspace and AIThread provisioning/reuse | Implemented |
 | `hermes` | OpenAI-compatible client, dispatch, and response routing | Implemented |
-| `context` | Context construction | Reserved |
-| `task.model` | Task model | Reserved |
-| `task.queue` | Task scheduling and delivery | Reserved |
-| `provider.router` | Provider registry and routing | Reserved |
+| `context` | Context construction | Planned; package reserved only |
+| `task.model` | Task model and lifecycle | Planned; package reserved only |
+| `task.queue` | Task scheduling and delivery | Planned; package reserved only |
+| `provider.router` | Provider/node registry and routing | Planned; package reserved only |
 
-## WeChat runtime boundary
+## Worker responsibilities and runtime boundary
+
+The Worker is a Gateway-owned runtime process, not an AI execution node.
+
+**Implemented responsibilities:**
+
+- load and validate runtime configuration and required environment secrets;
+- run non-overlapping finite polling cycles and maintain durable source-account and
+  conversation checkpoints;
+- filter raw self-originated events before normalization and admission;
+- create one isolated admission/dispatch database session per delivered message;
+- invoke Hermes only for allowed messages when Hermes is enabled, then relay successful
+  text responses through the source binding;
+- close channel, Hermes, database-session, and engine resources at cycle end;
+- log aggregate counters, log a redacted error code for thrown cycle errors, wait the
+  configured interval, and honor `SIGINT`/`SIGTERM` after synchronous cleanup.
+
+**Implemented operating assumption:** only one active poller handles a given source
+account. Leader election, leases, multiple-replica coordination, and automated failover
+are **Not implemented**; multi-Worker operation is not a supported validation target.
+
+**Not a Worker responsibility:** serving FastAPI routes, running model inference,
+scheduling AI nodes, interpreting business execution logic, or managing a durable Task
+lifecycle.
 
 `run_wechat_poll_once` performs one finite cycle. It validates that WeChat is enabled,
 reads the token from the environment variable named by `wechat.token_env`, and, when
@@ -129,29 +233,53 @@ admission, or Hermes dispatch path.
 Each successful Hermes response gets a sender whose account comes from the persisted
 message's `source_account_id`; the sender is closed after delivery. The channel client,
 optional Hermes client, checkpoint session, and database engine are closed after the
-cycle, including failure paths. Runtime and CLI output is restricted to aggregate status
-and failure codes; tokens, authorization headers, full message bodies, cookies, and Base64
-file data are outside the output boundary.
+cycle, including failure paths. The one-cycle CLI outputs `source_account_id`, aggregate
+status, and `failure_codes`; the account ID is sensitive operational metadata. Resident
+Worker success logs contain aggregate counters, while thrown cycle errors include one
+redacted error code. Neither output includes tokens, authorization headers, full message
+bodies, cookies, or Base64 file data.
 
 `runtime.worker` serially invokes that finite runtime, then waits for the configured
 `runtime.polling_interval_seconds` before the next cycle. A shared stop event makes the
 wait interruptible; the module CLI maps `SIGINT` and `SIGTERM` to that event. Poll cycles
-never overlap. Ordinary cycle failures are logged with a redacted code and retried, while
-permanent configuration errors stop the worker.
+never overlap. Thrown cycle failures are logged with a redacted code and retried, while
+failures returned inside a `PollResult` appear only as aggregate resident-log counters.
+Permanent configuration errors stop the Worker.
 
-The worker is a standalone process. The V1 text round trip has been validated on Debian 13
-with Dockerized `agent-wechat`, a Gateway Worker, and a Hermes API on the Windows AI host.
+The Worker is a standalone process. The V1 text round trip has been validated on Debian 13
+with an external message adapter, a Gateway Worker, and a Hermes API on the Windows AI host.
 There is no FastAPI background worker, service-manager integration, task queue, or
 production automated deployment. Staging validation does not establish production
 readiness. See [v1-staging-validation.md](v1-staging-validation.md).
 
-## Persistence direction
+## State management
 
-SQLAlchemy 2.x provides the persistence boundary. SQLite is the phase-one
-database and PostgreSQL is supported by using a
-`postgresql+psycopg://...` database URL. Domain packages must not depend on a
-specific SQL dialect. Database-specific migrations will live in `migrations/`
-after a formal migration system is introduced.
+Gateway distinguishes durable domain state from per-call outcomes:
+
+| State | Storage/lifetime | Current status |
+| --- | --- | --- |
+| Conversation, Message, and attachment metadata | Gateway database | Implemented; Message behavior validated |
+| Polling checkpoint by source account and conversation | Gateway database | Implemented and validated |
+| Enterprise identity and source identity mapping | Gateway database | Implemented and validated; no management HTTP/CLI exists |
+| User and Gateway access policies | Gateway database | Implemented and validated; must be provisioned before runtime |
+| Employee Workspace and AIThread status | Gateway database | Implemented and validated |
+| Source conversation to AIThread binding | Gateway database | Implemented and validated, with the group-thread deviation |
+| Hermes session ID on AIThread | Gateway database | Implemented and validated for the V1 text path |
+| `AdmissionOutcome`, `should_create_task`, `HermesDispatchOutcome` | In-process return values | Implemented but not durable task or delivery state |
+| Task, queue item, dispatch attempt, response-delivery status, outbox | No storage model | Planned; none implemented |
+
+The runtime never creates identity mappings or access policies automatically. The current
+repository also exposes no administrative API or CLI for provisioning them; a deployable
+environment must arrange that prerequisite outside the runtime, and that operating process
+is **Unverified** by this repository.
+
+SQLAlchemy 2.x provides the persistence boundary. SQLite is the phase-one default.
+PostgreSQL URL parsing and the Psycopg driver path are **Implemented** and configuration-
+tested, but a live PostgreSQL deployment and failover topology are **Unverified**.
+
+Use a `postgresql+psycopg://...` database URL to select the implemented driver path.
+Domain packages must not depend on a specific SQL dialect. Database-specific migrations
+and a formal migration system are **Planned** and not implemented.
 
 Conversations are unique by `(source, source_account_id, conversation_id)`, and
 messages reference conversations through the same three-column scope. Conversation
