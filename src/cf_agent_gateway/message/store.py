@@ -8,6 +8,10 @@ from cf_agent_gateway.message.errors import ConversationTypeConflictError
 from cf_agent_gateway.message.models import Attachment, Conversation, Message
 from cf_agent_gateway.message.schemas import MessageEvent
 
+DEFAULT_CONVERSATION_MESSAGE_LIMIT = 100
+MAX_CONVERSATION_MESSAGE_LIMIT = 100
+MAX_CONVERSATION_MESSAGE_OFFSET = 100_000
+
 
 class MessageStore:
     def __init__(self, session: Session) -> None:
@@ -137,8 +141,18 @@ class MessageStore:
         return self._session.scalar(statement)
 
     def list_for_conversation(
-        self, *, source: str, source_account_id: str, conversation_id: str
+        self,
+        *,
+        source: str,
+        source_account_id: str,
+        conversation_id: str,
+        limit: int = DEFAULT_CONVERSATION_MESSAGE_LIMIT,
+        offset: int = 0,
     ) -> list[Message]:
+        if isinstance(limit, bool) or not 1 <= limit <= MAX_CONVERSATION_MESSAGE_LIMIT:
+            raise ValueError(f"limit must be between 1 and {MAX_CONVERSATION_MESSAGE_LIMIT}")
+        if isinstance(offset, bool) or not 0 <= offset <= MAX_CONVERSATION_MESSAGE_OFFSET:
+            raise ValueError(f"offset must be between 0 and {MAX_CONVERSATION_MESSAGE_OFFSET}")
         statement = (
             select(Message)
             .where(
@@ -148,6 +162,8 @@ class MessageStore:
             )
             .options(selectinload(Message.attachments))
             .order_by(Message.timestamp, Message.id)
+            .limit(limit)
+            .offset(offset)
         )
         return list(self._session.scalars(statement))
 

@@ -15,11 +15,34 @@ def test_runtime_settings_defaults() -> None:
     settings = RuntimeSettings()
 
     assert settings.polling_interval_seconds == 3.0
+    assert settings.polling_retry_max_seconds == 60.0
+    assert settings.heartbeat_interval_seconds == 5.0
+    assert settings.heartbeat_stale_after_seconds == 30.0
+    assert settings.cycle_stale_after_seconds == 300.0
 
 
 def test_runtime_settings_rejects_interval_above_platform_wait_limit() -> None:
     with pytest.raises(ValueError, match="runtime.polling_interval_seconds"):
         RuntimeSettings(polling_interval_seconds=TIMEOUT_MAX * 2)
+
+
+def test_runtime_settings_rejects_retry_max_below_polling_interval() -> None:
+    with pytest.raises(
+        ValueError,
+        match="runtime.polling_retry_max_seconds must be greater than or equal",
+    ):
+        RuntimeSettings(
+            polling_interval_seconds=10,
+            polling_retry_max_seconds=5,
+        )
+
+
+def test_runtime_settings_rejects_cycle_threshold_below_heartbeat_threshold() -> None:
+    with pytest.raises(ValueError, match="runtime.cycle_stale_after_seconds must exceed"):
+        RuntimeSettings(
+            heartbeat_stale_after_seconds=30,
+            cycle_stale_after_seconds=30,
+        )
 
 
 def test_wechat_settings_defaults() -> None:
@@ -99,6 +122,25 @@ hermes:
         api_key_env="TEST_HERMES_API_KEY",
         model="test-hermes-agent",
     )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "polling_retry_max_seconds",
+        "heartbeat_interval_seconds",
+        "heartbeat_stale_after_seconds",
+        "cycle_stale_after_seconds",
+    ],
+)
+def test_load_settings_rejects_invalid_runtime_timeouts(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"runtime:\n  {field_name}: 0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="runtime timeout values"):
+        load_settings(config_path)
 
 
 def test_load_settings_rejects_invalid_port(tmp_path: Path) -> None:
@@ -216,6 +258,40 @@ def test_load_settings_rejects_plaintext_hermes_api_key_without_leaking_it(
         load_settings(config_path)
 
     assert api_key not in str(error.value)
+
+
+def test_load_settings_rejects_plaintext_wechat_token_without_leaking_it(
+    tmp_path: Path,
+) -> None:
+    token = "plaintext-token-that-must-not-leak"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"wechat:\n  token: {token}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="wechat.token") as error:
+        load_settings(config_path)
+
+    assert token not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "yaml_content",
+    [
+        "unknown_section:\n  enabled: true\n",
+        "runtime:\n  polling_intervl_seconds: 3\n",
+    ],
+)
+def test_load_settings_rejects_unknown_keys(
+    tmp_path: Path,
+    yaml_content: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml_content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported keys"):
+        load_settings(config_path)
 
 
 def test_yaml_parse_error_does_not_echo_sensitive_source_text(tmp_path: Path) -> None:

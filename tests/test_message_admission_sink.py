@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
@@ -473,6 +474,29 @@ def test_session_factory_sink_preserves_processing_error_when_cleanup_fails() ->
         engine.dispose()
 
 
+def test_session_factory_sink_preserves_success_when_close_cleanup_fails() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    initialize_database(engine)
+    _TrackingSession.created = []
+    factory = sessionmaker(
+        bind=engine,
+        class_=_CleanupFailingSession,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    sink = SessionFactoryMessageStoreAdmissionSink(factory)
+    try:
+        outcome = sink.process(normalized_message())
+
+        assert outcome.message_created is True
+        assert len(_TrackingSession.created) == 1
+        successful_session = _TrackingSession.created[0]
+        assert successful_session.rollback_calls == 0
+        assert successful_session.close_calls == 1
+    finally:
+        engine.dispose()
+
+
 class _RecordingResolver:
     def __init__(self) -> None:
         self.messages: list[PersistedMessageSnapshot] = []
@@ -837,6 +861,33 @@ def test_sink_handle_returns_none_and_process_returns_outcome(session: Session) 
     assert outcome.message_created is False
     assert outcome.admission.admitted is True
     assert_resource_counts(session, messages=1, workspaces=1, threads=1)
+
+
+def test_ingestion_logs_message_and_admission_correlation_fields(
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    message = normalized_message()
+
+    with caplog.at_level(logging.INFO, logger="cf_agent_gateway.ingestion.service"):
+        outcome = MessageAdmissionService(session).process(message)
+
+    records = [
+        record for record in caplog.records if record.name == "cf_agent_gateway.ingestion.service"
+    ]
+    processed = next(record for record in records if record.message == "message processed")
+    assert processed.fields == {
+        "message_id": str(outcome.message_id),
+        "conversation_id": PRIVATE_CONVERSATION_ID,
+        "source_message_id": message.source_message_id,
+        "message_created": True,
+    }
+    admission = next(record for record in records if record.message == "admission result")
+    assert admission.fields == {
+        "message_id": str(outcome.message_id),
+        "admitted": False,
+        "reason": AdmissionReason.ACCESS_DENIED.value,
+    }
 
 
 class _MissingReadMessageStore:

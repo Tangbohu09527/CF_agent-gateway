@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
-from contextlib import suppress
+from dataclasses import asdict
 from functools import partial
 from typing import Protocol
 
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatClient,
+    PollFailure,
+    PollFailureStage,
     PollResult,
     WechatHttpMessageSender,
     WechatMessageSender,
@@ -30,6 +33,7 @@ from cf_agent_gateway.hermes import (
     HermesDeliveryError,
     HermesDispatchOutcome,
     HermesDispatchService,
+    HermesRecoveryService,
     HermesResponseHandler,
     HermesResponseRelay,
 )
@@ -43,6 +47,24 @@ from cf_agent_gateway.runtime.errors import (
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
 )
+from cf_agent_gateway.runtime.status import WorkerLeaseError
+
+logger = logging.getLogger(__name__)
+
+
+def _best_effort_cleanup(
+    cleanup: Callable[[], None],
+    *,
+    component: str,
+    error_code: str,
+) -> None:
+    try:
+        cleanup()
+    except Exception:
+        logger.warning(
+            "runtime cleanup failed",
+            extra={"fields": {"component": component, "error_code": error_code}},
+        )
 
 
 class ClosableWechatPollingClient(WechatPollingClient, Protocol):
@@ -99,9 +121,11 @@ class _AccountScopedHermesResponseProcessor:
         try:
             HermesResponseHandler(self._session, sender).handle(response)
         finally:
-            # A post-send cleanup failure must not make polling replay the delivered reply.
-            with suppress(Exception):
-                sender.close()
+            _best_effort_cleanup(
+                sender.close,
+                component="wechat_sender",
+                error_code="wechat_sender_close_failed",
+            )
 
 
 def _create_hermes_response_relay(
@@ -124,6 +148,7 @@ def run_wechat_poll_once(
     sender_factory: WechatMessageSenderFactory | None = None,
     engine_factory: Callable[[str], Engine] = create_database_engine,
     environment_reader: Callable[[str], str | None] = os.getenv,
+    lease_guard: Callable[[], None] | None = None,
 ) -> PollResult:
     """Assemble the durable WeChat runtime and execute one finite polling cycle."""
 
@@ -144,6 +169,7 @@ def run_wechat_poll_once(
     checkpoint_session = None
     client: ClosableWechatPollingClient | None = None
     hermes_client: ClosableHermesChatClient | None = None
+    recovery_failure: PollFailure | None = None
     try:
         if hermes_api_key is not None:
             hermes_client_initialization_failed = False
@@ -162,6 +188,7 @@ def run_wechat_poll_once(
         session_factory = create_database_session_factory(engine)
         checkpoint_session = session_factory()
         checkpoint_store = WechatSyncCheckpointStore(checkpoint_session)
+        resolved_sender_factory: WechatMessageSenderFactory | None = None
         if hermes_client is None:
             sink = SessionFactoryMessageStoreAdmissionSink(session_factory)
         else:
@@ -191,33 +218,75 @@ def run_wechat_poll_once(
             client_initialization_failed = True
         if client_initialization_failed:
             raise WechatClientInitializationError()
+        if hermes_client is not None and resolved_sender_factory is not None:
+            recovery = HermesRecoveryService(
+                session_factory,
+                partial(
+                    HermesDispatchService,
+                    client=hermes_client,
+                ),
+                partial(
+                    _AccountScopedHermesResponseProcessor,
+                    sender_factory=resolved_sender_factory,
+                ),
+                lease_guard=lease_guard,
+            ).drain()
+            if recovery.dispatch_candidates or recovery.delivery_candidates:
+                if recovery.dispatch_failed or recovery.delivery_failed:
+                    recovery_failure = PollFailure(
+                        stage=PollFailureStage.RECOVERY,
+                        code="hermes_recovery_failed",
+                    )
+                log_recovery = (
+                    logger.warning
+                    if recovery.dispatch_failed or recovery.delivery_failed
+                    else logger.info
+                )
+                log_recovery(
+                    "Hermes recovery sweep completed",
+                    extra={"fields": asdict(recovery)},
+                )
         polling_service = WechatPollingService(
             client,
             checkpoint_store,
             sink,
             bootstrap_mode=settings.wechat.bootstrap_mode,
+            lease_guard=lease_guard,
         )
         polling_failed = False
         try:
             result = polling_service.poll_once()
+        except WorkerLeaseError:
+            raise
         except Exception:
             polling_failed = True
         if polling_failed:
             raise WechatPollingExecutionError()
+        if recovery_failure is not None:
+            result = result.model_copy(update={"failures": [*result.failures, recovery_failure]})
         return result
     finally:
-        try:
-            if client is not None:
-                client.close()
-        finally:
-            try:
-                if hermes_client is not None:
-                    with suppress(Exception):
-                        hermes_client.close()
-            finally:
-                try:
-                    if checkpoint_session is not None:
-                        checkpoint_session.close()
-                finally:
-                    if engine is not None:
-                        engine.dispose()
+        if client is not None:
+            _best_effort_cleanup(
+                client.close,
+                component="wechat_client",
+                error_code="wechat_client_close_failed",
+            )
+        if hermes_client is not None:
+            _best_effort_cleanup(
+                hermes_client.close,
+                component="hermes_client",
+                error_code="hermes_client_close_failed",
+            )
+        if checkpoint_session is not None:
+            _best_effort_cleanup(
+                checkpoint_session.close,
+                component="checkpoint_session",
+                error_code="checkpoint_session_close_failed",
+            )
+        if engine is not None:
+            _best_effort_cleanup(
+                engine.dispose,
+                component="database_engine",
+                error_code="database_engine_dispose_failed",
+            )

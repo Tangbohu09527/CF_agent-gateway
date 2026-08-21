@@ -43,9 +43,11 @@ No combined production topology is supplied or validated.
 | PostgreSQL engine/driver configuration | Implemented | Configuration-tested only; live deployment unverified |
 | Standalone resident Worker | Implemented | Recorded V1 Staging text path validated |
 | Worker Compose service or service-manager unit | Not implemented | Not applicable |
-| Automated database migration, backup, restore, and rollback | Planned; not implemented | Not applicable |
-| Multi-Worker HA, leader election, or failover | Not implemented | Not applicable |
-| Production TLS, route authentication, monitoring, and alerting | Not implemented in this repository | Deployment-environment responsibility |
+| One-time hardening SQL migration | SQLite and PostgreSQL scripts implemented; no automatic runner or rollback | SQLite baseline upgrade automated; live PostgreSQL unverified |
+| Automated migration, backup, restore, and rollback | Planned; not implemented | Not applicable |
+| Singleton polling lease and stale takeover | Implemented for resident and one-cycle entry points | Automated tests; production failover remains unverified |
+| Message API bearer authentication | Implemented and default-on | Automated tests |
+| Production TLS, rate limiting, monitoring, and alerting | Not implemented in this repository | Deployment-environment responsibility |
 
 ## Environment requirements
 
@@ -54,10 +56,12 @@ No combined production topology is supplied or validated.
 - Docker Engine and the Docker Compose v2 plugin. The repository does not declare minimum
   Docker or Compose versions.
 - Access to the base image and Python package sources on the first uncached build.
-- Host port `8080` available, or an intentionally updated port mapping.
+- Host port `8080` available on loopback. Set `CF_GATEWAY_BIND_ADDRESS` only for an
+  intentionally protected non-loopback bind.
 - Persistent local capacity for the `gateway-data` named volume.
-- A deployment network that does not expose Gateway's unauthenticated HTTP routes directly
-  to untrusted clients.
+- `CF_AGENT_GATEWAY_API_TOKEN` present in the Compose environment for Message API calls.
+  Missing or empty state leaves public health available but makes Message API calls 401.
+- A TLS-terminating, rate-limiting deployment edge before any untrusted client access.
 
 ### Local or standalone Worker deployment
 
@@ -69,11 +73,17 @@ No combined production topology is supplied or validated.
 - Pre-provisioned enterprise identity mappings, user access policies, and the Gateway
   policy. The runtime does not create them automatically, and this repository provides no
   administrative HTTP endpoint or CLI for provisioning them.
-- Exactly one active poller for each source account. Multi-poller coordination is absent.
+- One active polling process for the Gateway database. The singleton lease coordinates the
+  resident Worker and one-cycle CLI, but not processes using a different database.
 
-The HTTP clients set `trust_env=False`; environment proxy variables are not used. A direct
-network route is required. HTTP and HTTPS URLs are accepted, but the code does not enforce
-TLS, configure mTLS, or expose custom CA settings.
+The outbound HTTP clients set `trust_env=False`; environment proxy variables are not used.
+A direct network route is required. HTTP and HTTPS URLs are accepted, but the clients do
+not enforce TLS, configure mTLS, or expose custom CA settings.
+
+**Beta security boundary:** Gateway authenticates all Message API routes with a default-on
+bearer token, but it does not terminate TLS or rate limit callers. Compose binds to loopback
+by default. Keep that binding for local use, and expose an external address only behind a
+TLS-terminating, rate-limiting reverse proxy/API gateway.
 
 ## Configuration
 
@@ -86,7 +96,13 @@ restart the process after a change.
 | `server.host`, `server.port` | HTTP bind address and port; defaults are `0.0.0.0:8080` |
 | `database.url` | Gateway state database; default is `sqlite:///./data/gateway.db` |
 | `logging.level` | JSON stdout log threshold |
+| `api.message_auth_enabled` | Protects all Message API create/get/list routes; default `true` |
+| `api.bearer_token_env` | Environment-variable name containing the Message API token; default `CF_AGENT_GATEWAY_API_TOKEN` |
 | `runtime.polling_interval_seconds` | Delay after each completed Worker cycle; must be positive |
+| `runtime.polling_retry_max_seconds` | Maximum exponential delay after consecutive thrown failures or degraded returned results; must be at least the polling interval |
+| `runtime.heartbeat_interval_seconds` | Singleton polling-lease heartbeat interval |
+| `runtime.heartbeat_stale_after_seconds` | Heartbeat age after which a replacement Worker may take the lease; must exceed twice the heartbeat interval |
+| `runtime.cycle_stale_after_seconds` | Maximum age for the last successful cycle and any in-progress cycle before readiness degrades; must exceed the heartbeat stale threshold |
 | `wechat.enabled` | Enables the Worker message-adapter path; default `false` |
 | `wechat.base_url` | Message-adapter URL reachable from the Worker process |
 | `wechat.bootstrap_mode` | `latest` skips visible history on first checkpoint; `backfill` processes it |
@@ -96,40 +112,55 @@ restart the process after a change.
 | `hermes.api_key_env` | Name of the Hermes API-key environment variable |
 | `hermes.model` | Model value sent in the chat-completion request |
 
-The YAML must contain environment-variable names, never secret values. A literal
-`hermes.api_key` setting is rejected. The supplied Compose service injects only
-`CF_GATEWAY_CONFIG`; it does not inject either integration credential.
+Unknown top-level or section keys are rejected at startup so a typo cannot silently select
+a default. Plaintext `api.bearer_token`, `wechat.token`, and `hermes.api_key` keys are
+also rejected; YAML stores only environment-variable names.
+
+The supplied Compose service passes `CF_GATEWAY_CONFIG` and
+`CF_AGENT_GATEWAY_API_TOKEN` from the host environment; it does not inject the WeChat or
+Hermes integration credentials.
 
 When a Worker runs in a container, `127.0.0.1` means that Worker container. Replace the
 default message-adapter URL with an address reachable from that container. The Hermes URL
 is empty by default and must also be set before enabling Hermes.
 
-The Compose port mapping and healthcheck are fixed at `8080`. If `server.port` changes,
-update both `ports` and the healthcheck URL in the deployment configuration.
+The application listens on container port `8080`, while Compose publishes it to
+`${CF_GATEWAY_BIND_ADDRESS:-127.0.0.1}:8080`. If `server.port` changes, update both the
+container/host port mapping and healthcheck URL. A non-loopback
+`CF_GATEWAY_BIND_ADDRESS` is an explicit exposure decision.
 
 ## Security requirements
 
-The FastAPI application has no repository-provided route authentication or TLS middleware,
-and Compose publishes port 8080 on the host. Keep the service on a trusted network or put
-it behind an authenticated reverse proxy that supplies TLS and access control. This is an
-operator requirement, not an implemented Gateway feature.
+The three Message API routes use a default-on bearer check. Missing configuration, a
+missing header, or a wrong token returns the same HTTP 401 `{"detail":"unauthorized"}` and
+`WWW-Authenticate: Bearer`. `GET /health`, `/openapi.json`, `/docs`, and `/redoc` remain
+public and must be considered when selecting the network boundary.
 
-Store integration credentials in the deployment environment or its secret manager. Do not
-commit secrets, log them, place them in YAML, or include them in backup archives. Gateway
-logs aggregate counters and redacted codes for thrown errors. The one-cycle JSON also emits
-`source_account_id` and `failure_codes`, so treat that output as sensitive operational
-metadata. Log collection, retention, alerting, metrics, and tracing are not supplied by
-this repository.
+Keep `api.message_auth_enabled: true` for deployed services. Explicitly setting it to
+`false` is only appropriate for programmatic tests such as
+`ApiSettings(message_auth_enabled=False)`, or a trusted boundary with separate enforced
+authentication. Never disable it on an untrusted listener.
+
+Gateway does not terminate TLS, rate limit clients, impose an aggregate HTTP request-body
+cap, or offer keyset pagination. Compose's loopback default reduces exposure but does not
+replace those controls when the service is published externally.
+
+Store API and integration credentials in the deployment environment or its secret manager.
+Do not commit secrets, log them, place them in YAML, include them in backup archives, or
+capture resolved Compose output containing them. Log collection, retention, alerting,
+metrics, and tracing are not supplied by this repository.
 
 ## Docker deployment: HTTP process
 
 1. Review `config/config.yaml`. Leave both integrations disabled for an HTTP-only startup.
-2. Validate the resolved Compose model.
-3. Build and start the HTTP service.
-4. Confirm container state, startup logs, and shallow HTTP liveness.
+2. Export a strong `CF_AGENT_GATEWAY_API_TOKEN` without writing it to YAML.
+3. Validate the Compose model without printing resolved secrets.
+4. Build and start the HTTP service.
+5. Confirm container state, startup logs, and component health.
 
 ```bash
-docker compose config
+export CF_AGENT_GATEWAY_API_TOKEN='<message-api-token>'
+docker compose config --quiet
 docker compose build gateway
 docker compose up -d gateway
 docker compose ps
@@ -137,20 +168,20 @@ docker compose logs --tail=100 gateway
 curl --fail http://localhost:8080/health
 ```
 
-Expected response:
-
-```json
-{"status":"ok"}
-```
+The public health route returns a component report with top-level `status=ok` and HTTP 200,
+or `status=degraded` and HTTP 503.
 
 At startup the HTTP process creates missing schema objects with SQLAlchemy `create_all`
-and validates required thread-binding uniqueness constraints before accepting requests.
-This is initialization, not a migration system. An incompatible existing schema makes
-startup fail.
+and validates required columns, primary keys, unique/check/foreign-key constraints, named
+indexes, checkpoint recovery columns, and legacy-anchor state before accepting requests.
+This is initialization, not a migration system. A covered incompatibility or incomplete
+backfill makes startup fail.
 
-Compose mounts `config/config.yaml` read-only at `/app/config/config.yaml` and mounts the
-`gateway-data` volume at `/app/data`. The container runs as the non-root `gateway` user and
-uses `/app/data/gateway.db` with the supplied SQLite URL.
+Compose mounts `config/config.yaml` read-only at `/app/config/config.yaml`, mounts the
+`gateway-data` volume at `/app/data`, and passes `CF_AGENT_GATEWAY_API_TOKEN` into the
+container. It publishes `127.0.0.1:8080` by default unless
+`CF_GATEWAY_BIND_ADDRESS` overrides the host address. The container runs as the non-root
+`gateway` user and uses `/app/data/gateway.db` with the supplied SQLite URL.
 
 Use `docker compose up -d --build --force-recreate gateway` after an image or configuration
 change. A normal `docker compose down` retains the named volume. Do not run
@@ -210,40 +241,58 @@ orchestration, and must not be presented as the shipped production Worker deploy
 5. Verify direct network reachability, integration credentials, and external session state
    without exposing secrets.
 6. Run exactly one Worker cycle and inspect its aggregate result and exit code.
-7. Start exactly one resident Worker for the source account.
+7. Start exactly one resident Worker for the shared Gateway database.
 8. Observe the first cycles, database growth, and a synthetic text round trip before
    declaring the environment validated.
 
-Do not start multiple Workers against the same source account as a failover mechanism.
-Leader election and leases are not implemented.
+Do not use multiple Workers as an HA pool. The resident Worker and one-cycle CLI acquire the
+same singleton `wechat` lease when they share a database. A fresh owner rejects the later
+command; a stale owner can be replaced after `runtime.heartbeat_stale_after_seconds`. While
+the diagnostic command runs, `/health` reports its heartbeat through that same Worker lease.
 
 ## Health checks
 
-### HTTP liveness
+### Runtime health
 
-`GET /health` returns `{"status":"ok"}`. Compose checks it inside the container every
-10 seconds with a 3-second timeout, 3 retries, and a 5-second start period.
+`GET /health` returns top-level `status` and `components`. `status=ok` uses HTTP 200;
+`status=degraded` uses HTTP 503. Components are:
 
-The route is shallow liveness. It does not query the database after startup and does not
-probe the Worker, message adapter, Hermes, or AI execution nodes. Because database
-initialization occurs before the HTTP server starts, an initial healthy state implies only
-that startup initialization completed; it is not ongoing dependency readiness.
+- `database`: live database query;
+- `worker`: persisted state, heartbeat, last success, and configured stale threshold;
+- `queue`: `inline_durable` dispatch/delivery counts for in-progress, stale, failed, and
+  missing-delivery work;
+- `hermes`: enabled state, side-effect-free connectivity, and dispatch operation counts;
+- `delivery`: enabled state, adapter connectivity, and delivery operation counts, including
+  successful dispatches with no delivery record.
+
+Component status is `ok`, `degraded`, or `disabled`; integration connection is
+`reachable`, `unreachable`, or `not_checked`. Missing/stopped/stale Worker state and any
+enabled connection failure, failed operation, or stale operation degrade the report.
+The probes do not send a Hermes prompt or WeChat reply and do not inspect individual AI
+nodes behind Hermes.
+
+Compose checks the route inside the container every 10 seconds with a 3-second timeout,
+3 retries, and a 5-second start period.
 
 `restart: unless-stopped` restarts an exited main process. Docker Compose does not
 automatically restart a running container merely because its health becomes `unhealthy`.
 
 ### Worker health
 
-The Worker has no HTTP health endpoint or metrics endpoint. Check its supervisor process
-state and JSON logs for `worker started`, aggregate `messages processed` fields, any
-`error_code` attached to a thrown cycle/process failure, and `worker stopped`. Failure codes
-inside a returned `PollResult` are not written to resident logs; the one-cycle JSON exposes
-them but performs real work.
+The singleton Worker status row persists lease, heartbeat, cycle timestamps, source login
+state, aggregate counters, and the latest sanitized error code. Both polling entry points
+update the full cycle state; the one-cycle CLI temporarily owns the same row while
+its diagnostic cycle runs, then marks it stopped on orderly exit. `/health` considers the
+heartbeat stale after `runtime.heartbeat_stale_after_seconds`; it also degrades when the last success
+or current polling cycle exceeds `runtime.cycle_stale_after_seconds`, or when the Worker's
+persisted Hermes/delivery capabilities differ from current HTTP settings. This distinguishes
+a live heartbeat thread from a healthy business loop. Also check supervisor state and JSON
+logs for lifecycle, cycle, checkpoint, message, admission, and operation events.
 
 The one-cycle CLI exits with:
 
 - `0`: external message session logged in, `failure_codes` empty, and no chat failed;
-- `1`: configuration, network, storage, or message processing failed;
+- `1`: configuration, lease acquisition, network, storage, or message processing failed;
 - `2`: polling disabled, or the external message session not logged in with no reported
   failure.
 
@@ -255,18 +304,23 @@ is required to validate admission, Hermes, response relay, and outbound delivery
 Record each item as passed, failed, or not run; do not promote an unrun item to validated.
 
 ```bash
-docker compose config
+export CF_AGENT_GATEWAY_API_TOKEN='<message-api-token>'
+docker compose config --quiet
 docker compose build gateway
 docker compose up -d gateway
 docker compose ps
 docker compose logs --tail=100 gateway
 curl --fail http://localhost:8080/health
+curl --fail-with-body \
+  -H "Authorization: Bearer ${CF_AGENT_GATEWAY_API_TOKEN}" \
+  "http://localhost:8080/sources/smoke/accounts/smoke/conversations/smoke/messages?limit=1&offset=0"
 ```
 
 - Confirm the container runs as a non-root user.
-- Confirm the resolved config contains no secret values.
-- Confirm the HTTP port is reachable only from the intended network.
-- Confirm a create/read Message API smoke test if those routes are deployed.
+- Confirm the API token is present in the process environment and absent from YAML/logs.
+- Confirm the HTTP port and public health/OpenAPI surfaces reach only the intended network.
+- Confirm missing/wrong credentials return generic 401, then run authenticated create/read
+  Message API smoke tests.
 - Recreate the HTTP container and confirm the test record remains in the named volume.
 - For a Worker environment, run one controlled text message through persistence, identity
   resolution, policy admission, Workspace/AIThread resolution, Hermes, and response relay.
@@ -282,7 +336,7 @@ restore, disaster recovery, TLS, or HA.
 
 - Monitor HTTP/Worker process state, structured error codes, restart count, disk capacity,
   SQLite file growth, and the time since the last successful Worker cycle.
-- Keep exactly one Worker active per source account.
+- Keep exactly one resident Worker active for each shared Gateway database.
 - Treat a growing backlog or repeated conversation failure as an incident; the Worker may
   continue other conversations while one conversation remains blocked behind a failed
   message.
@@ -314,16 +368,20 @@ Restarting the HTTP container does not restart an independently managed Worker.
    one-cycle run to expose `failure_codes`; remember that command performs real work.
 2. Correct invalid configuration, missing credentials, database access, or direct endpoint
    reachability before restarting a fatal Worker.
-3. Let ordinary cycle failures retry at the configured fixed interval, or stop the Worker
-   before manual intervention.
+3. Returned degraded results and thrown non-fatal failures increment the same consecutive
+   failure count and use exponential delay capped by
+   `runtime.polling_retry_max_seconds`. A healthy result resets the count.
 4. Before replay, assume an ambiguous Hermes or outbound result may already have succeeded.
-   Check external observations and Gateway bindings for possible duplicate-call or
-   duplicate-reply impact.
-5. Restart only one Worker for the affected source account and observe the first cycle.
+   Transport errors, timeouts, invalid successful responses, HTTP 408/429, and 5xx results
+   retain their 120-second lease; stop the Worker before expiry if reconciliation must
+   finish before automatic stale reclaim.
+5. Restart only one resident Worker for the shared Gateway database and observe the first
+   cycle. Its bounded pre-poll recovery sweep retries failed/stale dispatch and delivery
+   work even when the source message is no longer in the adapter window.
 
-The Hermes client has no internal retry/backoff/circuit breaker, and dispatch/outbound
-delivery has no durable outbox or upstream idempotency key. Checkpoint retry can repeat an
-AI call or reply after an ambiguous result.
+Hermes and delivery have a per-message durable ledger but no upstream idempotency key.
+Completed operations are suppressed; a crash after external success but before local
+success commit can still repeat a side effect after stale reclaim.
 
 ### SQLite backup and restore
 
@@ -340,7 +398,7 @@ identify and back up that configured database instead.
 4. Store and verify the backup outside the volume.
 5. For restore, preserve the failed database, restore the selected backup to the same path,
    and ensure the container's `gateway` user can read and write it.
-6. Start the HTTP process first. Check schema-validation logs and shallow liveness.
+6. Start the HTTP process first. Check schema-validation logs and component health.
 7. Run a database-backed Message API check, then start exactly one Worker and observe its
    checkpoints and first cycle.
 
@@ -355,15 +413,18 @@ PostgreSQL operation and recovery are **Unverified** by this repository.
 ### Schema incompatibility
 
 `create_all` creates missing objects but does not upgrade existing incompatible schemas.
-Startup rejects legacy thread-binding uniqueness constraints. Until a formal migration
-system exists:
+Startup validates the required runtime metadata shape and rejects unsafe unanchored
+generation-zero checkpoints. Follow
+[the migration contract](../migrations/README.md):
 
 1. stop all writers;
 2. take and verify a backup;
-3. use an explicitly reviewed migration outside this repository, or recreate a development
-   database when losing its data is acceptable;
-4. start the HTTP process and confirm schema initialization;
-5. start one Worker only after the database checks pass.
+3. inspect legacy checkpoints; the supplied script aborts without persistent changes if
+   any are nonzero, requiring a reviewed anchor migration or explicitly approved replay;
+4. apply the matching reviewed one-time script from `migrations/`, or recreate a
+   development database when losing its data is acceptable;
+5. start the HTTP process and confirm schema initialization;
+6. start one Worker only after the database checks pass.
 
 Gateway never automatically deletes or migrates `gateway.db`.
 
@@ -379,8 +440,9 @@ Gateway never automatically deletes or migrates `gateway.db`.
 6. On failure, stop all writers, restore the compatible database backup when schema/data
    changed, restore the previous image/configuration, start HTTP, and then start one Worker.
 
-An image rollback alone is unsafe after an incompatible schema change. Formal automated
-migration and rollback are **Planned** and not currently implemented.
+An image rollback alone is unsafe after an incompatible schema change. The repository
+contains forward hardening SQL but no automatic migration runner or reverse migration;
+automated migration and rollback remain **Planned**.
 
 ## What remains unverified
 
@@ -391,13 +453,21 @@ migration and rollback are **Planned** and not currently implemented.
 - live PostgreSQL connectivity, concurrency, backup, restore, replication, and failover;
 - an operator-provided Worker deployment and shared database topology;
 - backup/restore and disaster-recovery drills;
-- target-environment load behavior, TLS, and security hardening.
+- target-environment load behavior, TLS, and security hardening;
+- aggregate HTTP request-body limiting, rate limiting, and keyset pagination, which are not
+  implemented;
+- public OpenAPI and health metadata exposure, which must be accepted or restricted by the
+  deployment edge.
 
-Worker orchestration, multiple-replica coordination, and automated failover are **Not
-implemented**. Media/file-byte retrieval or processing and business execution are outside
-the implemented Gateway path, not merely unverified deployment features; an admitted
-non-text event can still send its normalized non-empty content string to Hermes.
+A singleton polling lease and stale takeover are implemented, but service-manager
+orchestration, multi-replica HA, and automated failover are **Not implemented**.
+Media/file-byte retrieval or processing and business execution are outside the implemented
+Gateway path; an admitted non-text event can still send its normalized non-empty content
+string to Hermes.
 
 See [architecture.md](architecture.md) for state and ownership boundaries,
 [integration.md](integration.md) for Hermes connectivity, and
 [v1-staging-validation.md](v1-staging-validation.md) for the recorded validation evidence.
+Use [troubleshooting.md](troubleshooting.md) to trace a missing reply and
+[recovery-guide.md](recovery-guide.md) for controlled restart, retry, checkpoint, and
+external-call recovery.

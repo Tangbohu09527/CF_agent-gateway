@@ -18,9 +18,18 @@ from cf_agent_gateway.hermes.models import (
     HermesChatCompletionRequest,
     HermesChatCompletionResponse,
     HermesChatResult,
+    HermesDeliveryRecord,
     HermesDispatchOutcome,
+    HermesDispatchRecord,
+    HermesOperationStatus,
     HermesResponseDeliveryOutcome,
     HermesUserMessage,
+)
+from cf_agent_gateway.hermes.recovery import (
+    HermesDispatcherFactory,
+    HermesRecoveryResult,
+    HermesRecoveryService,
+    HermesResponseProcessorFactory,
 )
 from cf_agent_gateway.hermes.response import (
     HermesResponseHandler,
@@ -32,9 +41,19 @@ from cf_agent_gateway.hermes.service import (
     HermesDispatcher,
     HermesDispatchService,
 )
+from cf_agent_gateway.hermes.store import (
+    DEFAULT_OPERATION_LEASE,
+    DEFAULT_RECOVERY_BATCH_SIZE,
+    MAX_RECOVERY_BATCH_SIZE,
+    DeliveryLeaseClaim,
+    DispatchLeaseClaim,
+    HermesLedgerStore,
+)
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "DEFAULT_OPERATION_LEASE",
+    "DEFAULT_RECOVERY_BATCH_SIZE",
     "HERMES_SESSION_HEADER",
     "HermesAPIError",
     "HermesAPIKeyError",
@@ -47,17 +66,28 @@ __all__ = [
     "HermesClient",
     "HermesConfigurationError",
     "HermesDeliveryError",
+    "HermesDeliveryRecord",
     "HermesDispatchError",
+    "HermesDispatchRecord",
     "HermesDispatcher",
     "HermesDispatchOutcome",
     "HermesDispatchService",
+    "HermesDispatcherFactory",
     "HermesError",
+    "HermesLedgerStore",
+    "HermesOperationStatus",
+    "HermesRecoveryResult",
+    "HermesRecoveryService",
     "HermesResponseDeliveryOutcome",
     "HermesResponseError",
     "HermesResponseHandler",
     "HermesResponseProcessor",
+    "HermesResponseProcessorFactory",
     "HermesResponseRelay",
     "HermesTimeoutError",
     "HermesTransportError",
     "HermesUserMessage",
+    "MAX_RECOVERY_BATCH_SIZE",
+    "DeliveryLeaseClaim",
+    "DispatchLeaseClaim",
 ]

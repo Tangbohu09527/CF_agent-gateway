@@ -8,8 +8,17 @@ database:
 logging:
   level: "INFO"
 
+api:
+  message_auth_enabled: true
+  # Store only the environment variable name here, never the bearer token.
+  bearer_token_env: "CF_AGENT_GATEWAY_API_TOKEN"
+
 runtime:
   polling_interval_seconds: 3
+  polling_retry_max_seconds: 60
+  heartbeat_interval_seconds: 5
+  heartbeat_stale_after_seconds: 30
+  cycle_stale_after_seconds: 300
 
 wechat:
   enabled: false

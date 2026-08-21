@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.access import AccessPolicyService, RiskLevel
@@ -20,7 +20,13 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesDispatchOutcome
+from cf_agent_gateway.hermes import (
+    HermesChatResult,
+    HermesDispatchOutcome,
+    HermesDispatchRecord,
+    HermesDispatchService,
+    HermesOperationStatus,
+)
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.ingestion import MessageAdmissionService
 from cf_agent_gateway.message.models import Message
@@ -136,6 +142,19 @@ class _FailingDispatcher:
         raise _DispatchFailure("Hermes dispatch failed")
 
 
+class _RecordingHermesChatClient:
+    def __init__(self) -> None:
+        self.contents: list[str] = []
+
+    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
+        assert hermes_thread_id is not None
+        self.contents.append(content)
+        return HermesChatResult(
+            assistant_content="Hermes response",
+            hermes_thread_id=hermes_thread_id,
+        )
+
+
 def test_allowed_admission_dispatches_authoritative_persisted_message(session: Session) -> None:
     allow_sender(session)
     message = normalized_message()
@@ -194,3 +213,35 @@ def test_dispatch_failure_propagates_after_message_commit(session: Session) -> N
     assert len(dispatcher.admissions) == 1
     assert dispatcher.admissions[0].admitted is True
     assert dispatcher.admissions[0].message_id == persisted.id
+
+
+def test_duplicate_source_message_reuses_message_and_dispatch_record(
+    session: Session,
+) -> None:
+    allow_sender(session)
+    client = _RecordingHermesChatClient()
+    service = MessageAdmissionService(
+        session,
+        hermes_dispatcher=HermesDispatchService(session, client),
+    )
+    message = normalized_message()
+
+    first = service.process(message)
+    duplicate = service.process(
+        normalized_message(
+            event_id="wechat:event-replayed",
+            source_local_id="local-replayed",
+        )
+    )
+
+    assert first.message_created is True
+    assert duplicate.message_created is False
+    assert duplicate.message_id == first.message_id
+    assert client.contents == [message.content]
+    assert session.scalar(select(func.count()).select_from(Message)) == 1
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
+    record = session.scalar(select(HermesDispatchRecord))
+    assert record is not None
+    assert record.message_id == first.message_id
+    assert record.status is HermesOperationStatus.SUCCEEDED
+    assert record.attempt_count == 1

@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Protocol
 
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
-from cf_agent_gateway.hermes.errors import HermesDispatchError
-from cf_agent_gateway.hermes.models import HermesChatResult, HermesDispatchOutcome
+from cf_agent_gateway.hermes.errors import (
+    HermesAPIError,
+    HermesDispatchError,
+    HermesResponseError,
+    HermesTransportError,
+)
+from cf_agent_gateway.hermes.models import (
+    HermesChatResult,
+    HermesDispatchOutcome,
+    HermesOperationStatus,
+)
+from cf_agent_gateway.hermes.store import HermesLedgerStore
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.workspace.models import (
     AIThread,
@@ -38,12 +49,16 @@ class HermesDispatchService:
         *,
         message_store: MessageStore | None = None,
         workspace_store: WorkspaceStore | None = None,
+        ledger_store: HermesLedgerStore | None = None,
     ) -> None:
         self._session = session
         self._client = client
         self._message_store = message_store if message_store is not None else MessageStore(session)
         self._workspace_store = (
             workspace_store if workspace_store is not None else WorkspaceStore(session)
+        )
+        self._ledger_store = (
+            ledger_store if ledger_store is not None else HermesLedgerStore(session)
         )
 
     def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
@@ -97,20 +112,69 @@ class HermesDispatchService:
                 _initial_hermes_thread_id(thread),
             )
         requested_hermes_thread_id = _hermes_thread_id_for_dispatch(thread)
+        claim = self._ledger_store.claim_dispatch(
+            message_id=message.id,
+            workspace_id=workspace.id,
+            ai_thread_id=thread.id,
+            requested_hermes_thread_id=requested_hermes_thread_id,
+        )
+        record = claim.record
+        if record.workspace_id != workspace.id or record.ai_thread_id != thread.id:
+            raise HermesDispatchError(reason="dispatch_record_target_mismatch")
+        if not claim.acquired:
+            if record.status is HermesOperationStatus.SUCCEEDED:
+                if record.assistant_content is None:
+                    raise HermesDispatchError(reason="dispatch_record_invalid")
+                return HermesDispatchOutcome(
+                    message_id=message.id,
+                    workspace_id=record.workspace_id,
+                    ai_thread_id=record.ai_thread_id,
+                    assistant_content=record.assistant_content,
+                )
+            raise HermesDispatchError(reason="dispatch_in_progress")
+        lease_token = record.lease_token
+        if lease_token is None:
+            raise HermesDispatchError(reason="dispatch_record_invalid")
 
         try:
             result = self._client.chat(
                 message.content,
                 hermes_thread_id=requested_hermes_thread_id,
             )
+        except Exception as error:
+            self._session.rollback()
+            with suppress(Exception):
+                if _external_result_is_ambiguous(error):
+                    self._ledger_store.note_ambiguous_dispatch(
+                        record,
+                        lease_token=lease_token,
+                        error_code=_operation_error_code(error),
+                    )
+                else:
+                    self._ledger_store.fail_dispatch(
+                        record,
+                        lease_token=lease_token,
+                        error_code=_operation_error_code(error),
+                    )
+            raise
+
+        try:
             hermes_thread_advanced = self._workspace_store.advance_hermes_thread(
                 thread,
                 expected_hermes_thread_id=requested_hermes_thread_id,
                 next_hermes_thread_id=result.hermes_thread_id,
+                commit=False,
             )
             if not hermes_thread_advanced:
                 raise HermesDispatchError(reason="hermes_thread_advanced_concurrently")
-            self._session.commit()
+            completed = self._ledger_store.complete_dispatch(
+                record,
+                lease_token=lease_token,
+                result_hermes_thread_id=result.hermes_thread_id,
+                assistant_content=result.assistant_content,
+            )
+            if not completed:
+                raise HermesDispatchError(reason="dispatch_lease_lost")
         except Exception:
             self._session.rollback()
             raise
@@ -141,3 +205,18 @@ def _hermes_thread_id_for_dispatch(thread: AIThread) -> str:
 
 def _initial_hermes_thread_id(thread: AIThread) -> str:
     return f"{HERMES_THREAD_NAMESPACE}:{thread.id}"
+
+
+def _operation_error_code(error: Exception) -> str:
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return type(error).__name__
+
+
+def _external_result_is_ambiguous(error: Exception) -> bool:
+    if isinstance(error, HermesTransportError | HermesResponseError):
+        return True
+    return isinstance(error, HermesAPIError) and (
+        error.status_code in {408, 429} or error.status_code >= 500
+    )

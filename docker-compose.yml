@@ -5,8 +5,9 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       CF_GATEWAY_CONFIG: /app/config/config.yaml
+      CF_AGENT_GATEWAY_API_TOKEN: ${CF_AGENT_GATEWAY_API_TOKEN:-}
     ports:
-      - "8080:8080"
+      - "${CF_GATEWAY_BIND_ADDRESS:-127.0.0.1}:8080:8080"
     volumes:
       - ./config/config.yaml:/app/config/config.yaml:ro
       - gateway-data:/app/data

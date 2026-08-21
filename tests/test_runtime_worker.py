@@ -7,10 +7,13 @@ from threading import Event, Thread
 import pytest
 
 from cf_agent_gateway.adapters.wechat import PollResult
-from cf_agent_gateway.config import RuntimeSettings, Settings
+from cf_agent_gateway.config import RuntimeSettings, Settings, WechatSettings
+from cf_agent_gateway.database import DatabaseSchemaError
 from cf_agent_gateway.runtime import worker
 from cf_agent_gateway.runtime.errors import (
     HermesAPIKeyEnvironmentError,
+    HermesClientInitializationError,
+    WechatClientInitializationError,
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
 )
@@ -24,6 +27,31 @@ class RecordingEvent(Event):
     def wait(self, timeout: float | None = None) -> bool:
         self.wait_timeouts.append(timeout)
         return self.is_set()
+
+
+class LeaseRecordingReporter:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def start(self) -> None:
+        self.calls.append("start")
+
+    def stop(self) -> None:
+        self.calls.append("stop")
+
+    def ensure_active(self) -> None:
+        self.calls.append("ensure_active")
+
+    def cycle_started(self) -> None:
+        self.calls.append("cycle_started")
+
+    def cycle_succeeded(self, result: PollResult) -> None:
+        del result
+        self.calls.append("cycle_succeeded")
+
+    def cycle_failed(self, error_code: str) -> None:
+        del error_code
+        self.calls.append("cycle_failed")
 
 
 @pytest.fixture
@@ -71,6 +99,10 @@ def test_worker_starts_polls_logs_result_and_stops(
         "chats_failed": 1,
         "messages_seen": 5,
         "messages_processed": 2,
+        "cycle_degraded": True,
+        "consecutive_failures": 1,
+        "retry_delay_seconds": 1.25,
+        "failure_codes": ["poll_chats_failed"],
     }
 
 
@@ -105,6 +137,41 @@ def test_worker_waits_for_the_configured_interval(settings: Settings) -> None:
     worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
 
     assert stop_event.wait_timeouts == [1.25]
+
+
+def test_default_worker_injects_lease_guard_into_polling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        runtime=RuntimeSettings(polling_interval_seconds=1.25),
+        wechat=WechatSettings(enabled=True),
+    )
+    stop_event = Event()
+    reporter = LeaseRecordingReporter()
+    observed_guards: list[Callable[[], None] | None] = []
+
+    def poll_once(
+        candidate: Settings,
+        *,
+        lease_guard: Callable[[], None] | None,
+    ) -> PollResult:
+        assert candidate is settings
+        observed_guards.append(lease_guard)
+        assert lease_guard is not None
+        lease_guard()
+        stop_event.set()
+        return PollResult(logged_in=True)
+
+    monkeypatch.setattr(worker, "run_wechat_poll_once", poll_once)
+
+    worker.run_worker(
+        settings,
+        stop_event=stop_event,
+        status_reporter=reporter,  # type: ignore[arg-type]
+    )
+
+    assert observed_guards == [reporter.ensure_active]
+    assert reporter.calls.count("ensure_active") >= 2
 
 
 def test_stop_interrupts_interval_wait() -> None:
@@ -167,7 +234,11 @@ def test_worker_retries_an_ordinary_poll_error_without_leaking_it(
     )
     assert poll_calls == 2
     assert stop_event.wait_timeouts == [1.25, 1.25]
-    assert failure_record.fields == {"error_code": "poll_cycle_failed"}  # type: ignore[attr-defined]
+    assert failure_record.fields == {  # type: ignore[attr-defined]
+        "error_code": "poll_cycle_failed",
+        "consecutive_failures": 1,
+        "retry_delay_seconds": 1.25,
+    }
     assert sensitive_detail not in caplog.text
     assert [record.getMessage() for record in records].count("poll cycle started") == 2
     assert records[-1].getMessage() == "worker stopped"
@@ -185,6 +256,9 @@ def test_worker_retries_an_ordinary_poll_error_without_leaking_it(
             lambda: HermesAPIKeyEnvironmentError("TEST_HERMES_API_KEY"),
             id="hermes-key-missing",
         ),
+        pytest.param(HermesClientInitializationError, id="hermes-client-invalid"),
+        pytest.param(WechatClientInitializationError, id="wechat-client-invalid"),
+        pytest.param(DatabaseSchemaError, id="database-schema-invalid"),
     ],
 )
 def test_worker_propagates_permanent_poll_errors(

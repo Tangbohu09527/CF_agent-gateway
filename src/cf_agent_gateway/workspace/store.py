@@ -130,6 +130,7 @@ class WorkspaceStore:
         *,
         expected_hermes_thread_id: str,
         next_hermes_thread_id: str,
+        commit: bool = True,
     ) -> bool:
         statement = (
             update(AIThread)
@@ -142,7 +143,8 @@ class WorkspaceStore:
         try:
             result = self._session.execute(statement)
             advanced = result.rowcount == 1
-            self._session.commit()
+            if commit:
+                self._session.commit()
         except IntegrityError:
             self._session.rollback()
             existing = self.get_thread_by_hermes_thread_id(next_hermes_thread_id)

@@ -12,6 +12,27 @@ import yaml
 _POLLING_INTERVAL_ERROR = (
     "runtime.polling_interval_seconds must be within the supported positive timeout range"
 )
+_RUNTIME_TIMEOUT_ERROR = "runtime timeout values must be finite positive numbers"
+_CONFIGURATION_KEYS = frozenset(
+    {"server", "database", "logging", "api", "runtime", "wechat", "hermes"}
+)
+_SECTION_KEYS = {
+    "server": frozenset({"host", "port"}),
+    "database": frozenset({"url"}),
+    "logging": frozenset({"level"}),
+    "api": frozenset({"message_auth_enabled", "bearer_token_env"}),
+    "runtime": frozenset(
+        {
+            "polling_interval_seconds",
+            "polling_retry_max_seconds",
+            "heartbeat_interval_seconds",
+            "heartbeat_stale_after_seconds",
+            "cycle_stale_after_seconds",
+        }
+    ),
+    "wechat": frozenset({"enabled", "base_url", "bootstrap_mode", "token_env"}),
+    "hermes": frozenset({"enabled", "base_url", "api_key_env", "model"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +52,28 @@ class LoggingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiSettings:
+    message_auth_enabled: bool = True
+    bearer_token_env: str = "CF_AGENT_GATEWAY_API_TOKEN"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.message_auth_enabled, bool):
+            raise ValueError("api.message_auth_enabled must be a boolean")
+        if not isinstance(self.bearer_token_env, str) or not self.bearer_token_env.strip():
+            raise ValueError("api.bearer_token_env must name an environment variable")
+        bearer_token_env = self.bearer_token_env.strip()
+        if "=" in bearer_token_env or "\x00" in bearer_token_env:
+            raise ValueError("api.bearer_token_env must name an environment variable")
+        object.__setattr__(self, "bearer_token_env", bearer_token_env)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     polling_interval_seconds: float = 3.0
+    polling_retry_max_seconds: float = 60.0
+    heartbeat_interval_seconds: float = 5.0
+    heartbeat_stale_after_seconds: float = 30.0
+    cycle_stale_after_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         interval = self.polling_interval_seconds
@@ -49,6 +90,39 @@ class RuntimeSettings:
         ):
             raise ValueError(_POLLING_INTERVAL_ERROR)
         object.__setattr__(self, "polling_interval_seconds", normalized_interval)
+
+        for field_name in (
+            "polling_retry_max_seconds",
+            "heartbeat_interval_seconds",
+            "heartbeat_stale_after_seconds",
+            "cycle_stale_after_seconds",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(_RUNTIME_TIMEOUT_ERROR)
+            normalized_value = float(value)
+            if (
+                not math.isfinite(normalized_value)
+                or normalized_value <= 0
+                or normalized_value > TIMEOUT_MAX
+            ):
+                raise ValueError(_RUNTIME_TIMEOUT_ERROR)
+            object.__setattr__(self, field_name, normalized_value)
+        if self.polling_retry_max_seconds < self.polling_interval_seconds:
+            raise ValueError(
+                "runtime.polling_retry_max_seconds must be greater than or equal to "
+                "runtime.polling_interval_seconds"
+            )
+        if self.heartbeat_stale_after_seconds <= self.heartbeat_interval_seconds * 2:
+            raise ValueError(
+                "runtime.heartbeat_stale_after_seconds must exceed twice "
+                "runtime.heartbeat_interval_seconds"
+            )
+        if self.cycle_stale_after_seconds <= self.heartbeat_stale_after_seconds:
+            raise ValueError(
+                "runtime.cycle_stale_after_seconds must exceed "
+                "runtime.heartbeat_stale_after_seconds"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +228,7 @@ class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
+    api: ApiSettings = ApiSettings()
     wechat: WechatSettings = WechatSettings()
     hermes: HermesSettings = HermesSettings()
     runtime: RuntimeSettings = RuntimeSettings()
@@ -174,12 +249,28 @@ def load_settings(path: str | Path) -> Settings:
     server = _mapping(raw, "server")
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
+    api = _mapping(raw, "api")
     runtime = _mapping(raw, "runtime")
     wechat = _mapping(raw, "wechat")
     hermes = _mapping(raw, "hermes")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
+    if "bearer_token" in api:
+        raise ValueError("api.bearer_token is not allowed; use api.bearer_token_env")
+    if "token" in wechat:
+        raise ValueError("wechat.token is not allowed; use wechat.token_env")
+    _reject_unknown_keys(raw, _CONFIGURATION_KEYS, "configuration")
+    for section_name, section in (
+        ("server", server),
+        ("database", database),
+        ("logging", logging),
+        ("api", api),
+        ("runtime", runtime),
+        ("wechat", wechat),
+        ("hermes", hermes),
+    ):
+        _reject_unknown_keys(section, _SECTION_KEYS[section_name], section_name)
 
     host = str(server.get("host", "0.0.0.0")).strip()
     port = int(server.get("port", 8080))
@@ -199,8 +290,16 @@ def load_settings(path: str | Path) -> Settings:
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
+        api=ApiSettings(
+            message_auth_enabled=api.get("message_auth_enabled", True),
+            bearer_token_env=api.get("bearer_token_env", "CF_AGENT_GATEWAY_API_TOKEN"),
+        ),
         runtime=RuntimeSettings(
             polling_interval_seconds=runtime.get("polling_interval_seconds", 3.0),
+            polling_retry_max_seconds=runtime.get("polling_retry_max_seconds", 60.0),
+            heartbeat_interval_seconds=runtime.get("heartbeat_interval_seconds", 5.0),
+            heartbeat_stale_after_seconds=runtime.get("heartbeat_stale_after_seconds", 30.0),
+            cycle_stale_after_seconds=runtime.get("cycle_stale_after_seconds", 300.0),
         ),
         wechat=WechatSettings(
             enabled=wechat.get("enabled", False),
@@ -222,3 +321,13 @@ def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be a YAML mapping")
     return value
+
+
+def _reject_unknown_keys(
+    values: dict[object, object],
+    allowed: frozenset[str],
+    section_name: str,
+) -> None:
+    unknown = sorted(str(key) for key in values if key not in allowed)
+    if unknown:
+        raise ValueError(f"{section_name} contains unsupported keys: {', '.join(unknown)}")

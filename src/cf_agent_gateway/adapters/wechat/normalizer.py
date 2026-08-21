@@ -20,6 +20,7 @@ from cf_agent_gateway.adapters.wechat.raw_models import RawWechatMessage
 
 EVENT_ID_VERSION = 1
 LOCAL_MESSAGE_ID_VERSION = 1
+REGRESSED_LOCAL_MESSAGE_ID_VERSION = 2
 WECHAT_SOURCE = "wechat"
 
 
@@ -28,10 +29,12 @@ def normalize_wechat_message(
     *,
     source_account_id: str,
     conversation_name: str | None = None,
+    sync_generation: int = 0,
 ) -> NormalizedWechatMessage:
     message = _raw_message(raw)
     account_id = _required(source_account_id, "source_account_id")
     chat_id = _required(message.chat_id, "chatId")
+    generation = _validated_sync_generation(sync_generation)
     is_system = message.type == 10000
     sender_type = WechatSenderType.SYSTEM if is_system else WechatSenderType.HUMAN
     sender_id = (
@@ -44,6 +47,7 @@ def normalize_wechat_message(
         local_id=source_local_id,
         account_id=account_id,
         chat_id=chat_id,
+        sync_generation=generation,
     )
     conversation_type = (
         WechatConversationType.GROUP
@@ -108,6 +112,7 @@ def _source_message_id(
     local_id: str | int | None,
     account_id: str,
     chat_id: str,
+    sync_generation: int,
 ) -> tuple[str, bool]:
     stable_id = _usable_id(server_id)
     if stable_id is not None:
@@ -116,14 +121,25 @@ def _source_message_id(
     fallback_local_id = _usable_id(local_id)
     if fallback_local_id is None:
         raise WechatNormalizationError("raw WeChat message requires a usable serverId or localId")
+    if sync_generation == 0:
+        fields = {
+            "account_id": account_id,
+            "chat_id": chat_id,
+            "local_id": fallback_local_id,
+            "platform": WECHAT_SOURCE,
+            "version": LOCAL_MESSAGE_ID_VERSION,
+        }
+        return f"local:v{LOCAL_MESSAGE_ID_VERSION}:{_digest(fields)}", True
+
     fields = {
         "account_id": account_id,
         "chat_id": chat_id,
+        "generation": sync_generation,
         "local_id": fallback_local_id,
         "platform": WECHAT_SOURCE,
-        "version": LOCAL_MESSAGE_ID_VERSION,
+        "version": REGRESSED_LOCAL_MESSAGE_ID_VERSION,
     }
-    return f"local:v{LOCAL_MESSAGE_ID_VERSION}:{_digest(fields)}", True
+    return f"local:v{REGRESSED_LOCAL_MESSAGE_ID_VERSION}:{_digest(fields)}", True
 
 
 def _message_type(
@@ -192,6 +208,12 @@ def _usable_id(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized if normalized and normalized != "0" else None
+
+
+def _validated_sync_generation(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise WechatNormalizationError("sync_generation must be a nonnegative integer")
+    return value
 
 
 def _required(value: str | None, field_name: str) -> str:

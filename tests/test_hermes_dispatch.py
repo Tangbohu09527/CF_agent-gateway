@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
@@ -17,10 +18,15 @@ from cf_agent_gateway.database import (
     initialize_database,
 )
 from cf_agent_gateway.hermes import (
+    HermesAPIError,
     HermesChatResult,
     HermesDispatchError,
     HermesDispatchOutcome,
+    HermesDispatchRecord,
     HermesDispatchService,
+    HermesLedgerStore,
+    HermesOperationStatus,
+    HermesTimeoutError,
 )
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.message.models import Message
@@ -124,10 +130,30 @@ class FailingHermesBindingStore(WorkspaceStore):
         *,
         expected_hermes_thread_id: str,
         next_hermes_thread_id: str,
+        commit: bool = True,
     ) -> bool:
         del expected_hermes_thread_id
+        del commit
         thread.hermes_thread_id = next_hermes_thread_id
         raise ControlledClientError("controlled binding failure")
+
+
+class LosingDispatchLeaseStore(HermesLedgerStore):
+    def complete_dispatch(
+        self,
+        record: HermesDispatchRecord,
+        *,
+        lease_token: str,
+        result_hermes_thread_id: str,
+        assistant_content: str,
+    ) -> bool:
+        del lease_token
+        return super().complete_dispatch(
+            record,
+            lease_token="lost-lease",
+            result_hermes_thread_id=result_hermes_thread_id,
+            assistant_content=assistant_content,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,3 +617,176 @@ def test_binding_failure_rolls_back_to_claimed_hermes_thread_id(session: Session
 
     session.refresh(resources.thread)
     assert resources.thread.hermes_thread_id == claimed_thread_id
+
+
+def test_dispatch_lease_loss_rolls_back_thread_rotation(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    claimed_thread_id = initial_hermes_thread_id(resources.thread)
+    client = RecordingHermesClient(hermes_thread_id="hermes-returned")
+    ledger = LosingDispatchLeaseStore(session)
+
+    assert_dispatch_error(
+        HermesDispatchService(session, client, ledger_store=ledger),
+        resources.admission,
+        "dispatch_lease_lost",
+    )
+
+    session.refresh(resources.thread)
+    assert resources.thread.hermes_thread_id == claimed_thread_id
+    record = ledger.get_dispatch(resources.message.id)
+    assert record is not None
+    assert record.status is HermesOperationStatus.IN_PROGRESS
+    assert record.result_hermes_thread_id is None
+    assert record.assistant_content is None
+
+
+def test_replayed_message_reuses_successful_dispatch_record(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    client = RecordingHermesClient()
+    service = HermesDispatchService(session, client)
+
+    first = service.dispatch(resources.admission)
+    second = service.dispatch(resources.admission)
+
+    assert second == first
+    assert client.contents == [MESSAGE_CONTENT]
+    record = session.scalar(
+        select(HermesDispatchRecord).where(HermesDispatchRecord.message_id == resources.message.id)
+    )
+    assert record is not None
+    assert record.status is HermesOperationStatus.SUCCEEDED
+    assert record.attempt_count == 1
+    assert record.lease_token is None
+    assert record.lease_expires_at is None
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
+
+
+def test_failed_dispatch_record_is_retried(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    client_error = ControlledClientError("controlled Hermes failure")
+    client = RecordingHermesClient(error=client_error)
+    service = HermesDispatchService(session, client)
+
+    with pytest.raises(ControlledClientError):
+        service.dispatch(resources.admission)
+
+    failed = session.scalar(
+        select(HermesDispatchRecord).where(HermesDispatchRecord.message_id == resources.message.id)
+    )
+    assert failed is not None
+    assert failed.status is HermesOperationStatus.FAILED
+    assert failed.attempt_count == 1
+    assert failed.last_error_code == "ControlledClientError"
+    assert failed.lease_token is None
+
+    client.error = None
+    outcome = service.dispatch(resources.admission)
+
+    assert outcome.assistant_content == ASSISTANT_CONTENT
+    assert client.contents == [MESSAGE_CONTENT, MESSAGE_CONTENT]
+    session.refresh(failed)
+    assert failed.status is HermesOperationStatus.SUCCEEDED
+    assert failed.attempt_count == 2
+    assert failed.last_error_code is None
+
+
+def test_active_dispatch_lease_blocks_duplicate_external_call(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    requested_thread_id = initial_hermes_thread_id(resources.thread)
+    claim = HermesLedgerStore(session).claim_dispatch(
+        message_id=resources.message.id,
+        workspace_id=resources.workspace.id,
+        ai_thread_id=resources.thread.id,
+        requested_hermes_thread_id=requested_thread_id,
+    )
+    assert claim.acquired is True
+    client = RecordingHermesClient()
+
+    assert_dispatch_error(
+        HermesDispatchService(session, client),
+        resources.admission,
+        "dispatch_in_progress",
+    )
+
+    assert client.contents == []
+    record = HermesLedgerStore(session).get_dispatch(resources.message.id)
+    assert record is not None
+    assert record.status is HermesOperationStatus.IN_PROGRESS
+    assert record.attempt_count == 1
+
+
+def test_stale_dispatch_lease_is_recovered(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    requested_thread_id = initial_hermes_thread_id(resources.thread)
+    stale_at = datetime.now(UTC) - timedelta(hours=1)
+    claim = HermesLedgerStore(session).claim_dispatch(
+        message_id=resources.message.id,
+        workspace_id=resources.workspace.id,
+        ai_thread_id=resources.thread.id,
+        requested_hermes_thread_id=requested_thread_id,
+        now=stale_at,
+    )
+    assert claim.acquired is True
+    client = RecordingHermesClient()
+
+    outcome = HermesDispatchService(session, client).dispatch(resources.admission)
+
+    assert outcome.assistant_content == ASSISTANT_CONTENT
+    assert client.contents == [MESSAGE_CONTENT]
+    record = HermesLedgerStore(session).get_dispatch(resources.message.id)
+    assert record is not None
+    assert record.status is HermesOperationStatus.SUCCEEDED
+    assert record.attempt_count == 2
+
+
+def test_ambiguous_dispatch_timeout_keeps_lease_until_stale(session: Session) -> None:
+    resources = create_dispatch_resources(session)
+    timeout = HermesTimeoutError(operation="chat")
+    client = RecordingHermesClient(error=timeout)
+    service = HermesDispatchService(session, client)
+
+    with pytest.raises(HermesTimeoutError):
+        service.dispatch(resources.admission)
+
+    record = HermesLedgerStore(session).get_dispatch(resources.message.id)
+    assert record is not None
+    assert record.status is HermesOperationStatus.IN_PROGRESS
+    assert record.attempt_count == 1
+    assert record.lease_token is not None
+    assert record.lease_expires_at is not None
+    assert record.last_error_code == "hermes_timeout_error"
+
+    client.error = None
+    assert_dispatch_error(service, resources.admission, "dispatch_in_progress")
+    assert client.contents == [MESSAGE_CONTENT]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_status"),
+    [
+        (400, HermesOperationStatus.FAILED),
+        (408, HermesOperationStatus.IN_PROGRESS),
+        (429, HermesOperationStatus.IN_PROGRESS),
+        (503, HermesOperationStatus.IN_PROGRESS),
+    ],
+)
+def test_dispatch_http_error_classification(
+    session: Session,
+    status_code: int,
+    expected_status: HermesOperationStatus,
+) -> None:
+    resources = create_dispatch_resources(session)
+    error = HermesAPIError(operation="chat_completion", status_code=status_code)
+    client = RecordingHermesClient(error=error)
+
+    with pytest.raises(HermesAPIError):
+        HermesDispatchService(session, client).dispatch(resources.admission)
+
+    record = HermesLedgerStore(session).get_dispatch(resources.message.id)
+    assert record is not None
+    assert record.status is expected_status
+    assert record.last_error_code == "hermes_api_error"
+    if expected_status is HermesOperationStatus.FAILED:
+        assert record.lease_token is None
+    else:
+        assert record.lease_token is not None

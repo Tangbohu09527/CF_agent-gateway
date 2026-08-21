@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from cf_agent_gateway.access import AccessPolicyService, RiskLevel
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatAuthStatus,
+    PollFailureStage,
     RawWechatMessage,
     WechatSyncCheckpoint,
 )
@@ -20,7 +21,13 @@ from cf_agent_gateway.database import (
     create_database_session_factory,
     initialize_database,
 )
-from cf_agent_gateway.hermes import HermesChatResult
+from cf_agent_gateway.hermes import (
+    HermesChatResult,
+    HermesDeliveryRecord,
+    HermesDispatchRecord,
+    HermesOperationStatus,
+    HermesRecoveryResult,
+)
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.runtime import (
@@ -63,11 +70,13 @@ class FakeWechatClient:
         *,
         account_id: str = ACCOUNT_ID,
         logged_in: bool = True,
+        close_error: Exception | None = None,
     ) -> None:
         self.messages = dict(messages)
         self.account_id = account_id
         self.logged_in = logged_in
         self.auth_calls = 0
+        self.close_error = close_error
         self.close_calls = 0
 
     def get_auth_status(self) -> AgentWechatAuthStatus:
@@ -85,6 +94,8 @@ class FakeWechatClient:
 
     def close(self) -> None:
         self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class RecordingClientFactory:
@@ -307,6 +318,8 @@ def test_runtime_assembly_and_cleanup_order(
     class TrackingClient:
         def close(self) -> None:
             events.append("client.close")
+            if poll_fails:
+                raise RuntimeError("cleanup must not replace poll failure")
 
     engine = TrackingEngine()
     checkpoint_session = TrackingSession()
@@ -355,11 +368,13 @@ def test_runtime_assembly_and_cleanup_order(
             sink: object,
             *,
             bootstrap_mode: str,
+            lease_guard: Callable[[], None] | None,
         ) -> None:
             assert runtime_client is client
             assert checkpoint_store is checkpoint_store_marker
             assert sink is sink_marker
             assert bootstrap_mode == "backfill"
+            assert lease_guard is None
             events.append("polling_service")
 
         def poll_once(self) -> Any:
@@ -443,6 +458,48 @@ def test_runtime_wires_client_checkpoint_store_and_admission_sink(tmp_path: Path
             assert checkpoint is not None and checkpoint.last_local_id == 1
     finally:
         engine.dispose()
+
+
+def test_runtime_marks_failed_recovery_as_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FailedRecoveryService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def drain(self) -> HermesRecoveryResult:
+            return HermesRecoveryResult(
+                dispatch_candidates=1,
+                dispatch_recovered=0,
+                dispatch_failed=1,
+                delivery_candidates=0,
+                delivery_recovered=0,
+                delivery_failed=0,
+            )
+
+    monkeypatch.setattr(wechat_runtime, "HermesRecoveryService", FailedRecoveryService)
+    database_path = tmp_path / "gateway-recovery-failure.db"
+    result = run_wechat_poll_once(
+        runtime_settings(
+            f"sqlite+pysqlite:///{database_path.as_posix()}",
+            hermes=HermesSettings(
+                enabled=True,
+                base_url="https://hermes.test",
+                api_key_env=HERMES_API_KEY_ENV,
+            ),
+        ),
+        client_factory=RecordingClientFactory(FakeWechatClient({})),
+        hermes_client_factory=RecordingHermesClientFactory(FakeHermesClient()),
+        environment_reader={
+            TOKEN_ENV: TOKEN,
+            HERMES_API_KEY_ENV: HERMES_API_KEY,
+        }.get,
+    )
+
+    assert result.logged_in is True
+    assert result.failures[-1].stage is PollFailureStage.RECOVERY
+    assert result.failures[-1].code == "hermes_recovery_failed"
 
 
 def test_runtime_relays_hermes_response_to_source_wechat_account(
@@ -536,6 +593,112 @@ def test_runtime_relays_hermes_response_to_source_wechat_account(
             assert hermes_client.chat_calls[0][1] == f"v1:cf-agent-gateway:{thread.id}"
             assert thread.hermes_thread_id == "hermes-runtime-thread"
             assert session.scalar(select(func.count()).select_from(EmployeeWorkspace)) == 1
+    finally:
+        engine.dispose()
+
+
+def test_runtime_recovers_failed_dispatch_after_source_window_expires(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "gateway-recovery.db"
+    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
+    engine = create_database_engine(database_url)
+    initialize_database(engine)
+    session_factory = create_database_session_factory(engine)
+    try:
+        with session_factory() as session:
+            identity_service = IdentityService(session)
+            identity = identity_service.create_identity(employee_id="employee-recovery")
+            identity_service.create_mapping(
+                platform="wechat",
+                account_id=ACCOUNT_ID,
+                sender_id="wxid_sender",
+                enterprise_identity_id=identity.id,
+            )
+            policy_service = AccessPolicyService(session)
+            policy_service.upsert_user_policy(enterprise_identity_id=identity.id)
+            policy_service.upsert_gateway_policy(
+                allowed_risk_levels=(RiskLevel.NORMAL,),
+            )
+    finally:
+        engine.dispose()
+
+    class FailsFirstHermesCall(FakeHermesClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failures_remaining = 1
+
+        def chat(
+            self,
+            content: str,
+            *,
+            hermes_thread_id: str | None = None,
+        ) -> HermesChatResult:
+            self.chat_calls.append((content, hermes_thread_id))
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                raise RuntimeError("controlled Hermes failure")
+            return HermesChatResult(
+                assistant_content=self.assistant_content,
+                hermes_thread_id=self.hermes_thread_id,
+            )
+
+    hermes_client = FailsFirstHermesCall()
+    sender_factory = RecordingWechatSenderFactory()
+    settings = runtime_settings(
+        database_url,
+        hermes=HermesSettings(
+            enabled=True,
+            base_url="https://hermes.test",
+            api_key_env=HERMES_API_KEY_ENV,
+        ),
+    )
+    environment = {
+        TOKEN_ENV: TOKEN,
+        HERMES_API_KEY_ENV: HERMES_API_KEY,
+    }.get
+
+    first = run_wechat_poll_once(
+        settings,
+        client_factory=RecordingClientFactory(FakeWechatClient({CHAT_ID: [raw_message(11)]})),
+        hermes_client_factory=RecordingHermesClientFactory(hermes_client),
+        sender_factory=sender_factory,
+        environment_reader=environment,
+    )
+    second = run_wechat_poll_once(
+        settings,
+        client_factory=RecordingClientFactory(FakeWechatClient({CHAT_ID: [raw_message(12)]})),
+        hermes_client_factory=RecordingHermesClientFactory(hermes_client),
+        sender_factory=sender_factory,
+        environment_reader=environment,
+    )
+
+    assert first.chats_failed == 1
+    assert first.messages_processed == 0
+    assert second.chats_failed == 0
+    assert second.messages_processed == 1
+    assert [content for content, _ in hermes_client.chat_calls] == [
+        "message-11",
+        "message-11",
+        "message-12",
+    ]
+    assert sender_factory.send_calls == [
+        (ACCOUNT_ID, CHAT_ID, "Hermes accepted the message"),
+        (ACCOUNT_ID, CHAT_ID, "Hermes accepted the message"),
+    ]
+
+    engine = create_database_engine(database_url)
+    try:
+        with Session(engine) as session:
+            dispatches = session.scalars(select(HermesDispatchRecord)).all()
+            deliveries = session.scalars(select(HermesDeliveryRecord)).all()
+            stored_checkpoint = session.scalar(select(WechatSyncCheckpoint))
+            assert len(dispatches) == 2
+            assert len(deliveries) == 2
+            assert all(record.status is HermesOperationStatus.SUCCEEDED for record in dispatches)
+            assert all(record.status is HermesOperationStatus.SUCCEEDED for record in deliveries)
+            assert stored_checkpoint is not None
+            assert stored_checkpoint.last_local_id == 12
     finally:
         engine.dispose()
 
@@ -635,11 +798,11 @@ def test_runtime_isolates_hermes_responses_between_wechat_accounts(tmp_path: Pat
         engine.dispose()
 
 
-def test_hermes_cleanup_error_does_not_replace_successful_poll_result(tmp_path: Path) -> None:
+def test_client_cleanup_errors_do_not_replace_successful_poll_result(tmp_path: Path) -> None:
     database_path = tmp_path / "gateway.db"
     database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
-    wechat_client = FakeWechatClient({})
     close_error = RuntimeError(f"cleanup leaked {HERMES_API_KEY}")
+    wechat_client = FakeWechatClient({}, close_error=close_error)
     hermes_client = FakeHermesClient(close_error=close_error)
 
     result = run_wechat_poll_once(

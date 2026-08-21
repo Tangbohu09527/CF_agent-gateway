@@ -23,7 +23,7 @@ and permission admission, resolves Gateway workspace and thread state, and dispa
 eligible messages with non-empty persisted `content` through Hermes.
 
 The target architecture assigns task lifecycle management to Gateway. The current code
-does **not** contain a Task entity, durable Task Queue, scheduler, retry state machine, or
+does **not** contain a Task entity, durable Task Queue, scheduler, Task retry state machine, or
 cancellation lifecycle. It currently returns a `should_create_task` admission decision and
 proceeds directly to optional Hermes dispatch. Task lifecycle management is **Planned**,
 not an implemented capability.
@@ -56,7 +56,7 @@ nodes. Its implemented AI-facing connection is the single configured Hermes HTTP
 | Dispatch an eligible non-empty persisted content string to Hermes and relay a text response | Implemented | Validated only for the recorded V1 Staging text round trip |
 | Expose message persistence/query APIs and `GET /health` | Implemented | API tests validated; production readiness is unverified |
 | Package the HTTP process as a Docker image and Compose service | Implemented | Production deployment is unverified |
-| Create and manage durable Tasks, queues, retries, cancellation, or scheduling | Planned | Not validated |
+| Create and manage durable Tasks, Task queues/retries, cancellation, or scheduling | Planned | Not validated |
 | Build model context or route across general AI providers/nodes | Planned | Not validated |
 
 ## What Gateway does not own
@@ -89,6 +89,7 @@ include:
 - `AgentWechatClient`, WeChat normalization, and explicit Message Store event conversion
 - Finite WeChat polling with `latest` and `backfill` bootstrap modes
 - Durable per-account, per-conversation polling checkpoints and at-least-once delivery
+- Automatic checkpoint-regression detection with message anchors and generation-fenced replay
 - Polling-level `is_self=true` filtering that bypasses the sink and advances the checkpoint
 - Persist-first message admission, including identity and access-policy evaluation
 - Workspace creation and conversation-scoped AI-thread reuse for authorized messages
@@ -97,10 +98,14 @@ include:
 - `HermesResponseRelay` routing through `ThreadSourceBinding` to a `WechatMessageSender`
 - Concrete `WechatHttpMessageSender` delivery through `POST /api/messages/send` using
   `{"chatId": "...", "text": "..."}`
+- Per-message durable Hermes dispatch and WeChat delivery records with a bounded pre-poll
+  recovery sweep for failed, missing, and stale work
 - Message admission sinks for existing sessions and per-message isolated sessions
 - One-cycle WeChat runtime assembly with automatic Hermes replies to the source conversation
-- Resident WeChat worker with configurable polling interval and graceful shutdown
-- `GET /health`
+- Resident WeChat worker with a singleton database lease, heartbeat, cycle-internal
+  ownership guards, capped failure backoff, configurable polling interval, and graceful
+  shutdown
+- Component `GET /health` for database, Worker, inline queue, Hermes, and delivery state
 - HTTP container build and Compose service
 
 Conversation determines context; sender identity determines permission. Admission resolves
@@ -125,13 +130,13 @@ V1 implementation instead binds one AIThread to the source account and physical 
 conversation, so authorized senders in one group reuse a whole-room thread. This is a
 known implementation deviation, not a design change.
 
-**Planned:** the Task model and lifecycle, Task Queue, Context Builder, durable
-dispatch/outbox state, general AI Provider routing, and sender-isolated group threads are
-not implemented.
+**Planned:** the Task model and lifecycle, Task Queue, Context Builder, a general Task
+dispatch outbox, AI Provider routing, and sender-isolated group threads are not implemented.
+The current per-message Hermes/delivery ledger is not a Task Queue or asynchronous outbox.
 
-**Not implemented:** combined HTTP/Worker orchestration, multiple Worker coordination,
-automated failover, and service-manager integration. The resident Worker is a standalone
-process and is not embedded in FastAPI.
+**Not implemented:** combined HTTP/Worker orchestration, multi-replica HA/failover beyond
+the singleton polling lease, and service-manager integration. The resident Worker is a
+standalone process and is not embedded in FastAPI.
 
 **Unverified:** production readiness, a live PostgreSQL deployment, target-environment
 container operation, and backup/restore procedures have no recorded validation.
@@ -159,13 +164,39 @@ and evidence.
 
 ## Message API
 
+Message routes are protected by default. `api.message_auth_enabled` defaults to `true`,
+and `api.bearer_token_env` names the secret-bearing environment variable
+(`CF_AGENT_GATEWAY_API_TOKEN` by default). Store only the environment-variable name in
+YAML, never the token. All three routes below require `Authorization: Bearer <token>`.
+A missing configured secret or a missing/wrong token fails closed with HTTP 401 and
+`{"detail":"unauthorized"}`; `GET /health` remains public.
+Explicitly disabling the check is only for programmatic tests or a separately enforced
+trusted boundary. Never disable it on an untrusted listener.
+
 - `POST /internal/messages` stores a normalized message event and returns its ID. The
   source envelope includes `source_account_id`, `conversation_type`, `is_mentioned`,
   and `is_self`.
 - `GET /messages/{id}` returns a message, its source envelope, and its attachment
   metadata.
 - `GET /sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages`
-  returns messages ordered by event timestamp within one source account.
+  returns messages ordered by event timestamp within one source account. `limit` is from
+  1 through 100 and defaults to 100; `offset` is from 0 through 100000 and defaults to 0.
+
+Authenticated read example:
+
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer ${CF_AGENT_GATEWAY_API_TOKEN}" \
+  "http://localhost:8080/sources/smoke/accounts/smoke/conversations/smoke/messages?limit=1&offset=0"
+```
+
+`MessageEvent` validation caps message and reply content at 65,536 characters, accepts at
+most 32 attachment metadata records, bounds each `file_size` to a non-negative signed
+64-bit integer, and bounds `raw_type` to a signed 32-bit integer.
+
+These field and query bounds do not provide a total HTTP request-body cap. The service
+also has no rate limiting or keyset pagination, and FastAPI's OpenAPI surfaces are public.
+Apply those controls at the deployment edge.
 
 The HTTP message write route is store-only. It does not run admission, create a Task,
 dispatch to Hermes, or relay a response. Those implemented steps are assembled only by
@@ -192,13 +223,15 @@ Verified reply summaries are stored as JSON in `reply_context`. A summary does n
 a resolved Gateway message relationship, so `reply_to_message_id` remains `null` until
 stable relationship parsing is available.
 
-### Development database schema
+### Database schema upgrade
 
-This is a development-time schema change, and a formal migration system is not yet
-available. Developers using an older development database must back it up and
-manually recreate it before using this schema. The service does not automatically
-migrate or delete `gateway.db`; production automatic migration has not been
-implemented.
+The service does not automatically migrate or delete `gateway.db`. Reviewed one-time
+SQLite and PostgreSQL hardening scripts are available under `migrations/`; the SQLite
+baseline upgrade has automated coverage, while live PostgreSQL migration remains
+unverified. Back up the database, stop every writer, and follow
+[`migrations/README.md`](migrations/README.md). There is no migration runner or automatic
+rollback. The supplied scripts fail closed on nonzero legacy checkpoints rather than
+silently replaying previously completed Hermes and WeChat side effects.
 
 Attachment content is not stored; only metadata and a storage path can be persisted through
 the Message API. The V1 WeChat polling path does not populate attachment rows or pass image
@@ -213,9 +246,12 @@ or file bytes to Hermes.
 | `python -m cf_agent_gateway.runtime.worker` | Serialized resident polling cycles | Implemented and staging-validated as a standalone process; absent from Compose |
 
 The HTTP and Worker processes are independent. If they run together, they must use the
-same database. The repository does not provide combined production orchestration, a
-Worker health endpoint, leader election, or multi-Worker coordination. Polling assumes
-one active poller for each source account.
+same database. Both polling entry points acquire the database-backed singleton `wechat`
+lease. A fresh owner rejects a resident Worker or one-cycle CLI started against the same
+database; a stopped or stale owner can be replaced after the configured threshold. The
+one-cycle CLI holds the lease only for its diagnostic cycle, and `GET /health` observes its
+heartbeat through the same Worker status record while it runs. This is crash fencing, not
+multi-replica HA.
 
 ## Technology baseline
 
@@ -239,18 +275,19 @@ python -m cf_agent_gateway.main
 On Windows PowerShell, activate the environment with
 `.venv\Scripts\Activate.ps1`.
 
-The service reads `config/config.yaml` by default. Set `CF_GATEWAY_CONFIG` to
-use a different file.
+The service reads `config/config.yaml` by default. Set `CF_GATEWAY_CONFIG` to use a
+different file. With the default API configuration, set `CF_AGENT_GATEWAY_API_TOKEN` in
+the service environment before calling a Message API route. The server can start without
+the variable, but protected routes then fail closed with HTTP 401. `GET /health` is public
+and does not require a bearer token.
 
 ```bash
 curl http://localhost:8080/health
 ```
 
-Expected response:
-
-```json
-{"status":"ok"}
-```
+A healthy component report returns HTTP 200 with top-level `status=ok`; any enabled
+degraded component returns HTTP 503 with `status=degraded`. See
+[docs/troubleshooting.md](docs/troubleshooting.md) for the component fields.
 
 ## Run one WeChat polling cycle
 
@@ -305,6 +342,10 @@ the delay between completed polling cycles in the selected configuration:
 ```yaml
 runtime:
   polling_interval_seconds: 3
+  polling_retry_max_seconds: 60
+  heartbeat_interval_seconds: 5
+  heartbeat_stale_after_seconds: 30
+  cycle_stale_after_seconds: 300
 ```
 
 Start the worker as a separate process:
@@ -313,14 +354,22 @@ Start the worker as a separate process:
 python -m cf_agent_gateway.runtime.worker
 ```
 
-The worker runs one polling cycle at a time, logs aggregate results, and waits for the
-configured interval before polling again. `Ctrl+C` and `SIGTERM` request a graceful stop;
-an in-progress synchronous polling cycle finishes its cleanup before the process exits.
-Thrown cycle failures are logged with a redacted error code and retried after the same
-interval. Failures returned inside a `PollResult` appear in resident logs only through
-aggregate counters; use the one-cycle JSON for its `failure_codes`. Invalid configuration,
-a disabled WeChat runtime, or missing required credentials fails the process instead of
-retrying indefinitely.
+The worker acquires the database-wide singleton lease, emits a background heartbeat, and
+runs one polling cycle at a time. Before polling it drains a bounded batch of failed/stale
+Hermes dispatches and missing/failed/stale deliveries from durable records, so recovery
+does not depend on the source message remaining visible. Ownership is rechecked before
+recovery and message side effects. A thrown non-fatal failure or a returned degraded
+`PollResult` increments the same consecutive-failure count; the delay doubles up to
+`polling_retry_max_seconds`. Only a healthy returned cycle resets that backoff. `Ctrl+C`
+and `SIGTERM` request a graceful stop; an in-progress
+synchronous polling cycle finishes cleanup before exit. Structured logs and persisted
+status expose cycle failures and aggregate counters. Readiness also requires a recent
+successful business cycle, a bounded in-progress cycle, and Worker capabilities that match
+the HTTP process configuration. Invalid configuration, a disabled
+WeChat runtime, an incompatible database schema, a fresh competing lease, missing required
+credentials, or deterministic client-construction failure stops the process instead of
+retrying indefinitely. Failed durable recovery candidates make the cycle degraded, rotate
+behind older queued work, and use the same capped backoff.
 
 ## Test
 
@@ -338,7 +387,8 @@ git diff --check
 ## Docker deployment entry
 
 ```bash
-docker compose config
+export CF_AGENT_GATEWAY_API_TOKEN='<message-api-token>'
+docker compose config --quiet
 docker compose up --build -d
 docker compose ps
 curl --fail http://localhost:8080/health
@@ -346,13 +396,18 @@ curl --fail http://localhost:8080/health
 
 The supplied Compose file is **Implemented** for the HTTP service only. It mounts
 `config/config.yaml` read-only, persists the default SQLite file in the `gateway-data`
-volume, and checks `GET /health`. The default configuration disables the message adapter
-and Hermes. Compose does not inject their credentials and does not start the Worker, so
-these commands do not deploy the complete text round trip.
+volume, passes `CF_AGENT_GATEWAY_API_TOKEN` from the host environment, binds host port
+`127.0.0.1:8080` by default, and checks `GET /health`. Set `CF_GATEWAY_BIND_ADDRESS` only
+when an intentional external bind is protected by the deployment edge. The default
+configuration disables the message adapter and Hermes. Compose does not inject their
+credentials and does not start the Worker, so these commands do not deploy the complete
+text round trip.
 
-`GET /health` returning `{"status":"ok"}` proves only that the HTTP process can answer its
-liveness route after startup. It does not probe the database after startup, the Worker,
-Hermes, the external message adapter, or an AI node.
+`GET /health` is deliberately public. It checks the database, persisted Worker heartbeat,
+durable operation backlog, and side-effect-free Hermes/adapter connectivity. A degraded
+component returns HTTP 503. It does not send a Hermes prompt or WeChat reply and cannot
+prove a complete round trip, Message API authentication, or the health of individual AI
+nodes behind Hermes.
 
 Use [docs/deployment.md](docs/deployment.md) for environment requirements, startup order,
 health semantics, Worker operation, backup, recovery, upgrade, and rollback.
@@ -360,7 +415,10 @@ health semantics, Worker operation, backup, recovery, upgrade, and rollback.
 ## Documentation map
 
 - [Architecture and ownership boundaries](docs/architecture.md)
+- [Runtime architecture, message flow, workers, and checkpoints](docs/runtime-architecture.md)
 - [Deployment, verification, maintenance, and recovery](docs/deployment.md)
+- [Troubleshooting message, Worker, Hermes, and delivery failures](docs/troubleshooting.md)
+- [Restart, retry, checkpoint, and external-call recovery](docs/recovery-guide.md)
 - [Hermes and AI execution-node integration](docs/integration.md)
 - [Recorded V1 Staging validation boundary](docs/v1-staging-validation.md)
 - [Database migration status](migrations/README.md)

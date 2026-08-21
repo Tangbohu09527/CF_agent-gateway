@@ -1,27 +1,40 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.database import get_database_session
+from cf_agent_gateway.gateway.security import require_message_api_bearer
 from cf_agent_gateway.message.errors import ConversationTypeConflictError
 from cf_agent_gateway.message.schemas import MessageCreated, MessageEvent, MessageResponse
-from cf_agent_gateway.message.store import MessageStore
+from cf_agent_gateway.message.store import (
+    DEFAULT_CONVERSATION_MESSAGE_LIMIT,
+    MAX_CONVERSATION_MESSAGE_LIMIT,
+    MAX_CONVERSATION_MESSAGE_OFFSET,
+    MessageStore,
+)
+from cf_agent_gateway.runtime.health import HealthResponse, check_runtime_health
 
 router = APIRouter()
-
-
-class HealthResponse(BaseModel):
-    status: str
-
-
-@router.get("/health", response_model=HealthResponse, tags=["system"])
-async def health() -> HealthResponse:
-    return HealthResponse(status="ok")
-
-
 DatabaseSession = Annotated[Session, Depends(get_database_session)]
+
+
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+def health(
+    request: Request,
+    response: Response,
+    session: DatabaseSession,
+) -> HealthResponse:
+    result = check_runtime_health(session, request.app.state.settings)
+    if result.status == "degraded":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return result
 
 
 @router.post(
@@ -29,6 +42,7 @@ DatabaseSession = Annotated[Session, Depends(get_database_session)]
     response_model=MessageCreated,
     status_code=status.HTTP_201_CREATED,
     tags=["messages"],
+    dependencies=[Depends(require_message_api_bearer)],
 )
 def create_message(
     event: MessageEvent,
@@ -58,6 +72,7 @@ def create_message(
     "/messages/{message_id}",
     response_model=MessageResponse,
     tags=["messages"],
+    dependencies=[Depends(require_message_api_bearer)],
 )
 def get_message(message_id: int, session: DatabaseSession) -> MessageResponse:
     message = MessageStore(session).get(message_id)
@@ -70,16 +85,24 @@ def get_message(message_id: int, session: DatabaseSession) -> MessageResponse:
     "/sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages",
     response_model=list[MessageResponse],
     tags=["messages"],
+    dependencies=[Depends(require_message_api_bearer)],
 )
 def get_conversation_messages(
     source: str,
     source_account_id: str,
     conversation_id: str,
     session: DatabaseSession,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_CONVERSATION_MESSAGE_LIMIT),
+    ] = DEFAULT_CONVERSATION_MESSAGE_LIMIT,
+    offset: Annotated[int, Query(ge=0, le=MAX_CONVERSATION_MESSAGE_OFFSET)] = 0,
 ) -> list[MessageResponse]:
     messages = MessageStore(session).list_for_conversation(
         source=source,
         source_account_id=source_account_id,
         conversation_id=conversation_id,
+        limit=limit,
+        offset=offset,
     )
     return [MessageResponse.model_validate(message) for message in messages]
