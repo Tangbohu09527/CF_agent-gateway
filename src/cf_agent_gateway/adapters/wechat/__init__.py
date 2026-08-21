@@ -26,6 +26,7 @@ from cf_agent_gateway.adapters.wechat.outbound_http import WechatHttpMessageSend
 from cf_agent_gateway.adapters.wechat.polling_errors import (
     InvalidBootstrapModeError,
     WechatChatIdentityError,
+    WechatCheckpointConflictError,
     WechatCheckpointNotFoundError,
     WechatCheckpointValueError,
     WechatConversationMismatchError,
@@ -75,6 +76,7 @@ __all__ = [
     "WechatConversationType",
     "WechatConversationMismatchError",
     "WechatChatIdentityError",
+    "WechatCheckpointConflictError",
     "WechatCheckpointNotFoundError",
     "WechatCheckpointValueError",
     "WechatCheckpointStore",

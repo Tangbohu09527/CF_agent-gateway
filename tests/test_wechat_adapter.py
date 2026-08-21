@@ -443,6 +443,70 @@ def test_missing_server_id_uses_scoped_local_id_fallback() -> None:
     assert other_account.source_message_id != first.source_message_id
 
 
+def test_fallback_identity_is_stable_within_and_distinct_across_generations() -> None:
+    legacy = normalize_wechat_message(
+        raw_message(serverId=None),
+        source_account_id="wxid_bot",
+    )
+    explicit_legacy = normalize_wechat_message(
+        raw_message(serverId=None),
+        source_account_id="wxid_bot",
+        sync_generation=0,
+    )
+    first_generation = normalize_wechat_message(
+        raw_message(serverId=None),
+        source_account_id="wxid_bot",
+        sync_generation=1,
+    )
+    same_generation = normalize_wechat_message(
+        raw_message(serverId=None),
+        source_account_id="wxid_bot",
+        sync_generation=1,
+    )
+    next_generation = normalize_wechat_message(
+        raw_message(serverId=None),
+        source_account_id="wxid_bot",
+        sync_generation=2,
+    )
+
+    assert (
+        legacy.source_message_id
+        == "local:v1:2bda202457baa89a67fffe3c66d9e46901fe7b80adeace80bb0e8766e5a99e15"
+    )
+    assert explicit_legacy.source_message_id == legacy.source_message_id
+    assert first_generation.source_message_id.startswith("local:v2:")
+    assert same_generation.source_message_id == first_generation.source_message_id
+    assert first_generation.source_message_id != legacy.source_message_id
+    assert next_generation.source_message_id != first_generation.source_message_id
+
+
+def test_stable_server_identity_ignores_sync_generation() -> None:
+    legacy = normalize_wechat_message(
+        raw_message(),
+        source_account_id="wxid_bot",
+        sync_generation=0,
+    )
+    regressed = normalize_wechat_message(
+        raw_message(localId=1),
+        source_account_id="wxid_bot",
+        sync_generation=9,
+    )
+
+    assert legacy.source_message_id == regressed.source_message_id == "9001"
+    assert legacy.event_id == regressed.event_id
+    assert regressed.source_message_id_is_fallback is False
+
+
+@pytest.mark.parametrize("sync_generation", [-1, True, 1.5, "1", None])
+def test_invalid_sync_generation_is_rejected(sync_generation: object) -> None:
+    with pytest.raises(WechatNormalizationError, match="sync_generation"):
+        normalize_wechat_message(
+            raw_message(),
+            source_account_id="wxid_bot",
+            sync_generation=sync_generation,  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize("server_id", [None, "", "   ", 0, "0"])
 def test_unusable_server_id_falls_back_to_local_id(server_id: object) -> None:
     normalized = normalize_wechat_message(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from sqlalchemy import BigInteger, CheckConstraint, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, UniqueConstraint, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from cf_agent_gateway.adapters.wechat.normalized_models import (
 )
 from cf_agent_gateway.adapters.wechat.polling_errors import (
     InvalidBootstrapModeError,
+    WechatCheckpointConflictError,
     WechatCheckpointValueError,
 )
 from cf_agent_gateway.adapters.wechat.polling_models import (
@@ -120,12 +122,14 @@ class TrackingCheckpointStore(WechatSyncCheckpointStore):
         source_account_id: str,
         conversation_id: str,
         last_local_id: int,
+        last_message_fingerprint: str | None = None,
     ) -> tuple[WechatSyncCheckpoint, bool]:
         self.initialize_calls.append(last_local_id)
         return super().initialize(
             source_account_id=source_account_id,
             conversation_id=conversation_id,
             last_local_id=last_local_id,
+            last_message_fingerprint=last_message_fingerprint,
         )
 
     def advance(
@@ -134,6 +138,9 @@ class TrackingCheckpointStore(WechatSyncCheckpointStore):
         source_account_id: str,
         conversation_id: str,
         last_local_id: int,
+        expected_last_local_id: int,
+        expected_regression_generation: int,
+        last_message_fingerprint: str | None = None,
     ) -> WechatSyncCheckpoint:
         self.advance_calls.append(last_local_id)
         if self.fail_advance_once:
@@ -143,6 +150,9 @@ class TrackingCheckpointStore(WechatSyncCheckpointStore):
             source_account_id=source_account_id,
             conversation_id=conversation_id,
             last_local_id=last_local_id,
+            last_message_fingerprint=last_message_fingerprint,
+            expected_last_local_id=expected_last_local_id,
+            expected_regression_generation=expected_regression_generation,
         )
 
 
@@ -166,7 +176,9 @@ class InitializeRaceCheckpointStore(TrackingCheckpointStore):
         source_account_id: str,
         conversation_id: str,
         last_local_id: int,
+        last_message_fingerprint: str | None = None,
     ) -> tuple[WechatSyncCheckpoint, bool]:
+        del last_message_fingerprint
         self.initialize_calls.append(last_local_id)
         existing = WechatSyncCheckpointStore.get(
             self,
@@ -212,6 +224,39 @@ def checkpoint(
         source_account_id=account_id,
         conversation_id=conversation_id,
     )
+
+
+def test_lease_guard_stops_before_sink_and_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=0,
+    )
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(1)]})
+    sink = RecordingSink()
+    guard_calls = 0
+
+    def lease_guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            raise RuntimeError("worker lease lost")
+
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        bootstrap_mode="backfill",
+        lease_guard=lease_guard,
+    )
+
+    with pytest.raises(RuntimeError, match="worker lease lost"):
+        service.poll_once()
+
+    assert sink.attempts == []
+    assert checkpoint(checkpoint_store).last_local_id == 0  # type: ignore[union-attr]
 
 
 def test_logged_out_does_not_list_chats_or_messages(
@@ -300,6 +345,262 @@ def test_messages_at_or_below_checkpoint_are_not_delivered_again(
     assert result.messages_processed == 0
     assert result.messages_skipped_by_checkpoint == 2
     assert result.chats_succeeded == 1
+
+
+def test_checkpoint_regression_replays_visible_messages(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+    )
+    client = FakeWechatClient(
+        messages={CHAT_ID: [raw_message(12), raw_message(11), raw_message(10)]}
+    )
+    sink = RecordingSink()
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="cf_agent_gateway.adapters.wechat.polling_service",
+    ):
+        result = WechatPollingService(client, checkpoint_store, sink).poll_once()
+
+    assert source_ids(sink.handled) == ["10", "11", "12"]
+    assert result.messages_processed == 3
+    assert result.messages_skipped_by_checkpoint == 0
+    assert checkpoint(checkpoint_store).last_local_id == 12  # type: ignore[union-attr]
+    regression = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "wechat checkpoint regression detected"
+    )
+    assert regression.fields == {
+        "source_account_id": ACCOUNT_ID,
+        "conversation_id": CHAT_ID,
+        "old_checkpoint": 15,
+        "remote_latest_local_id": 12,
+        "recovery_action": "rewind_to_visible_window",
+    }
+    recovered = next(
+        record for record in caplog.records if record.getMessage() == "wechat checkpoint recovered"
+    )
+    assert recovered.fields["old_checkpoint"] == 15
+    assert recovered.fields["new_checkpoint"] == 9
+    assert recovered.fields["regression_generation"] == 1
+
+
+@pytest.mark.parametrize("uses_server_id", [True, False])
+def test_checkpoint_anchor_recovers_regression_after_new_session_overtakes_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+    uses_server_id: bool,
+) -> None:
+    old_message = raw_message(
+        15,
+        server_id="old-server-15" if uses_server_id else 0,
+        content="old-session-anchor",
+    )
+    old_sink = RecordingSink()
+    WechatPollingService(
+        FakeWechatClient(messages={CHAT_ID: [old_message]}),
+        checkpoint_store,
+        old_sink,
+        bootstrap_mode="backfill",
+    ).poll_once()
+    stored_before_reset = checkpoint(checkpoint_store)
+    assert stored_before_reset is not None
+    assert stored_before_reset.last_local_id == 15
+    assert stored_before_reset.last_message_fingerprint is not None
+
+    new_messages = [
+        raw_message(
+            local_id,
+            server_id=f"new-server-{local_id}" if uses_server_id else 0,
+            content=f"new-session-{local_id}",
+        )
+        for local_id in range(1, 21)
+    ]
+    new_sink = RecordingSink()
+    result = WechatPollingService(
+        FakeWechatClient(messages={CHAT_ID: new_messages}),
+        checkpoint_store,
+        new_sink,
+        bootstrap_mode="backfill",
+    ).poll_once()
+
+    assert result.messages_processed == 20
+    assert [message.content for message in new_sink.handled] == [
+        f"new-session-{local_id}" for local_id in range(1, 21)
+    ]
+    stored_after_reset = checkpoint(checkpoint_store)
+    assert stored_after_reset is not None
+    assert stored_after_reset.last_local_id == 20
+    assert stored_after_reset.regression_generation == 1
+    assert stored_after_reset.last_message_fingerprint is not None
+
+
+def test_checkpoint_anchor_does_not_recover_normal_overlapping_window(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    initial_messages = [
+        raw_message(local_id, server_id=f"server-{local_id}") for local_id in range(10, 16)
+    ]
+    WechatPollingService(
+        FakeWechatClient(messages={CHAT_ID: initial_messages}),
+        checkpoint_store,
+        RecordingSink(),
+        bootstrap_mode="backfill",
+    ).poll_once()
+    initial_checkpoint = checkpoint(checkpoint_store)
+    assert initial_checkpoint is not None
+    assert initial_checkpoint.last_local_id == 15
+    assert initial_checkpoint.last_message_fingerprint is not None
+
+    overlapping_messages = [
+        raw_message(local_id, server_id=f"server-{local_id}") for local_id in range(10, 21)
+    ]
+    sink = RecordingSink()
+    with caplog.at_level(
+        logging.WARNING,
+        logger="cf_agent_gateway.adapters.wechat.polling_service",
+    ):
+        result = WechatPollingService(
+            FakeWechatClient(messages={CHAT_ID: overlapping_messages}),
+            checkpoint_store,
+            sink,
+            bootstrap_mode="backfill",
+        ).poll_once()
+
+    assert result.messages_processed == 5
+    assert [message.source_local_id for message in sink.handled] == [
+        str(local_id) for local_id in range(16, 21)
+    ]
+    current = checkpoint(checkpoint_store)
+    assert current is not None
+    assert current.last_local_id == 20
+    assert current.regression_generation == 0
+    assert all(
+        record.getMessage() != "wechat checkpoint regression detected" for record in caplog.records
+    )
+
+
+def test_regression_compare_and_swap_loss_does_not_process_with_stale_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint="a" * 64,
+    )
+
+    def lose_recovery_race(**kwargs: object) -> tuple[WechatSyncCheckpoint, bool]:
+        del kwargs
+        session.execute(
+            update(WechatSyncCheckpoint)
+            .where(
+                WechatSyncCheckpoint.source_account_id == ACCOUNT_ID,
+                WechatSyncCheckpoint.conversation_id == CHAT_ID,
+            )
+            .values(
+                last_local_id=16,
+                last_message_fingerprint="b" * 64,
+            )
+        )
+        session.commit()
+        current = checkpoint(checkpoint_store)
+        assert current is not None
+        return current, False
+
+    monkeypatch.setattr(checkpoint_store, "recover_regression", lose_recovery_race)
+    sink = RecordingSink()
+    result = WechatPollingService(
+        FakeWechatClient(
+            messages={
+                CHAT_ID: [
+                    raw_message(local_id, server_id=f"new-server-{local_id}")
+                    for local_id in range(1, 21)
+                ]
+            }
+        ),
+        checkpoint_store,
+        sink,
+        bootstrap_mode="backfill",
+    ).poll_once()
+
+    assert result.chats_failed == 1
+    assert result.failures[0].code == "wechat_checkpoint_regression_conflict"
+    assert sink.attempts == []
+
+
+def test_regression_generation_prevents_fallback_local_id_reuse(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    client = FakeWechatClient(
+        messages={CHAT_ID: [raw_message(12, server_id=0, content="before restart")]}
+    )
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        bootstrap_mode="backfill",
+    )
+
+    first = service.poll_once()
+    checkpoint_store.advance(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        expected_last_local_id=12,
+        expected_regression_generation=0,
+    )
+    client.messages[CHAT_ID] = [raw_message(12, server_id=0, content="after restart")]
+    second = service.poll_once()
+
+    assert first.messages_processed == 1
+    assert second.messages_processed == 1
+    assert len(sink.handled) == 2
+    before_restart, after_restart = sink.handled
+    assert before_restart.source_message_id.startswith("local:v1:")
+    assert after_restart.source_message_id.startswith("local:v2:")
+    assert after_restart.source_message_id != before_restart.source_message_id
+    stored = checkpoint(checkpoint_store)
+    assert stored is not None
+    assert stored.last_local_id == 12
+    assert stored.regression_generation == 1
+
+
+def test_normal_sync_above_checkpoint_does_not_trigger_recovery(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=10,
+    )
+    client = FakeWechatClient(
+        messages={CHAT_ID: [raw_message(13), raw_message(11), raw_message(12)]}
+    )
+    sink = RecordingSink()
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="cf_agent_gateway.adapters.wechat.polling_service",
+    ):
+        result = WechatPollingService(client, checkpoint_store, sink).poll_once()
+
+    assert source_ids(sink.handled) == ["11", "12", "13"]
+    assert result.messages_processed == 3
+    assert checkpoint(checkpoint_store).last_local_id == 13  # type: ignore[union-attr]
+    assert all(
+        record.getMessage() != "wechat checkpoint regression detected" for record in caplog.records
+    )
 
 
 def test_message_above_checkpoint_is_delivered_and_persisted(
@@ -795,7 +1096,7 @@ def test_latest_initialize_failure_leaves_no_partial_checkpoint(
     assert sink.attempts == []
 
 
-def test_checkpoint_store_never_moves_backward(
+def test_checkpoint_store_rejects_backward_advance(
     checkpoint_store: WechatSyncCheckpointStore,
 ) -> None:
     checkpoint_store.initialize(
@@ -804,14 +1105,85 @@ def test_checkpoint_store_never_moves_backward(
         last_local_id=10,
     )
 
-    returned = checkpoint_store.advance(
+    with pytest.raises(WechatCheckpointValueError):
+        checkpoint_store.advance(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            last_local_id=7,
+            expected_last_local_id=10,
+            expected_regression_generation=0,
+        )
+
+    assert checkpoint(checkpoint_store).last_local_id == 10  # type: ignore[union-attr]
+
+
+def test_checkpoint_regression_recovery_uses_compare_and_swap(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
         source_account_id=ACCOUNT_ID,
         conversation_id=CHAT_ID,
-        last_local_id=7,
+        last_local_id=15,
     )
 
-    assert returned.last_local_id == 10
-    assert checkpoint(checkpoint_store).last_local_id == 10  # type: ignore[union-attr]
+    recovered_checkpoint, recovered = checkpoint_store.recover_regression(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        old_checkpoint=15,
+        old_regression_generation=0,
+        new_checkpoint=9,
+    )
+    stale_checkpoint, stale_recovered = checkpoint_store.recover_regression(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        old_checkpoint=15,
+        old_regression_generation=0,
+        new_checkpoint=8,
+    )
+
+    assert recovered is True
+    assert recovered_checkpoint.last_local_id == 9
+    assert recovered_checkpoint.regression_generation == 1
+    assert stale_recovered is False
+    assert stale_checkpoint.last_local_id == 9
+    assert stale_checkpoint.regression_generation == 1
+    assert checkpoint(checkpoint_store).last_local_id == 9  # type: ignore[union-attr]
+
+
+def test_stale_generation_cannot_advance_recovered_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint="a" * 64,
+    )
+    recovered_checkpoint, recovered = checkpoint_store.recover_regression(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        old_checkpoint=15,
+        old_regression_generation=0,
+        new_checkpoint=9,
+    )
+    assert recovered is True
+    assert recovered_checkpoint.regression_generation == 1
+
+    with pytest.raises(WechatCheckpointConflictError):
+        checkpoint_store.advance(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            last_local_id=16,
+            last_message_fingerprint="b" * 64,
+            expected_last_local_id=15,
+            expected_regression_generation=0,
+        )
+
+    current = checkpoint(checkpoint_store)
+    assert current is not None
+    assert current.last_local_id == 9
+    assert current.regression_generation == 1
+    assert current.last_message_fingerprint is None
 
 
 @pytest.mark.parametrize("invalid_local_id", [-1, 2**63])
@@ -822,12 +1194,21 @@ def test_checkpoint_store_rejects_values_outside_big_integer_range(
     invalid_local_id: int,
 ) -> None:
     method = getattr(checkpoint_store, operation)
+    extra_arguments = (
+        {
+            "expected_last_local_id": 0,
+            "expected_regression_generation": 0,
+        }
+        if operation == "advance"
+        else {}
+    )
 
     with pytest.raises(WechatCheckpointValueError):
         method(
             source_account_id=ACCOUNT_ID,
             conversation_id=CHAT_ID,
             last_local_id=invalid_local_id,
+            **extra_arguments,
         )
 
     assert checkpoint(checkpoint_store) is None
@@ -1011,6 +1392,14 @@ def test_failure_result_does_not_expose_exception_or_message_data(
 
 def test_checkpoint_schema_uses_big_integer_and_account_chat_unique_key() -> None:
     assert isinstance(WechatSyncCheckpoint.__table__.c.last_local_id.type, BigInteger)
+    generation = WechatSyncCheckpoint.__table__.c.regression_generation
+    assert isinstance(generation.type, BigInteger)
+    assert generation.default is not None and generation.default.arg == 0
+    assert generation.server_default is not None
+    assert str(generation.server_default.arg) == "0"
+    fingerprint = WechatSyncCheckpoint.__table__.c.last_message_fingerprint
+    assert fingerprint.type.length == 64
+    assert fingerprint.nullable is True
     unique_column_sets = {
         tuple(column.name for column in constraint.columns)
         for constraint in WechatSyncCheckpoint.__table__.constraints
@@ -1023,6 +1412,11 @@ def test_checkpoint_schema_uses_big_integer_and_account_chat_unique_key() -> Non
         if isinstance(constraint, CheckConstraint)
     }
     assert "last_local_id >= 0" in check_constraints
+    assert "regression_generation >= 0" in check_constraints
+    assert (
+        "last_message_fingerprint IS NULL OR length(last_message_fingerprint) = 64"
+        in check_constraints
+    )
 
 
 def test_database_constraint_rejects_negative_checkpoint(session: Session) -> None:
@@ -1031,6 +1425,25 @@ def test_database_constraint_rejects_negative_checkpoint(session: Session) -> No
             source_account_id=ACCOUNT_ID,
             conversation_id=CHAT_ID,
             last_local_id=-1,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+    assert checkpoint(WechatSyncCheckpointStore(session)) is None
+
+
+def test_database_constraint_rejects_negative_regression_generation(
+    session: Session,
+) -> None:
+    session.add(
+        WechatSyncCheckpoint(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            last_local_id=0,
+            regression_generation=-1,
         )
     )
 

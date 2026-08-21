@@ -209,25 +209,32 @@ successful response, dispatch invariant failure, or response-delivery failure. T
 objects carry stable sanitized metadata; runtime surfaces can collapse them into broader
 polling failure codes and do not expose secrets or message bodies.
 
-The Hermes client has no internal HTTP retry, exponential backoff, circuit breaker, or
-idempotency key. Worker behavior provides a broader retry boundary:
+The Hermes client has no internal HTTP retry, circuit breaker, or upstream idempotency key.
+The Worker and per-message ledger provide the broader retry boundary:
 
 - a message/sink failure prevents its polling checkpoint from advancing;
 - the same message can be processed again in a later cycle;
 - Message Store idempotency prevents a duplicate stored Message;
-- the Hermes call and outbound response are not protected by a durable outbox or external
-  idempotency key;
-- an ambiguous timeout, checkpoint failure, or response-delivery failure can therefore
-  cause a repeated AI call or repeated response.
+- succeeded dispatch/delivery records suppress completed external calls;
+- active leases reject concurrent replay, while failed or 120-second stale leases can be
+  reclaimed with an incremented attempt count;
+- transport, timeout, invalid 2xx response, HTTP 408, HTTP 429, and 5xx failures remain in
+  progress until lease expiry because the external result is ambiguous;
+- each resident cycle performs a bounded database recovery sweep before polling, so
+  failed/stale dispatches and missing/failed/stale deliveries do not depend on the source
+  message remaining in the adapter window;
+- Gateway still has no upstream idempotency key, so external success followed by a crash
+  before the local success commit can repeat after stale reclaim.
 
-This is at-least-once inbound processing, not end-to-end exactly-once delivery. Operators
-must review ambiguous external outcomes before forcing replay.
+This is at-least-once inbound processing with durable suppression of locally recorded
+success, not end-to-end exactly-once delivery. Stop the Worker before lease expiry when an
+ambiguous external result must be reconciled before automatic stale reclaim.
 
-Within the resident Worker, a returned `PollResult` is logged as aggregate counts and the
-next cycle runs after the fixed `runtime.polling_interval_seconds`; a caught cycle exception
-is logged with a redacted code before the same wait. Missing required credentials, invalid
-configuration, or a disabled polling runtime stops the Worker instead of retrying
-indefinitely.
+Within the resident Worker, a degraded returned `PollResult` and a thrown non-fatal cycle
+exception increment the same consecutive-failure count and use exponential delay capped by
+`runtime.polling_retry_max_seconds`. Only a healthy returned result resets the count.
+Missing required credentials, invalid configuration, a fresh competing resident lease, or
+disabled polling stops the Worker.
 
 ## AI execution-node relationship
 
@@ -239,7 +246,7 @@ indefinitely.
 | Direct node address or credentials | None | Not implemented by design boundary |
 | Node discovery/registration/heartbeat | None | Not implemented |
 | Capability- or load-based routing | None | Planned general provider/node routing |
-| Node health/readiness | Not probed; `/health` does not call Hermes | Not implemented |
+| Hermes endpoint connectivity | Side-effect-free `/health` probe; individual execution nodes remain opaque | Implemented for endpoint reachability only |
 | Async Task/progress/cancel/result protocol | None | Planned Task lifecycle; no current contract |
 | Multi-endpoint failover | None | Not implemented |
 
@@ -249,9 +256,9 @@ contract. From Gateway's perspective, everything beyond Hermes is opaque.
 
 ## Connectivity verification
 
-No side-effect-free Hermes readiness command exists in this repository. `GET /health`
-checks only the Gateway HTTP process, and the one-cycle Worker command can consume and
-dispatch real messages.
+`GET /health` performs a side-effect-free Hermes connectivity probe and summarizes durable
+dispatch operation state. It does not send a prompt or inspect AI nodes behind Hermes. The
+one-cycle Worker command remains side-effecting: it can consume and dispatch real messages.
 
 For a controlled environment:
 
@@ -259,7 +266,7 @@ For a controlled environment:
 2. confirm the Worker has a direct route to `hermes.base_url` and that TLS trust is valid;
 3. confirm the environment variable named by `hermes.api_key_env` is present in the Worker
    process;
-4. start with exactly one Worker for the source account;
+4. start exactly one resident Worker for the shared Gateway database;
 5. submit a synthetic allowed text event through the normal polling path;
 6. confirm one Message, the expected Workspace/AIThread, a Hermes session binding, one
    assistant response, and an advanced checkpoint;
@@ -287,7 +294,8 @@ key, Authorization header, full message body, or external identifiers.
 
 **Implemented:** single-endpoint Hermes client, bearer authentication, synchronous chat
 completion contract, admission-gated dispatch of non-empty persisted content, persisted
-session claim/reuse/rotation, text response relay, sanitized errors, and Worker assembly.
+session claim/reuse/rotation, per-message dispatch/delivery status and leases, text response
+relay, side-effect-free health connectivity, sanitized errors, and Worker assembly.
 
 **Validated:** automated client/dispatch/concurrency/response tests and the historical V1
 Staging text round trip. That record does not validate every future endpoint or production
@@ -297,9 +305,11 @@ environment.
 load limits, and long-running reliability. Multi-endpoint failover is **Not implemented**;
 direct AI-node operations are outside the Gateway integration boundary.
 
-**Planned:** durable Task lifecycle, provider/node registry and routing, durable dispatch
-state/outbox, sender-isolated group threads, and richer asynchronous execution contracts.
+**Planned:** durable Task lifecycle, provider/node registry and routing, a general Task
+outbox, sender-isolated group threads, and richer asynchronous execution contracts.
 
 See [architecture.md](architecture.md) for Gateway ownership and state boundaries,
 [deployment.md](deployment.md) for process operation and recovery, and
 [v1-staging-validation.md](v1-staging-validation.md) for recorded evidence.
+For active incidents, use [troubleshooting.md](troubleshooting.md) before the controlled
+replay procedures in [recovery-guide.md](recovery-guide.md).

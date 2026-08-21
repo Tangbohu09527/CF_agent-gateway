@@ -168,6 +168,9 @@ def test_timeout_has_stable_sanitized_error() -> None:
         {
             "choices": [{"message": {"role": "assistant"}}],
         },
+        {
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+        },
     ],
 )
 def test_invalid_success_response_raises_response_error(payload: object) -> None:

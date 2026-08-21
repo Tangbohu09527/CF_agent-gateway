@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+from contextlib import suppress
+from hashlib import sha256
 from typing import Protocol
 
 from sqlalchemy.orm import Session
 
+from cf_agent_gateway.adapters.wechat.errors import (
+    WechatAPIError,
+    WechatResponseError,
+    WechatTransportError,
+)
 from cf_agent_gateway.adapters.wechat.outbound import WechatMessageSender
 from cf_agent_gateway.admission import AdmissionOutcome
 from cf_agent_gateway.hermes.errors import HermesDeliveryError
 from cf_agent_gateway.hermes.models import (
     HermesDispatchOutcome,
+    HermesOperationStatus,
     HermesResponseDeliveryOutcome,
 )
 from cf_agent_gateway.hermes.service import HermesDispatcher
+from cf_agent_gateway.hermes.store import HermesLedgerStore
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.workspace.models import (
@@ -56,12 +65,16 @@ class HermesResponseHandler:
         *,
         message_store: MessageStore | None = None,
         workspace_store: WorkspaceStore | None = None,
+        ledger_store: HermesLedgerStore | None = None,
     ) -> None:
         self._session = session
         self._sender = sender
         self._message_store = message_store if message_store is not None else MessageStore(session)
         self._workspace_store = (
             workspace_store if workspace_store is not None else WorkspaceStore(session)
+        )
+        self._ledger_store = (
+            ledger_store if ledger_store is not None else HermesLedgerStore(session)
         )
 
     def handle(self, response: HermesDispatchOutcome) -> None:
@@ -99,7 +112,61 @@ class HermesResponseHandler:
             raise HermesDeliveryError(reason="empty_assistant_content")
 
         conversation_id = source_binding.physical_conversation_id
-        self._sender.send_text(conversation_id, response.assistant_content)
+        content_sha256 = sha256(response.assistant_content.encode("utf-8")).hexdigest()
+        claim = self._ledger_store.claim_delivery(
+            message_id=message.id,
+            ai_thread_id=thread.id,
+            conversation_id=conversation_id,
+            content_sha256=content_sha256,
+        )
+        record = claim.record
+        if (
+            record.ai_thread_id != thread.id
+            or record.conversation_id != conversation_id
+            or record.content_sha256 != content_sha256
+        ):
+            raise HermesDeliveryError(reason="delivery_record_mismatch")
+        if not claim.acquired:
+            if record.status is HermesOperationStatus.SUCCEEDED:
+                return HermesResponseDeliveryOutcome(
+                    message_id=message.id,
+                    ai_thread_id=thread.id,
+                    conversation_id=conversation_id,
+                )
+            raise HermesDeliveryError(reason="delivery_in_progress")
+        lease_token = record.lease_token
+        if lease_token is None:
+            raise HermesDeliveryError(reason="delivery_record_invalid")
+
+        try:
+            self._sender.send_text(conversation_id, response.assistant_content)
+        except Exception as error:
+            self._session.rollback()
+            with suppress(Exception):
+                if _external_result_is_ambiguous(error):
+                    self._ledger_store.note_ambiguous_delivery(
+                        record,
+                        lease_token=lease_token,
+                        error_code=_operation_error_code(error),
+                    )
+                else:
+                    self._ledger_store.fail_delivery(
+                        record,
+                        lease_token=lease_token,
+                        error_code=_operation_error_code(error),
+                    )
+            raise
+
+        try:
+            completed = self._ledger_store.complete_delivery(
+                record,
+                lease_token=lease_token,
+            )
+            if not completed:
+                raise HermesDeliveryError(reason="delivery_lease_lost")
+        except Exception:
+            self._session.rollback()
+            raise
         return HermesResponseDeliveryOutcome(
             message_id=message.id,
             ai_thread_id=thread.id,
@@ -128,3 +195,18 @@ class HermesResponseHandler:
             and binding.account_id == message.source_account_id
             and binding.physical_conversation_id == message.conversation_id
         )
+
+
+def _operation_error_code(error: Exception) -> str:
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return type(error).__name__
+
+
+def _external_result_is_ambiguous(error: Exception) -> bool:
+    if isinstance(error, WechatTransportError | WechatResponseError):
+        return True
+    return isinstance(error, WechatAPIError) and (
+        error.status_code in {408, 429} or error.status_code >= 500
+    )

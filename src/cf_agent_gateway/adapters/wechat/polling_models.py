@@ -19,6 +19,7 @@ class BootstrapMode(StrEnum):
 
 class PollFailureStage(StrEnum):
     AUTH = "auth"
+    RECOVERY = "recovery"
     LIST_CHATS = "list_chats"
     PARSE_CHAT = "parse_chat"
     LIST_MESSAGES = "list_messages"
@@ -79,12 +80,29 @@ class WechatSyncCheckpoint(Base):
             "last_local_id >= 0",
             name="ck_wechat_sync_checkpoint_nonnegative_local_id",
         ),
+        CheckConstraint(
+            "regression_generation >= 0",
+            name="ck_wechat_sync_checkpoint_nonnegative_generation",
+        ),
+        CheckConstraint(
+            "last_message_fingerprint IS NULL OR length(last_message_fingerprint) = 64",
+            name="ck_wechat_sync_checkpoint_fingerprint_length",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_account_id: Mapped[str] = mapped_column(String(255))
     conversation_id: Mapped[str] = mapped_column(String(255))
     last_local_id: Mapped[int] = mapped_column(BigInteger)
+    regression_generation: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default="0",
+    )
+    last_message_fingerprint: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     initialized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

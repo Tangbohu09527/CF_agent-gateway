@@ -5,18 +5,27 @@ import os
 import signal
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import partial
 from threading import Event
 from types import FrameType
 
 from cf_agent_gateway.adapters.wechat import PollResult
 from cf_agent_gateway.config import Settings, load_settings
+from cf_agent_gateway.database import DatabaseSchemaError
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.runtime.errors import (
     HermesAPIKeyEnvironmentError,
+    HermesClientInitializationError,
     HermesRuntimeError,
+    WechatClientInitializationError,
     WechatRuntimeDisabledError,
     WechatRuntimeError,
     WechatTokenEnvironmentError,
+)
+from cf_agent_gateway.runtime.status import (
+    DatabaseWorkerStatusReporter,
+    WorkerLeaseError,
+    poll_result_error_code,
 )
 from cf_agent_gateway.runtime.wechat import run_wechat_poll_once
 
@@ -26,9 +35,13 @@ logger = logging.getLogger(__name__)
 
 PollOnce = Callable[[Settings], PollResult]
 _FATAL_POLL_ERRORS = (
+    DatabaseSchemaError,
     HermesAPIKeyEnvironmentError,
+    HermesClientInitializationError,
+    WechatClientInitializationError,
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
+    WorkerLeaseError,
 )
 
 
@@ -37,31 +50,90 @@ def run_worker(
     *,
     stop_event: Event | None = None,
     poll_once: PollOnce | None = None,
+    status_reporter: DatabaseWorkerStatusReporter | None = None,
 ) -> None:
     """Run serialized WeChat polling cycles until shutdown is requested."""
 
-    shutdown = stop_event if stop_event is not None else Event()
-    execute_poll = poll_once if poll_once is not None else run_wechat_poll_once
-    interval = settings.runtime.polling_interval_seconds
+    if poll_once is None and not settings.wechat.enabled:
+        raise WechatRuntimeDisabledError()
 
-    logger.info(
-        "worker started",
-        extra={"fields": {"polling_interval_seconds": interval}},
+    shutdown = stop_event if stop_event is not None else Event()
+    interval = settings.runtime.polling_interval_seconds
+    reporter = status_reporter
+    if reporter is None and poll_once is None:
+        reporter = DatabaseWorkerStatusReporter(
+            settings.database.url,
+            hermes_enabled=settings.hermes.enabled,
+            heartbeat_interval_seconds=settings.runtime.heartbeat_interval_seconds,
+            heartbeat_stale_after_seconds=settings.runtime.heartbeat_stale_after_seconds,
+        )
+    execute_poll = (
+        poll_once
+        if poll_once is not None
+        else partial(
+            run_wechat_poll_once,
+            lease_guard=reporter.ensure_active if reporter is not None else None,
+        )
     )
+    reporter_started = False
+    consecutive_failures = 0
+
     try:
+        if reporter is not None:
+            reporter.start()
+            reporter_started = True
+        logger.info(
+            "worker started",
+            extra={"fields": {"polling_interval_seconds": interval}},
+        )
         while not shutdown.is_set():
+            if reporter is not None:
+                reporter.ensure_active()
+                reporter.cycle_started()
             logger.info("poll cycle started")
+            retry_delay = interval
             try:
                 result = execute_poll(settings)
-            except _FATAL_POLL_ERRORS:
+            except _FATAL_POLL_ERRORS as error:
+                if reporter is not None:
+                    reporter.cycle_failed(_safe_error_code(error))
                 raise
             except Exception as error:
+                error_code = _safe_error_code(error)
+                if reporter is not None:
+                    reporter.cycle_failed(error_code)
+                consecutive_failures += 1
+                retry_delay = _retry_delay(
+                    interval,
+                    settings.runtime.polling_retry_max_seconds,
+                    consecutive_failures,
+                )
                 logger.error(
                     "poll cycle failed",
-                    extra={"fields": {"error_code": _safe_error_code(error)}},
+                    extra={
+                        "fields": {
+                            "error_code": error_code,
+                            "consecutive_failures": consecutive_failures,
+                            "retry_delay_seconds": retry_delay,
+                        }
+                    },
                 )
             else:
-                logger.info(
+                result_error_code = poll_result_error_code(result)
+                if reporter is not None:
+                    reporter.cycle_succeeded(result)
+                cycle_degraded = result_error_code is not None
+                if cycle_degraded:
+                    consecutive_failures += 1
+                    retry_delay = _retry_delay(
+                        interval,
+                        settings.runtime.polling_retry_max_seconds,
+                        consecutive_failures,
+                    )
+                else:
+                    consecutive_failures = 0
+                log_result = logger.warning if cycle_degraded else logger.info
+                log_result(
                     "messages processed",
                     extra={
                         "fields": {
@@ -70,14 +142,35 @@ def run_worker(
                             "chats_failed": result.chats_failed,
                             "messages_seen": result.messages_seen,
                             "messages_processed": result.messages_processed,
+                            "cycle_degraded": cycle_degraded,
+                            "consecutive_failures": consecutive_failures,
+                            "retry_delay_seconds": retry_delay,
+                            "failure_codes": (
+                                [failure.code for failure in result.failures]
+                                if result.failures
+                                else ([result_error_code] if result_error_code else [])
+                            ),
                         }
                     },
                 )
 
-            if shutdown.wait(interval):
+            if shutdown.wait(retry_delay):
                 break
     finally:
+        if reporter_started and reporter is not None:
+            try:
+                reporter.stop()
+            except Exception:
+                logger.error(
+                    "worker status cleanup failed",
+                    extra={"fields": {"error_code": "worker_status_cleanup_failed"}},
+                )
         logger.info("worker stopped")
+
+
+def _retry_delay(interval: float, maximum: float, consecutive_failures: int) -> float:
+    exponent = min(max(consecutive_failures - 1, 0), 62)
+    return min(max(interval, maximum), interval * (2**exponent))
 
 
 def main() -> int:
@@ -111,7 +204,9 @@ def main() -> int:
 
 
 def _safe_error_code(error: Exception) -> str:
-    if isinstance(error, (HermesRuntimeError, WechatRuntimeError)):
+    if isinstance(error, DatabaseSchemaError):
+        return "database_schema_invalid"
+    if isinstance(error, (HermesRuntimeError, WechatRuntimeError, WorkerLeaseError)):
         return error.code
     return "poll_cycle_failed"
 

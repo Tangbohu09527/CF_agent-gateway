@@ -156,6 +156,13 @@ def test_python_module_entrypoint_exits_two_when_runtime_is_disabled(tmp_path: P
     config_path.write_text("wechat:\n  enabled: false\n", encoding="utf-8")
     environment = os.environ.copy()
     environment["CF_GATEWAY_CONFIG"] = str(config_path)
+    source_path = str(Path(__file__).resolve().parents[1] / "src")
+    existing_python_path = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        os.pathsep.join((source_path, existing_python_path))
+        if existing_python_path
+        else source_path
+    )
 
     completed = subprocess.run(
         [sys.executable, "-m", "cf_agent_gateway.wechat_poll_once"],

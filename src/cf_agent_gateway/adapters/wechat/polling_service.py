@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import json
+import logging
+from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 from typing import Any, Protocol
 
 from cf_agent_gateway.adapters.wechat.errors import WechatAdapterError
@@ -23,6 +26,8 @@ from cf_agent_gateway.adapters.wechat.polling_models import (
 )
 from cf_agent_gateway.adapters.wechat.polling_store import WechatSyncCheckpointStore
 from cf_agent_gateway.adapters.wechat.raw_models import AgentWechatAuthStatus, RawWechatMessage
+
+logger = logging.getLogger(__name__)
 
 
 class WechatPollingClient(Protocol):
@@ -58,16 +63,19 @@ class WechatPollingService:
         sink: NormalizedMessageSink,
         *,
         bootstrap_mode: BootstrapMode | str = BootstrapMode.LATEST,
+        lease_guard: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
         self._checkpoint_store = checkpoint_store
         self._sink = sink
+        self._lease_guard = lease_guard
         try:
             self._bootstrap_mode = BootstrapMode(bootstrap_mode)
         except (TypeError, ValueError):
             raise InvalidBootstrapModeError() from None
 
     def poll_once(self) -> PollResult:
+        self._ensure_active()
         try:
             auth_status = self._client.get_auth_status()
         except Exception as error:
@@ -216,11 +224,18 @@ class WechatPollingService:
                 if self._bootstrap_mode is BootstrapMode.LATEST and ordered_messages
                 else 0
             )
+            initial_message_fingerprint = (
+                _checkpoint_message_fingerprint(ordered_messages[-1][1])
+                if self._bootstrap_mode is BootstrapMode.LATEST and ordered_messages
+                else None
+            )
+            self._ensure_active()
             try:
                 checkpoint, bootstrapped = self._checkpoint_store.initialize(
                     source_account_id=source_account_id,
                     conversation_id=conversation_id,
                     last_local_id=initial_local_id,
+                    last_message_fingerprint=initial_message_fingerprint,
                 )
             except Exception as error:
                 return ChatPollResult(
@@ -246,15 +261,117 @@ class WechatPollingService:
                     bootstrapped=True,
                 )
 
+        checkpoint_anchor_changed = _checkpoint_anchor_changed(
+            checkpoint.last_local_id,
+            checkpoint.last_message_fingerprint,
+            ordered_messages,
+        )
+        if ordered_messages and (
+            ordered_messages[-1][0] < checkpoint.last_local_id or checkpoint_anchor_changed
+        ):
+            old_checkpoint = checkpoint.last_local_id
+            remote_latest_local_id = ordered_messages[-1][0]
+            new_checkpoint = ordered_messages[0][0] - 1
+            recovery_action = "rewind_to_visible_window"
+            logger.warning(
+                "wechat checkpoint regression detected",
+                extra={
+                    "fields": {
+                        "source_account_id": source_account_id,
+                        "conversation_id": conversation_id,
+                        "old_checkpoint": old_checkpoint,
+                        "remote_latest_local_id": remote_latest_local_id,
+                        "recovery_action": recovery_action,
+                    }
+                },
+            )
+            self._ensure_active()
+            try:
+                checkpoint, recovered = self._checkpoint_store.recover_regression(
+                    source_account_id=source_account_id,
+                    conversation_id=conversation_id,
+                    old_checkpoint=old_checkpoint,
+                    old_regression_generation=checkpoint.regression_generation,
+                    new_checkpoint=new_checkpoint,
+                )
+            except Exception as error:
+                return ChatPollResult(
+                    conversation_id=conversation_id,
+                    conversation_name=conversation_name,
+                    succeeded=False,
+                    messages_seen=messages_seen,
+                    bootstrapped=bootstrapped,
+                    failures=[
+                        _failure(
+                            PollFailureStage.CHECKPOINT,
+                            error,
+                            conversation_id=conversation_id,
+                        )
+                    ],
+                )
+            if not recovered:
+                return ChatPollResult(
+                    conversation_id=conversation_id,
+                    conversation_name=conversation_name,
+                    succeeded=False,
+                    messages_seen=messages_seen,
+                    bootstrapped=bootstrapped,
+                    failures=[
+                        PollFailure(
+                            stage=PollFailureStage.CHECKPOINT,
+                            code="wechat_checkpoint_regression_conflict",
+                            conversation_id=conversation_id,
+                        )
+                    ],
+                )
+            if recovered:
+                logger.warning(
+                    "wechat checkpoint recovered",
+                    extra={
+                        "fields": {
+                            "source_account_id": source_account_id,
+                            "conversation_id": conversation_id,
+                            "old_checkpoint": old_checkpoint,
+                            "new_checkpoint": checkpoint.last_local_id,
+                            "regression_generation": checkpoint.regression_generation,
+                            "remote_latest_local_id": remote_latest_local_id,
+                            "recovery_action": recovery_action,
+                        }
+                    },
+                )
         current_local_id = checkpoint.last_local_id
         messages_processed = 0
         messages_skipped = 0
         for local_id, raw_message in ordered_messages:
             if local_id <= current_local_id:
+                logger.info(
+                    "message skipped",
+                    extra={
+                        "fields": {
+                            "reason": "checkpoint",
+                            "conversation_id": conversation_id,
+                            "local_id": local_id,
+                            "checkpoint": current_local_id,
+                        }
+                    },
+                )
                 messages_skipped += 1
                 continue
 
+            self._ensure_active()
             is_self = _is_self_message(raw_message)
+            if is_self:
+                logger.info(
+                    "message skipped",
+                    extra={
+                        "fields": {
+                            "reason": "self_message",
+                            "conversation_id": conversation_id,
+                            "local_id": local_id,
+                            "checkpoint": current_local_id,
+                        }
+                    },
+                )
             if not is_self:
                 try:
                     normalized = _normalize_for_chat(
@@ -262,6 +379,7 @@ class WechatPollingService:
                         source_account_id=source_account_id,
                         conversation_id=conversation_id,
                         conversation_name=conversation_name,
+                        sync_generation=checkpoint.regression_generation,
                     )
                 except Exception as error:
                     failure = _failure(
@@ -302,11 +420,15 @@ class WechatPollingService:
                     )
 
             # A failed checkpoint write deliberately permits redelivery on the next poll.
+            self._ensure_active()
             try:
                 checkpoint = self._checkpoint_store.advance(
                     source_account_id=source_account_id,
                     conversation_id=conversation_id,
                     last_local_id=local_id,
+                    last_message_fingerprint=_checkpoint_message_fingerprint(raw_message),
+                    expected_last_local_id=current_local_id,
+                    expected_regression_generation=checkpoint.regression_generation,
                 )
             except Exception as error:
                 failure = _failure(
@@ -339,6 +461,10 @@ class WechatPollingService:
             messages_skipped_by_checkpoint=messages_skipped,
             bootstrapped=bootstrapped,
         )
+
+    def _ensure_active(self) -> None:
+        if self._lease_guard is not None:
+            self._lease_guard()
 
 
 def _parse_chat(chat: Mapping[str, Any]) -> tuple[str, str | None]:
@@ -387,6 +513,82 @@ def _is_self_message(message: RawWechatMessage | Mapping[str, Any]) -> bool:
     return value is True
 
 
+def _checkpoint_anchor_changed(
+    checkpoint_local_id: int,
+    checkpoint_fingerprint: str | None,
+    ordered_messages: Sequence[tuple[int, RawWechatMessage | Mapping[str, Any]]],
+) -> bool:
+    if checkpoint_fingerprint is None or checkpoint_local_id == 0:
+        return False
+    visible_anchor_fingerprints = [
+        _checkpoint_message_fingerprint(message)
+        for local_id, message in ordered_messages
+        if local_id == checkpoint_local_id
+    ]
+    return bool(visible_anchor_fingerprints) and checkpoint_fingerprint not in (
+        visible_anchor_fingerprints
+    )
+
+
+def _checkpoint_message_fingerprint(
+    message: RawWechatMessage | Mapping[str, Any],
+) -> str:
+    server_id = _checkpoint_identifier(_message_field(message, "server_id", "serverId"))
+    if server_id is not None:
+        payload: dict[str, object] = {
+            "identity": "server",
+            "server_id": server_id,
+            "version": 1,
+        }
+    else:
+        payload = {
+            "chat_id": _fingerprint_value(_message_field(message, "chat_id", "chatId")),
+            "content": _fingerprint_value(_message_field(message, "content", "content")),
+            "identity": "fallback",
+            "is_self": _message_field(message, "is_self", "isSelf") is True,
+            "local_id": _fingerprint_value(_message_field(message, "local_id", "localId")),
+            "sender": _fingerprint_value(_message_field(message, "sender", "sender")),
+            "timestamp": _fingerprint_value(_message_field(message, "timestamp", "timestamp")),
+            "type": _fingerprint_value(_message_field(message, "type", "type")),
+            "version": 1,
+        }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _message_field(
+    message: RawWechatMessage | Mapping[str, Any],
+    attribute: str,
+    key: str,
+) -> object:
+    if isinstance(message, RawWechatMessage):
+        return getattr(message, attribute)
+    return message.get(key)
+
+
+def _checkpoint_identifier(value: object) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    normalized = str(value).strip()
+    return normalized if normalized and normalized != "0" else None
+
+
+def _fingerprint_value(value: object) -> str | None:
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _validated_ordered_messages(
     raw_messages: Sequence[RawWechatMessage | Mapping[str, Any]],
     *,
@@ -413,11 +615,13 @@ def _normalize_for_chat(
     source_account_id: str,
     conversation_id: str,
     conversation_name: str | None,
+    sync_generation: int,
 ) -> NormalizedWechatMessage:
     normalized = normalize_wechat_message(
         raw_message,
         source_account_id=source_account_id,
         conversation_name=conversation_name,
+        sync_generation=sync_generation,
     )
     if normalized.conversation_id != conversation_id:
         raise WechatConversationMismatchError()

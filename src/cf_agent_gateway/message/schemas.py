@@ -5,7 +5,16 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, model_validator
 
-PreservedText = Annotated[str, StringConstraints(strip_whitespace=False)]
+MAX_MESSAGE_CONTENT_LENGTH = 65_536
+MAX_ATTACHMENTS_PER_MESSAGE = 32
+MAX_ATTACHMENT_FILE_SIZE = 9_223_372_036_854_775_807
+MIN_RAW_TYPE = -(2**31)
+MAX_RAW_TYPE = 2**31 - 1
+
+PreservedText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=False, max_length=MAX_MESSAGE_CONTENT_LENGTH),
+]
 
 
 class MessageSchema(BaseModel):
@@ -16,7 +25,7 @@ class AttachmentMetadata(MessageSchema):
     filename: str = Field(min_length=1, max_length=255)
     file_type: str = Field(min_length=1, max_length=64)
     mime_type: str = Field(min_length=1, max_length=255)
-    file_size: int = Field(ge=0)
+    file_size: int = Field(ge=0, le=MAX_ATTACHMENT_FILE_SIZE)
     storage_path: str = Field(min_length=1, max_length=1024)
     hash: str = Field(min_length=1, max_length=255)
 
@@ -26,7 +35,7 @@ class ReplyContext(MessageSchema):
     source_server_id: str | None = Field(default=None, min_length=1, max_length=255)
     sender_id: str | None = Field(default=None, min_length=1, max_length=255)
     sender_name: str | None = Field(default=None, min_length=1, max_length=255)
-    raw_type: StrictInt | None = None
+    raw_type: StrictInt | None = Field(default=None, ge=MIN_RAW_TYPE, le=MAX_RAW_TYPE)
     content: PreservedText | None = None
 
 
@@ -44,7 +53,7 @@ class MessageEvent(MessageSchema):
     sender_id: str | None = Field(default=None, min_length=1, max_length=255)
     sender_name: str | None = Field(default=None, max_length=255)
     message_type: str = Field(min_length=1, max_length=64)
-    raw_type: StrictInt | None = None
+    raw_type: StrictInt | None = Field(default=None, ge=MIN_RAW_TYPE, le=MAX_RAW_TYPE)
     content: PreservedText
     timestamp: datetime
     source_local_id: str | None = Field(default=None, min_length=1, max_length=255)
@@ -52,7 +61,10 @@ class MessageEvent(MessageSchema):
     source_message_id_is_fallback: bool = False
     reply_context: ReplyContext | None = None
     reply_to_message_id: str | None = Field(default=None, max_length=255)
-    attachments: list[AttachmentMetadata] = Field(default_factory=list)
+    attachments: list[AttachmentMetadata] = Field(
+        default_factory=list,
+        max_length=MAX_ATTACHMENTS_PER_MESSAGE,
+    )
 
     @model_validator(mode="after")
     def validate_envelope(self) -> Self:

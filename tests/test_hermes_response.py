@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from cf_agent_gateway.adapters.wechat import WechatAPIError, WechatTimeoutError
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
 from cf_agent_gateway.database import (
     create_database_engine,
@@ -17,8 +19,11 @@ from cf_agent_gateway.database import (
 from cf_agent_gateway.hermes import (
     HermesChatResult,
     HermesDeliveryError,
+    HermesDeliveryRecord,
     HermesDispatchOutcome,
     HermesDispatchService,
+    HermesLedgerStore,
+    HermesOperationStatus,
     HermesResponseDeliveryOutcome,
     HermesResponseError,
     HermesResponseHandler,
@@ -385,3 +390,166 @@ def test_hermes_error_propagates_without_calling_sender(session: Session) -> Non
     assert caught.value is hermes_error
     assert client.contents == [MESSAGE_CONTENT]
     assert sender.messages == []
+
+
+def test_replayed_response_reuses_successful_delivery_record(session: Session) -> None:
+    resources = create_response_resources(session)
+    response = dispatch_response(session, resources)
+    sender = RecordingWechatSender()
+    handler = HermesResponseHandler(session, sender)
+
+    first = handler.process(response)
+    second = handler.process(response)
+
+    assert second == first
+    assert sender.messages == [(CONVERSATION_ID, ASSISTANT_CONTENT)]
+    record = session.scalar(
+        select(HermesDeliveryRecord).where(HermesDeliveryRecord.message_id == resources.message.id)
+    )
+    assert record is not None
+    assert record.status is HermesOperationStatus.SUCCEEDED
+    assert record.attempt_count == 1
+    assert record.lease_token is None
+    assert session.scalar(select(func.count()).select_from(HermesDeliveryRecord)) == 1
+
+
+def test_failed_delivery_record_is_retried(session: Session) -> None:
+    resources = create_response_resources(session)
+    response = dispatch_response(session, resources)
+    sender_error = ControlledSenderError("controlled outbound failure")
+    sender = RecordingWechatSender(error=sender_error)
+    handler = HermesResponseHandler(session, sender)
+
+    with pytest.raises(ControlledSenderError):
+        handler.process(response)
+
+    failed = session.scalar(
+        select(HermesDeliveryRecord).where(HermesDeliveryRecord.message_id == resources.message.id)
+    )
+    assert failed is not None
+    assert failed.status is HermesOperationStatus.FAILED
+    assert failed.attempt_count == 1
+    assert failed.last_error_code == "ControlledSenderError"
+    assert failed.lease_token is None
+
+    sender.error = None
+    outcome = handler.process(response)
+
+    assert outcome.message_id == resources.message.id
+    assert sender.messages == [
+        (CONVERSATION_ID, ASSISTANT_CONTENT),
+        (CONVERSATION_ID, ASSISTANT_CONTENT),
+    ]
+    session.refresh(failed)
+    assert failed.status is HermesOperationStatus.SUCCEEDED
+    assert failed.attempt_count == 2
+    assert failed.last_error_code is None
+
+
+def test_ambiguous_delivery_timeout_keeps_lease_until_stale(session: Session) -> None:
+    resources = create_response_resources(session)
+    response = dispatch_response(session, resources)
+    timeout = WechatTimeoutError(operation="send_text")
+    sender = RecordingWechatSender(error=timeout)
+    handler = HermesResponseHandler(session, sender)
+
+    with pytest.raises(WechatTimeoutError):
+        handler.process(response)
+
+    record = session.scalar(
+        select(HermesDeliveryRecord).where(HermesDeliveryRecord.message_id == resources.message.id)
+    )
+    assert record is not None
+    assert record.status is HermesOperationStatus.IN_PROGRESS
+    assert record.attempt_count == 1
+    assert record.lease_token is not None
+    assert record.lease_expires_at is not None
+    assert record.last_error_code == "wechat_timeout_error"
+
+    sender.error = None
+    assert_delivery_error(handler, response, "delivery_in_progress")
+    assert sender.messages == [(CONVERSATION_ID, ASSISTANT_CONTENT)]
+
+
+def test_active_delivery_lease_blocks_duplicate_send(session: Session) -> None:
+    resources = create_response_resources(session)
+    response = dispatch_response(session, resources)
+    content_sha256 = sha256(response.assistant_content.encode("utf-8")).hexdigest()
+    claim = HermesLedgerStore(session).claim_delivery(
+        message_id=resources.message.id,
+        ai_thread_id=resources.thread.id,
+        conversation_id=CONVERSATION_ID,
+        content_sha256=content_sha256,
+    )
+    assert claim.acquired is True
+    sender = RecordingWechatSender()
+
+    assert_delivery_error(
+        HermesResponseHandler(session, sender),
+        response,
+        "delivery_in_progress",
+    )
+
+    assert sender.messages == []
+    record = HermesLedgerStore(session).get_delivery(resources.message.id)
+    assert record is not None
+    assert record.status is HermesOperationStatus.IN_PROGRESS
+    assert record.attempt_count == 1
+
+
+def test_stale_delivery_lease_is_recovered(session: Session) -> None:
+    resources = create_response_resources(session)
+    response = dispatch_response(session, resources)
+    content_sha256 = sha256(response.assistant_content.encode("utf-8")).hexdigest()
+    stale_at = datetime.now(UTC) - timedelta(hours=1)
+    claim = HermesLedgerStore(session).claim_delivery(
+        message_id=resources.message.id,
+        ai_thread_id=resources.thread.id,
+        conversation_id=CONVERSATION_ID,
+        content_sha256=content_sha256,
+        now=stale_at,
+    )
+    assert claim.acquired is True
+    sender = RecordingWechatSender()
+
+    outcome = HermesResponseHandler(session, sender).process(response)
+
+    assert outcome.message_id == resources.message.id
+    assert sender.messages == [(CONVERSATION_ID, ASSISTANT_CONTENT)]
+    record = HermesLedgerStore(session).get_delivery(resources.message.id)
+    assert record is not None
+    assert record.status is HermesOperationStatus.SUCCEEDED
+    assert record.attempt_count == 2
+    assert record.last_error_code is None
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_status"),
+    [
+        (400, HermesOperationStatus.FAILED),
+        (408, HermesOperationStatus.IN_PROGRESS),
+        (429, HermesOperationStatus.IN_PROGRESS),
+        (503, HermesOperationStatus.IN_PROGRESS),
+    ],
+)
+def test_delivery_http_error_classification(
+    session: Session,
+    status_code: int,
+    expected_status: HermesOperationStatus,
+) -> None:
+    resources = create_response_resources(session)
+    response = dispatch_response(session, resources)
+    error = WechatAPIError(operation="send_text", status_code=status_code)
+    sender = RecordingWechatSender(error=error)
+
+    with pytest.raises(WechatAPIError):
+        HermesResponseHandler(session, sender).process(response)
+
+    record = HermesLedgerStore(session).get_delivery(resources.message.id)
+    assert record is not None
+    assert record.status is expected_status
+    assert record.last_error_code == "wechat_api_error"
+    if expected_status is HermesOperationStatus.FAILED:
+        assert record.lease_token is None
+    else:
+        assert record.lease_token is not None

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from contextlib import suppress
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -9,6 +9,38 @@ from cf_agent_gateway.adapters.wechat import NormalizedWechatMessage
 from cf_agent_gateway.hermes import HermesDispatcher
 from cf_agent_gateway.ingestion.models import MessageIngestionOutcome
 from cf_agent_gateway.ingestion.service import AdmissionRequestResolver, MessageAdmissionService
+
+logger = logging.getLogger(__name__)
+
+
+def _rollback_session(session: Session) -> None:
+    try:
+        session.rollback()
+    except Exception:
+        logger.warning(
+            "ingestion cleanup failed",
+            extra={
+                "fields": {
+                    "component": "database_session",
+                    "error_code": "session_rollback_cleanup_failed",
+                }
+            },
+        )
+
+
+def _close_session(session: Session) -> None:
+    try:
+        session.close()
+    except Exception:
+        logger.warning(
+            "ingestion cleanup failed",
+            extra={
+                "fields": {
+                    "component": "database_session",
+                    "error_code": "session_close_cleanup_failed",
+                }
+            },
+        )
 
 
 class MessageStoreAdmissionSink:
@@ -56,10 +88,8 @@ class SessionFactoryMessageStoreAdmissionSink:
             ).process(message)
         except Exception:
             # Preserve the processing error even if cleanup also encounters a failure.
-            with suppress(Exception):
-                session.rollback()
-            with suppress(Exception):
-                session.close()
+            _rollback_session(session)
+            _close_session(session)
             raise
-        session.close()
+        _close_session(session)
         return outcome

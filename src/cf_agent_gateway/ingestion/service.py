@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -19,6 +20,8 @@ from cf_agent_gateway.ingestion.models import (
 )
 from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
+
+logger = logging.getLogger(__name__)
 
 
 class AdmissionRequestResolver(Protocol):
@@ -86,6 +89,17 @@ class MessageAdmissionService:
         is_self = persisted_message.is_self
         is_mentioned = persisted_message.is_mentioned
         message_type = persisted_message.message_type
+        logger.info(
+            "message processed",
+            extra={
+                "fields": {
+                    "message_id": str(message_id),
+                    "conversation_id": conversation_id,
+                    "source_message_id": persisted_message.source_message_id,
+                    "message_created": message_created,
+                }
+            },
+        )
         request_message = self._request_snapshot(persisted_message)
         request = self._request_resolver.resolve(request_message)
 
@@ -105,6 +119,16 @@ class MessageAdmissionService:
             risk_level=request.risk_level,
         )
         admission = self._admission_orchestrator.admit(candidate)
+        logger.info(
+            "admission result",
+            extra={
+                "fields": {
+                    "message_id": str(message_id),
+                    "admitted": admission.admitted,
+                    "reason": admission.reason.value,
+                }
+            },
+        )
         hermes_dispatch = None
         if (
             admission.admitted
