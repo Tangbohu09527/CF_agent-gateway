@@ -21,6 +21,8 @@ Employee WeChat
 
 `agent-wechat` and Hermes remain external components. Polling, Hermes execution, and
 response delivery are separate Gateway processes coordinated through durable database records.
+For the production-hardening view, recovery contracts and PR #3 lineage, see
+[runtime-architecture.md](runtime-architecture.md).
 
 ## Request flow and status
 
@@ -51,6 +53,9 @@ The stages are:
    A first `latest` poll checkpoints visible history; `backfill` processes history by
    ascending `localId`. Raw `isSelf=true` messages bypass normalization, Message Archive,
    admission, and dispatch enqueue while their checkpoint still advances.
+   Because `localId` can reset after a session/QR rebuild, the checkpoint also carries a
+   regression generation and serverId-derived anchor. A proven regression performs one
+   CAS rewind; an empty window or ambiguous legacy checkpoint does not.
 2. The adapter normalizes each remaining message. A per-message session commits Message
    Archive facts before identity and access admission. Event and physical source-message
    uniqueness make redelivery storage-idempotent.
@@ -77,6 +82,10 @@ The stages are:
    responses after a possible call, and post-call thread-binding conflicts become
    `uncertain`. `uncertain` blocks later records on that thread; `success` and `dead`
    release the next head.
+   Recovery is an authenticated Admin action: an operator may approve retry after proving
+   non-execution, terminate as dead, or confirm success only from matching persisted
+   response evidence. Each action is CAS-protected and audited; no operator-supplied
+   assistant content is accepted.
 9. A successful `ResponseEnvelope` is inserted into `hermes_dispatch_responses` in the
    same claim-token-fenced transaction that changes the dispatch from `running` to
    `success`. Only after commit does the account-scoped response processor persist

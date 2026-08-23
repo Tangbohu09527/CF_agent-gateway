@@ -130,6 +130,10 @@ EnvironmentFile=/etc/cf-agent-gateway/gateway.env
 Environment=CF_GATEWAY_CONFIG=/etc/cf-agent-gateway/production.yaml
 Environment=CF_GATEWAY_STARTUP_MIGRATION_MODE=check
 Environment=CF_GATEWAY_SERVICE=cf-agent-gateway
+Environment=CF_GATEWAY_WECHAT_HEARTBEAT_PATH=/run/cf-agent-gateway/worker-heartbeat.json
+Environment=CF_GATEWAY_DISPATCH_HEARTBEAT_PATH=/run/cf-agent-dispatch-worker/heartbeat.json
+Environment=CF_GATEWAY_DELIVERY_HEARTBEAT_PATH=/run/cf-agent-delivery-worker/heartbeat.json
+Environment=CF_GATEWAY_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS=30
 ExecStart=/opt/cf-agent-gateway/.venv/bin/python -m cf_agent_gateway.main
 Restart=on-failure
 RestartSec=5s
@@ -156,6 +160,11 @@ CapabilityBoundingSet=
 [Install]
 WantedBy=multi-user.target
 ```
+
+The Gateway reads, but does not write, those three heartbeat files for
+`GET /health/runtime`. All units run as `cf-agent-gateway`, and the distinct host
+`RuntimeDirectory` paths are readable by that account. Keep the paths synchronized with
+the worker units and never point two workers at one file.
 
 ## Worker unit
 

@@ -2,10 +2,12 @@
 
 Enterprise AI Message Gateway.
 
-> Status: The V1 Staging text-message AI round trip is validated. Resident WeChat
-> polling, identity and permission admission, Workspace/AIThread resolution, Hermes
-> dispatch and thread binding, concrete WeChat response delivery, and polling-level
-> self-message echo filtering are implemented.
+> Status: The V2 five-service runtime is implemented with production recovery hardening.
+> Checkpoint regression recovery, audited `uncertain` dispatch resolution, business
+> runtime health, fail-closed API boundaries, and Alembic revision `20260823_02` are in
+> this code line. The replacement pull request records exact local and GitHub Actions
+> evidence. No real CFserver, production PostgreSQL, WeChat account, or Hermes environment
+> was modified or validated by this repository work.
 
 CF_agent-gateway is the message and control plane between enterprise message
 entry points and Hermes.
@@ -46,9 +48,30 @@ CF_agent-gateway does not provide:
 - A hosted WeChat bot or replacement for the external `agent-wechat` service
 - A Hermes implementation
 
+## Production operations
+
+The production runtime uses external PostgreSQL plus four independent application
+processes: Gateway API, `wechat-worker`, `dispatch-worker`, and `delivery-worker`.
+Polling stops after persist-first admission and dispatch enqueue; it never calls Hermes
+or delivers a reply inline.
+
+- [V2 runtime architecture](docs/runtime-architecture.md)
+- [Production deployment](docs/deployment/production.md)
+- [Alembic migration runbook](migrations/README.md)
+- [Runtime recovery](docs/runtime-recovery.md)
+- [Runtime health](docs/runtime-health.md)
+- [HTTP and Admin API](docs/api.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Production validation checklist](docs/production-validation.md)
+
+Repository implementation and automated test evidence are distinct from external
+deployment responsibility. Secret injection, database backup/restore, CFserver rollout,
+WeChat login, Hermes capacity, monitoring, and any decision that resolves an ambiguous
+external effect remain controlled operator actions.
+
 ## Current scope
 
-The service foundation and the V1 WeChat text-message request/response path are
+The service foundation and the V2 WeChat text-message request/response path are
 implemented:
 
 - YAML configuration loading
@@ -62,6 +85,8 @@ implemented:
 - `AgentWechatClient`, WeChat normalization, and explicit Message Store event conversion
 - Finite WeChat polling with `latest` and `backfill` bootstrap modes
 - Durable per-account, per-conversation polling checkpoints and at-least-once delivery
+- Checkpoint generation, serverId-derived continuity anchors, CAS rewind, and
+  generation-scoped serverId-less fallback identity after proven session regression
 - Polling-level `is_self=true` filtering that bypasses the sink and advances the checkpoint
 - Persist-first message admission, including identity and access-policy evaluation
 - Workspace creation and conversation-scoped AI-thread reuse for authorized messages
@@ -77,6 +102,12 @@ implemented:
 - One-cycle and resident WeChat polling runtimes that stop after dispatch enqueue
 - Resident WeChat worker with configurable polling interval and graceful shutdown
 - Liveness at `GET /health` and database-aware readiness at `GET /ready`
+- Redacted business-chain health at `GET /health/runtime`, including all three worker
+  heartbeats, checkpoint continuity, dispatch blockage/staleness, and missing delivery
+- Authenticated, CAS-protected and append-only-audited Admin recovery for `uncertain`
+  dispatch inspection, approved retry, terminal dead, and evidence-backed success
+- Fail-closed Message/Admin bearer authentication, bounded request bodies and pages,
+  and strict recovery reason/reference validation
 - Atomic worker heartbeat files with a standalone freshness-check CLI
 - Explicit database migration command and read-only production startup checks
 - Newline-delimited JSON logs with protected core fields and service/process metadata
@@ -112,7 +143,7 @@ are separate processes; none is embedded in FastAPI.
 
 ## V1 Staging validation
 
-The text-message AI round trip was validated with this topology:
+The historical V1 text-message AI round trip was validated with this topology:
 
 - Debian 13 running Dockerized `agent-wechat`
 - `CF_agent-gateway` resident Worker on Debian
@@ -126,13 +157,20 @@ and dispatch, Hermes thread binding, response relay, outbound WeChat delivery, a
 echo protection. The recorded verification result is `393 passed` for `pytest`, with Ruff
 and `git diff --check` also passing.
 
-This validation is text-only. It does not establish image understanding, image attachment
+This historical validation is text-only and is not evidence for the V2 hardening branch.
+It does not establish image understanding, image attachment
 delivery, file-message processing, OCR, archive or ZIP parsing, an enterprise knowledge
 base, automatic Skill execution, or production automated deployment. See
 [docs/v1-staging-validation.md](docs/v1-staging-validation.md) for the validation boundary
 and evidence.
 
 ## Message API
+
+The Message API endpoints require `Authorization: Bearer <token>`. The expected token is
+read from the environment variable named by `api.token_env`
+(`CF_GATEWAY_API_TOKEN` by default); a missing or invalid token fails closed. Health
+endpoints remain public inside the current loopback/private deployment boundary. See
+[docs/api.md](docs/api.md) for Admin authentication and request limits.
 
 - `POST /internal/messages` stores a normalized message event and returns its ID. The
   source envelope includes `source_account_id`, `conversation_type`, `is_mentioned`,
@@ -280,12 +318,14 @@ fails the process instead of retrying indefinitely.
 
 ## Test
 
-The V1 Staging record reports `393 passed` for `pytest`, Ruff passed, and
-`git diff --check` passed. Those are recorded results for the validated V1 baseline; they
-are not a substitute for rerunning checks after later changes.
+Run the entire V2 suite and repository checks. The replacement pull request records the
+exact passed/skipped/warning totals and GitHub Actions run ID. The historical V1 Staging
+record of `393 passed` is retained only in
+[docs/v1-staging-validation.md](docs/v1-staging-validation.md); it is not current release
+evidence.
 
 ```bash
-pytest
+python -m pytest -q
 ruff check .
 ruff format --check .
 git diff --check
@@ -302,7 +342,8 @@ docker compose up --build
 For production, publish the image, prepare a protected `.env` from `.env.example`, and
 review `config/production.yaml`. Set the external PostgreSQL URL and adapter credentials.
 The template leaves external adapters disabled; enable only integrations whose endpoints
-and credentials have been reviewed.
+and credentials have been reviewed. Set separate `CF_GATEWAY_API_TOKEN` and
+`CF_AGENT_GATEWAY_ADMIN_TOKEN` values in the protected environment.
 
 Run the one-shot migration before the long-running services:
 
@@ -336,6 +377,7 @@ Operational probes are:
 
 ```bash
 curl --fail --max-time 3 http://127.0.0.1:8080/ready
+curl --fail --max-time 3 http://127.0.0.1:8080/health/runtime
 python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/worker-heartbeat.json --max-age-seconds 30
 python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/dispatch-worker-heartbeat.json --max-age-seconds 30
 python -m cf_agent_gateway.runtime.heartbeat --file /run/cf-agent-gateway/delivery-worker-heartbeat.json --max-age-seconds 30
@@ -345,6 +387,7 @@ See [docs/systemd-deployment.md](docs/systemd-deployment.md) for a hardened syst
 installation, the checked-in Worker units, migration ordering, graceful stop behavior,
 and journald operation.
 
-See [docs/architecture.md](docs/architecture.md) for module boundaries and the implemented
-and planned request flow, and
-[docs/v1-staging-validation.md](docs/v1-staging-validation.md) for the V1 Staging record.
+See [docs/architecture.md](docs/architecture.md) for module boundaries,
+[docs/runtime-architecture.md](docs/runtime-architecture.md) for the hardened V2 process
+and recovery model, and [docs/v1-staging-validation.md](docs/v1-staging-validation.md) for
+the historical V1 Staging record.
