@@ -60,7 +60,7 @@ def run_delivery_worker(
         else lambda candidate: run_wechat_delivery_once(candidate, max_deliveries=1)
     )
     try:
-        with resident_heartbeat(heartbeat, phase="delivery"):
+        with resident_heartbeat(heartbeat, stop_event=shutdown, phase="delivery"):
             logger.info(
                 "delivery worker started",
                 extra={"fields": {"idle_poll_seconds": idle_poll_seconds}},

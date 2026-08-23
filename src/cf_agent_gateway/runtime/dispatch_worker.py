@@ -282,6 +282,7 @@ def _run_resident_worker(
     try:
         with resident_heartbeat(
             heartbeat,
+            stop_event=stop_event,
             phase="dispatching",
             concurrency=concurrency,
         ):

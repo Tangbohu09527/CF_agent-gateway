@@ -23,6 +23,7 @@ HEARTBEAT_MAX_AGE_ENV = "CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS"
 HEARTBEAT_SCHEMA_VERSION = 1
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10.0
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 30.0
+DEFAULT_HEARTBEAT_MAX_CONSECUTIVE_FAILURES = 3
 
 _HEALTHY_STATES = frozenset({"starting", "running"})
 _ALL_STATES = _HEALTHY_STATES | {"stopping", "stopped", "failed"}
@@ -104,21 +105,29 @@ class HeartbeatPublisher:
         *,
         interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
         error_handler: Callable[[], None] | None = None,
+        max_consecutive_failures: int = DEFAULT_HEARTBEAT_MAX_CONSECUTIVE_FAILURES,
     ) -> None:
         self._heartbeat = heartbeat
         self._interval_seconds = _positive_seconds(interval_seconds, HEARTBEAT_INTERVAL_ENV)
+        self._max_consecutive_failures = _positive_integer(
+            max_consecutive_failures,
+            "max_consecutive_failures",
+        )
         self._error_handler = error_handler
         self._state_lock = Lock()
+        self._failure_lock = Lock()
         self._state: HeartbeatState = "starting"
         self._details: dict[str, object] = {"phase": "startup"}
         self._started = False
+        self._consecutive_write_failures = 0
         self._write_failure_reported = False
 
     def start(self) -> None:
         if self._started:
             raise RuntimeError("heartbeat publisher is already started")
         self._started = True
-        self._publish()
+        if not self._publish():
+            raise HeartbeatError("initial worker heartbeat publish failed") from None
 
     def update(self, state: HeartbeatState, **details: object) -> None:
         with self._state_lock:
@@ -134,25 +143,50 @@ class HeartbeatPublisher:
 
         remaining = _positive_seconds(timeout_seconds, "timeout_seconds")
         while remaining > 0:
+            self._raise_after_consecutive_failures()
             wait_seconds = min(self._interval_seconds, remaining)
             if stop_event.wait(wait_seconds):
                 return True
             remaining = max(0.0, remaining - wait_seconds)
+            self._raise_after_consecutive_failures()
             if remaining > 0:
                 self._publish()
+                self._raise_after_consecutive_failures()
         return False
 
-    def _publish(self) -> None:
+    def _publish(self) -> bool:
         with self._state_lock:
             state = self._state
             details = self._details.copy()
         try:
             self._heartbeat.write(state, details=details)
-            self._write_failure_reported = False
         except Exception:
-            if not self._write_failure_reported and self._error_handler is not None:
-                self._error_handler()
+            self._record_write_failure()
+            return False
+        self._record_write_success()
+        return True
+
+    def _record_write_failure(self) -> None:
+        with self._failure_lock:
+            self._consecutive_write_failures += 1
+            should_report = not self._write_failure_reported
             self._write_failure_reported = True
+        if should_report and self._error_handler is not None:
+            with suppress(Exception):
+                self._error_handler()
+
+    def _record_write_success(self) -> None:
+        with self._failure_lock:
+            self._consecutive_write_failures = 0
+            self._write_failure_reported = False
+
+    def _raise_after_consecutive_failures(self) -> None:
+        with self._failure_lock:
+            failure_limit_reached = (
+                self._consecutive_write_failures >= self._max_consecutive_failures
+            )
+        if failure_limit_reached:
+            raise HeartbeatError("worker heartbeat write failure limit reached")
 
 
 def create_worker_heartbeat_from_environment(
@@ -176,20 +210,31 @@ def create_worker_heartbeat_from_environment(
 @contextmanager
 def resident_heartbeat(
     heartbeat: HeartbeatPublisher | None,
+    *,
+    stop_event: Event,
     **details: object,
 ) -> Iterator[None]:
     """Publish process liveness while a resident worker owns its blocking loop."""
 
     monitor_stop = Event()
     monitor_thread: Thread | None = None
+    monitor_failures: list[HeartbeatError] = []
     final_state: Literal["stopped", "failed"] = "stopped"
+
+    def monitor() -> None:
+        assert heartbeat is not None
+        try:
+            heartbeat.wait(monitor_stop, TIMEOUT_MAX)
+        except HeartbeatError as error:
+            monitor_failures.append(error)
+            stop_event.set()
+
     try:
         if heartbeat is not None:
             heartbeat.start()
             heartbeat.update("running", **details)
             monitor_thread = Thread(
-                target=heartbeat.wait,
-                args=(monitor_stop, TIMEOUT_MAX),
+                target=monitor,
                 name="resident-worker-heartbeat",
                 daemon=True,
             )
@@ -202,8 +247,12 @@ def resident_heartbeat(
         monitor_stop.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=1.0)
+        if monitor_failures:
+            final_state = "failed"
         if heartbeat is not None:
             heartbeat.stop(final_state)
+    if monitor_failures:
+        raise monitor_failures[0]
 
 
 def check_heartbeat(
@@ -252,6 +301,12 @@ def _positive_seconds(value: object, name: str) -> float:
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError(f"{name} must be a positive number")
     return seconds
+
+
+def _positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def main(argv: Sequence[str] | None = None) -> int:
