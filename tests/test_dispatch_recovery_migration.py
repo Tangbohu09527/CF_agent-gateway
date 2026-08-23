@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from io import StringIO
 
 import pytest
 from alembic import command
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from cf_agent_gateway import migration
 from cf_agent_gateway.database import (
@@ -16,11 +18,18 @@ from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.message.schemas import MessageEvent
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.response.store import DeliveryTarget, ResponseStore
+from cf_agent_gateway.task.model import (
+    HermesDispatchRecoveryAction,
+    HermesDispatchRecoveryAudit,
+    HermesDispatchStatus,
+)
 from cf_agent_gateway.workspace.models import EmployeeWorkspace
 from cf_agent_gateway.workspace.service import WorkspaceService
 
 CHECKPOINT_REVISION = "20260823_01"
 RECOVERY_REVISION = "20260823_02"
+DURABLE_ADMISSION_REVISION = "20260823_03"
+RUNTIME_INVARIANTS_REVISION = "20260823_04"
 
 
 def _foreign_keys(engine) -> set[tuple[tuple[str, ...], str, tuple[str, ...]]]:
@@ -296,5 +305,287 @@ def test_dispatch_recovery_downgrade_refuses_pending_manual_retry() -> None:
                 )
                 == 1
             )
+    finally:
+        engine.dispose()
+
+
+def test_runtime_invariants_upgrade_and_downgrade_preserve_v2_rows_and_foreign_keys() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine, CHECKPOINT_REVISION)
+        fixture = _install_pre_recovery_fixture(engine)
+        migration.upgrade_database(engine, DURABLE_ADMISSION_REVISION)
+        before_counts = _business_counts(engine)
+        before_foreign_keys = _foreign_keys(engine)
+
+        migration.upgrade_database(engine, RUNTIME_INVARIANTS_REVISION)
+
+        assert migration.get_schema_version(engine) == RUNTIME_INVARIANTS_REVISION
+        assert _business_counts(engine) == before_counts
+        assert _foreign_keys(engine) == before_foreign_keys
+        with engine.connect() as connection:
+            reconciliation = connection.execute(
+                text(
+                    "SELECT reconciliation_failure_count, "
+                    "reconciliation_next_attempt_at, reconciliation_quarantined_at, "
+                    "reconciliation_last_error_code "
+                    "FROM hermes_dispatch_records WHERE id = :dispatch_id"
+                ),
+                {"dispatch_id": fixture["dispatch_id"]},
+            ).one()
+            assert tuple(reconciliation) == (0, None, None, None)
+            triggers = set(
+                connection.scalars(
+                    text(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type = 'trigger' "
+                        "AND tbl_name = 'hermes_dispatch_recovery_audits'"
+                    )
+                )
+            )
+            assert triggers == {
+                "trg_dispatch_recovery_audit_no_update",
+                "trg_dispatch_recovery_audit_no_delete",
+            }
+            assert list(connection.execute(text("PRAGMA foreign_key_check"))) == []
+
+        config = migration.create_migration_config()
+        with engine.connect() as connection:
+            config.attributes["connection"] = connection
+            command.downgrade(config, DURABLE_ADMISSION_REVISION)
+
+        assert migration.get_schema_version(engine) == DURABLE_ADMISSION_REVISION
+        assert _business_counts(engine) == before_counts
+        assert _foreign_keys(engine) == before_foreign_keys
+        columns = {
+            column["name"] for column in inspect(engine).get_columns("hermes_dispatch_records")
+        }
+        assert "reconciliation_failure_count" not in columns
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM sqlite_master "
+                        "WHERE type = 'trigger' "
+                        "AND tbl_name = 'hermes_dispatch_recovery_audits'"
+                    )
+                )
+                == 0
+            )
+            assert list(connection.execute(text("PRAGMA foreign_key_check"))) == []
+    finally:
+        engine.dispose()
+
+
+def test_runtime_invariants_reject_illegal_orm_and_sql_and_make_audit_immutable() -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine, CHECKPOINT_REVISION)
+        fixture = _install_pre_recovery_fixture(engine)
+        migration.upgrade_database(engine, RUNTIME_INVARIANTS_REVISION)
+        dispatch_id = int(fixture["dispatch_id"])
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO hermes_dispatch_recovery_audits "
+                    "(dispatch_record_id, action, operator, reference, reason, "
+                    "before_status, after_status, before_error_code) "
+                    "VALUES (:dispatch_id, 'mark_dead', 'operator', 'INC-VALID', "
+                    "'unsafe to retry', 'uncertain', 'dead', 'hermes_timeout')"
+                ),
+                {"dispatch_id": dispatch_id},
+            )
+
+        with pytest.raises(IntegrityError, match="immutable"), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE hermes_dispatch_recovery_audits "
+                    "SET reason = 'changed' WHERE dispatch_record_id = :dispatch_id"
+                ),
+                {"dispatch_id": dispatch_id},
+            )
+        with pytest.raises(IntegrityError, match="immutable"), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM hermes_dispatch_recovery_audits "
+                    "WHERE dispatch_record_id = :dispatch_id"
+                ),
+                {"dispatch_id": dispatch_id},
+            )
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO hermes_dispatch_recovery_audits "
+                    "(dispatch_record_id, action, operator, reference, reason, "
+                    "before_status, after_status) "
+                    "VALUES (:dispatch_id, 'retry_approved', 'operator', "
+                    "'INC-INVALID-SQL', 'invalid transition', "
+                    "'queued', 'failed')"
+                ),
+                {"dispatch_id": dispatch_id},
+            )
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE hermes_dispatch_records "
+                    "SET manual_retry_approved = true "
+                    "WHERE id = :dispatch_id"
+                ),
+                {"dispatch_id": dispatch_id},
+            )
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE hermes_dispatch_records "
+                    "SET reconciliation_failure_count = 1, "
+                    "reconciliation_last_error_code = 'invalid_without_backoff' "
+                    "WHERE id = :dispatch_id"
+                ),
+                {"dispatch_id": dispatch_id},
+            )
+
+        factory = create_database_session_factory(engine)
+        with factory() as session:
+            session.add(
+                HermesDispatchRecoveryAudit(
+                    dispatch_record_id=dispatch_id,
+                    action=HermesDispatchRecoveryAction.CONFIRM_SUCCESS,
+                    operator="operator",
+                    reference="INC-INVALID-ORM",
+                    reason="missing evidence",
+                    before_status=HermesDispatchStatus.UNCERTAIN,
+                    after_status=HermesDispatchStatus.SUCCESS,
+                    before_error_code="hermes_timeout",
+                    evidence_dispatch_response_id=None,
+                )
+            )
+            with pytest.raises(IntegrityError):
+                session.commit()
+            session.rollback()
+
+        with engine.connect() as connection:
+            audit = connection.execute(
+                text(
+                    "SELECT action, before_status, after_status, reason "
+                    "FROM hermes_dispatch_recovery_audits"
+                )
+            ).one()
+            assert tuple(audit) == (
+                "mark_dead",
+                "uncertain",
+                "dead",
+                "unsafe to retry",
+            )
+            assert (
+                connection.scalar(text("SELECT count(*) FROM hermes_dispatch_recovery_audits")) == 1
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("evidence_sql", "message"),
+    [
+        (
+            "INSERT INTO hermes_dispatch_recovery_audits "
+            "(dispatch_record_id, action, operator, reference, reason, "
+            "before_status, after_status) "
+            "VALUES (:dispatch_id, 'mark_dead', 'operator', 'INC-DOWNGRADE', "
+            "'unsafe to retry', 'uncertain', 'dead')",
+            "audit history exists",
+        ),
+        (
+            "UPDATE hermes_dispatch_records "
+            "SET reconciliation_failure_count = 1, "
+            "reconciliation_next_attempt_at = CURRENT_TIMESTAMP, "
+            "reconciliation_last_error_code = "
+            "'dispatch_reconciliation_candidate_invalid' "
+            "WHERE id = :dispatch_id",
+            "reconciliation recovery evidence exists",
+        ),
+    ],
+)
+def test_runtime_invariants_downgrade_fails_closed_on_recovery_evidence(
+    evidence_sql: str,
+    message: str,
+) -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine, CHECKPOINT_REVISION)
+        fixture = _install_pre_recovery_fixture(engine)
+        migration.upgrade_database(engine, RUNTIME_INVARIANTS_REVISION)
+        with engine.begin() as connection:
+            connection.execute(
+                text(evidence_sql),
+                {"dispatch_id": fixture["dispatch_id"]},
+            )
+        config = migration.create_migration_config()
+
+        with engine.connect() as connection:
+            config.attributes["connection"] = connection
+            with pytest.raises(RuntimeError, match=message):
+                command.downgrade(config, DURABLE_ADMISSION_REVISION)
+
+        assert migration.get_schema_version(engine) == RUNTIME_INVARIANTS_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_runtime_invariants_offline_downgrade_fails_closed() -> None:
+    config = migration.create_migration_config()
+    config.output_buffer = StringIO()
+    config.set_main_option(
+        "sqlalchemy.url",
+        "postgresql+psycopg://gateway:gateway@localhost/gateway",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="offline runtime recovery invariant downgrade is disabled",
+    ):
+        command.downgrade(
+            config,
+            f"{RUNTIME_INVARIANTS_REVISION}:{DURABLE_ADMISSION_REVISION}",
+            sql=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("invalid_sql", "message"),
+    [
+        (
+            "UPDATE hermes_dispatch_records "
+            "SET manual_retry_approved = true WHERE id = :dispatch_id",
+            "manual retry authorization exists outside failed status",
+        ),
+        (
+            "INSERT INTO hermes_dispatch_recovery_audits "
+            "(dispatch_record_id, action, operator, reference, reason, "
+            "before_status, after_status) "
+            "VALUES (:dispatch_id, 'mark_dead', 'operator', 'INC-BAD-UPGRADE', "
+            "'bad fixture', 'queued', 'dead')",
+            "audit transition is inconsistent",
+        ),
+    ],
+)
+def test_runtime_invariants_upgrade_fails_closed_on_invalid_existing_data(
+    invalid_sql: str,
+    message: str,
+) -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        migration.upgrade_database(engine, CHECKPOINT_REVISION)
+        fixture = _install_pre_recovery_fixture(engine)
+        migration.upgrade_database(engine, DURABLE_ADMISSION_REVISION)
+        with engine.begin() as connection:
+            connection.execute(
+                text(invalid_sql),
+                {"dispatch_id": fixture["dispatch_id"]},
+            )
+
+        with pytest.raises(RuntimeError, match=message):
+            migration.upgrade_database(engine, RUNTIME_INVARIANTS_REVISION)
+
+        assert migration.get_schema_version(engine) == DURABLE_ADMISSION_REVISION
     finally:
         engine.dispose()

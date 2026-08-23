@@ -3,6 +3,7 @@ name: cf-agent-gateway
 x-runtime: &runtime
   image: ${CF_GATEWAY_IMAGE:?Set CF_GATEWAY_IMAGE to an immutable image tag or digest}
   init: true
+  user: "10001:10001"
   read_only: true
   env_file:
     - ${CF_GATEWAY_ENV_FILE:-.env}
@@ -11,7 +12,7 @@ x-runtime: &runtime
     CF_AGENT_GATEWAY_DATABASE_URL: ${CF_AGENT_GATEWAY_DATABASE_URL:?Set CF_AGENT_GATEWAY_DATABASE_URL to the production PostgreSQL URL}
     CF_GATEWAY_STARTUP_MIGRATION_MODE: check
   volumes:
-    - ./config/production.yaml:/app/config/production.yaml:ro
+    - ${CF_GATEWAY_CONFIG_FILE:-./config/production.yaml}:/app/config/production.yaml:ro
     - gateway-state:/var/lib/cf-agent-gateway
     - runtime-heartbeats:/run/cf-agent-gateway
   tmpfs:
@@ -28,6 +29,30 @@ x-runtime: &runtime
       max-file: ${CF_GATEWAY_LOG_MAX_FILES:-5}
 
 services:
+  heartbeat-init:
+    <<: *runtime
+    user: "0:0"
+    env_file: []
+    environment: {}
+    volumes:
+      - runtime-heartbeats:/run/cf-agent-gateway
+    tmpfs: []
+    cap_add:
+      - CHOWN
+      - FOWNER
+    network_mode: none
+    command:
+      - python
+      - -c
+      - |
+        import os
+        path = "/run/cf-agent-gateway"
+        os.chmod(path, 0o750)
+        os.chown(path, 10001, 10001)
+        status = os.stat(path)
+        assert (status.st_uid, status.st_gid, status.st_mode & 0o777) == (10001, 10001, 0o750)
+    restart: "no"
+
   migration:
     <<: *runtime
     environment:
@@ -38,6 +63,9 @@ services:
       - -m
       - cf_agent_gateway.runtime.startup
       - migrate
+    depends_on:
+      heartbeat-init:
+        condition: service_completed_successfully
     restart: "no"
 
   gateway:
@@ -50,7 +78,7 @@ services:
       CF_GATEWAY_DELIVERY_HEARTBEAT_PATH: /run/cf-agent-gateway/delivery-worker-heartbeat.json
       CF_GATEWAY_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: ${CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}
     volumes:
-      - ./config/production.yaml:/app/config/production.yaml:ro
+      - ${CF_GATEWAY_CONFIG_FILE:-./config/production.yaml}:/app/config/production.yaml:ro
       - gateway-state:/var/lib/cf-agent-gateway
       - runtime-heartbeats:/run/cf-agent-gateway:ro
     command:

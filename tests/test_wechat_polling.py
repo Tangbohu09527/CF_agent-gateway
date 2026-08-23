@@ -555,7 +555,7 @@ def test_legacy_checkpoint_enrolls_anchor_before_forward_progress(
     assert stored is not None and stored.last_local_id == 12
 
 
-def test_legacy_checkpoint_without_server_anchor_fails_closed(
+def test_legacy_checkpoint_without_server_anchor_enrolls_fallback_then_resumes(
     checkpoint_store: WechatSyncCheckpointStore,
 ) -> None:
     checkpoint_store.initialize(
@@ -572,16 +572,29 @@ def test_legacy_checkpoint_without_server_anchor_fails_closed(
         }
     )
     sink = RecordingSink()
+    service = WechatPollingService(client, checkpoint_store, sink)
 
-    result = WechatPollingService(client, checkpoint_store, sink).poll_once()
+    enrollment = service.poll_once()
+
+    enrolled = checkpoint(checkpoint_store)
+    assert enrollment.chats_failed == 1
+    assert enrollment.failures[0].code == WechatCheckpointContinuityError.code
+    assert enrollment.messages_without_server_id == 1
+    assert sink.attempts == []
+    assert enrolled is not None
+    assert (enrolled.last_local_id, enrolled.regression_generation) == (10, 0)
+    assert enrolled.last_message_fingerprint == checkpoint_fingerprint(
+        raw_message(10, serverId=None)
+    )
+
+    resumed = service.poll_once()
 
     stored = checkpoint(checkpoint_store)
-    assert result.chats_failed == 1
-    assert result.failures[0].code == WechatCheckpointContinuityError.code
-    assert sink.attempts == []
-    assert stored is not None
-    assert (stored.last_local_id, stored.regression_generation) == (10, 0)
-    assert stored.last_message_fingerprint is None
+    assert resumed.chats_succeeded == 1
+    assert resumed.messages_processed == 1
+    assert resumed.messages_without_server_id == 1
+    assert source_ids(sink.handled) == ["11"]
+    assert stored is not None and stored.last_local_id == 11
 
 
 def test_server_identity_remains_stable_when_regression_replays_message(
@@ -630,21 +643,29 @@ def test_fallback_identity_is_isolated_by_regression_generation(
         last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
     )
     sink = RecordingSink()
+    client = FakeWechatClient(messages={CHAT_ID: [replayed]})
+    service = WechatPollingService(client, checkpoint_store, sink)
 
-    result = WechatPollingService(
-        FakeWechatClient(messages={CHAT_ID: [replayed]}),
-        checkpoint_store,
-        sink,
-    ).poll_once()
+    recovered = service.poll_once()
 
     stored = checkpoint(checkpoint_store)
-    assert result.messages_processed == 1
+    assert recovered.messages_processed == 1
+    assert recovered.messages_without_server_id == 1
     assert len(sink.handled) == 1
     assert sink.handled[0].source_message_id.startswith("local:v2:")
     assert sink.handled[0].source_message_id != previous_generation.source_message_id
     assert stored is not None
     assert stored.regression_generation == 1
-    assert stored.last_message_fingerprint is None
+    assert stored.last_message_fingerprint == checkpoint_fingerprint(replayed)
+
+    confirmed = service.poll_once()
+
+    assert confirmed.chats_succeeded == 1
+    assert confirmed.chats_failed == 0
+    assert confirmed.messages_processed == 0
+    assert confirmed.messages_skipped_by_checkpoint == 1
+    assert confirmed.failures == []
+    assert len(sink.handled) == 1
 
 
 def test_rewind_compare_and_swap_allows_only_one_winner(
@@ -879,6 +900,194 @@ def test_checkpoint_recovery_logs_are_structured_and_redacted(
     assert fields["source_account_id_ref"].startswith("source_account:sha256:")
     assert fields["conversation_id_ref"].startswith("conversation:sha256:")
     assert fields["cas_result"] is True
+
+
+def test_124_checkpoint_skips_emit_constant_info_logs_and_exact_aggregate(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=124,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(124)),
+    )
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+
+    result = WechatPollingService(
+        FakeWechatClient(messages={CHAT_ID: [raw_message(local_id) for local_id in range(1, 125)]}),
+        checkpoint_store,
+        RecordingSink(),
+    ).poll_once()
+
+    info_records = [
+        record
+        for record in caplog.records
+        if record.name == polling_service_module.__name__ and record.levelno == logging.INFO
+    ]
+    assert [record.getMessage() for record in info_records] == ["poll chat completed"]
+    assert result.messages_seen == 124
+    assert result.messages_processed == 0
+    assert result.messages_new == 0
+    assert result.messages_duplicate == 0
+    assert result.messages_failed == 0
+    assert result.messages_skipped_by_checkpoint == 124
+    assert info_records[0].fields["messages_seen"] == 124
+    assert info_records[0].fields["messages_skipped_checkpoint"] == 124
+
+
+def test_message_skip_logs_are_debug_and_chat_summary_has_exact_counts(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=1,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(1)),
+    )
+    caplog.set_level(logging.DEBUG, logger=polling_service_module.__name__)
+
+    result = WechatPollingService(
+        FakeWechatClient(
+            messages={
+                CHAT_ID: [
+                    raw_message(1),
+                    raw_message(2, isSelf=True),
+                    raw_message(3),
+                ]
+            }
+        ),
+        checkpoint_store,
+        RecordingSink(),
+    ).poll_once()
+
+    skip_records = [
+        record
+        for record in caplog.records
+        if record.getMessage() in {"message skipped by checkpoint", "message skipped as self"}
+    ]
+    assert [(record.getMessage(), record.levelno) for record in skip_records] == [
+        ("message skipped by checkpoint", logging.DEBUG),
+        ("message skipped as self", logging.DEBUG),
+    ]
+    summary_records = [
+        record for record in caplog.records if record.getMessage() == "poll chat completed"
+    ]
+    assert len(summary_records) == 1
+    fields = dict(summary_records[0].__dict__["fields"])
+    source_ref = fields.pop("source_account_id_ref")
+    conversation_ref = fields.pop("conversation_id_ref")
+    assert source_ref.startswith("source_account:sha256:")
+    assert conversation_ref.startswith("conversation:sha256:")
+    assert fields == {
+        "succeeded": True,
+        "failure_count": 0,
+        "messages_seen": 3,
+        "messages_processed": 1,
+        "messages_new": 1,
+        "messages_duplicate": 0,
+        "messages_skipped_checkpoint": 1,
+        "messages_skipped_self": 1,
+        "messages_failed": 0,
+        "messages_without_server_id": 0,
+        "bootstrapped": False,
+    }
+    assert result.messages_skipped_as_self == 1
+
+
+def test_no_server_messages_use_one_redacted_chat_summary_without_extra_warning(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_account = "wxid-sensitive-account"
+    sensitive_chat = "wxid-sensitive-chat"
+    sensitive_body = "private body must never appear in telemetry"
+    sensitive_nickname = "private nickname must never appear in telemetry"
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+
+    result = WechatPollingService(
+        FakeWechatClient(
+            account_id=sensitive_account,
+            chats=[{"id": sensitive_chat}],
+            messages={
+                sensitive_chat: [
+                    raw_message(
+                        1,
+                        chat_id=sensitive_chat,
+                        serverId=None,
+                        content=sensitive_body,
+                        senderName=sensitive_nickname,
+                    ),
+                    raw_message(
+                        2,
+                        chat_id=sensitive_chat,
+                        serverId=None,
+                        content=sensitive_body,
+                        senderName=sensitive_nickname,
+                    ),
+                ]
+            },
+        ),
+        checkpoint_store,
+        RecordingSink(),
+    ).poll_once()
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint fallback anchor in use"
+    ]
+    summary_records = [
+        record for record in caplog.records if record.getMessage() == "poll chat completed"
+    ]
+    assert len(summary_records) == 1
+    fields = summary_records[0].__dict__["fields"]
+    assert fields["messages_without_server_id"] == 2
+    assert fields["source_account_id_ref"].startswith("source_account:sha256:")
+    assert fields["conversation_id_ref"].startswith("conversation:sha256:")
+    serialized = repr(summary_records[0].__dict__)
+    assert sensitive_account not in serialized
+    assert sensitive_chat not in serialized
+    assert sensitive_body not in serialized
+    assert sensitive_nickname not in serialized
+    assert result.messages_without_server_id == 2
+
+
+def test_repeated_unverified_continuity_logs_one_warning_until_state_changes(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=10,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(10)),
+    )
+    client = FakeWechatClient(
+        messages={
+            CHAT_ID: [
+                raw_message(10),
+                raw_message(10, serverId="different-anchor"),
+                raw_message(11),
+            ]
+        }
+    )
+    service = WechatPollingService(client, checkpoint_store, RecordingSink())
+    caplog.set_level(logging.WARNING, logger=polling_service_module.__name__)
+
+    first = service.poll_once()
+    second = service.poll_once()
+
+    assert first.chats_failed == 1
+    assert second.chats_failed == 1
+    continuity_warnings = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint continuity unverified"
+    ]
+    assert len(continuity_warnings) == 1
+    assert continuity_warnings[0].fields["recovery_action"] == ("stop_chat_anchor_ambiguous")
 
 
 def test_latest_is_default_and_does_not_replay_visible_history(

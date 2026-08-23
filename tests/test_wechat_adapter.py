@@ -514,7 +514,7 @@ def test_local_id_fallback_is_generation_scoped_without_changing_generation_zero
     )
 
 
-def test_checkpoint_fingerprint_uses_only_stable_server_identity() -> None:
+def test_checkpoint_fingerprint_prefers_stable_server_identity() -> None:
     first = build_wechat_checkpoint_fingerprint(raw_message())
     changed_payload = build_wechat_checkpoint_fingerprint(
         raw_message(
@@ -528,7 +528,36 @@ def test_checkpoint_fingerprint_uses_only_stable_server_identity() -> None:
     assert first is not None and len(first) == 64
     assert changed_payload == first
     assert other_server != first
-    assert build_wechat_checkpoint_fingerprint(raw_message(serverId=None)) is None
+
+
+def test_checkpoint_fallback_fingerprint_is_content_free_and_uses_stable_metadata() -> None:
+    first = build_wechat_checkpoint_fingerprint(raw_message(serverId=None))
+    changed_private_fields = build_wechat_checkpoint_fingerprint(
+        raw_message(
+            serverId=None,
+            senderName="Renamed",
+            content="changed body",
+        )
+    )
+    same_utc_instant = build_wechat_checkpoint_fingerprint(
+        raw_message(serverId=None, timestamp="2026-08-01T02:15:00Z")
+    )
+    changed_metadata = [
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, localId=102)),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, chatId="wxid_bob")),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, sender="wxid_bob")),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, type=3)),
+        build_wechat_checkpoint_fingerprint(
+            raw_message(serverId=None, timestamp="2026-08-01T02:15:01Z")
+        ),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, isSelf=True)),
+    ]
+
+    assert first is not None and len(first) == 64
+    assert changed_private_fields == first
+    assert same_utc_instant == first
+    assert all(fingerprint != first for fingerprint in changed_metadata)
+    assert build_wechat_checkpoint_fingerprint(raw_message(serverId=None, localId=None)) is None
 
 
 @pytest.mark.parametrize("generation", [-1, 2**63, True, "1"])

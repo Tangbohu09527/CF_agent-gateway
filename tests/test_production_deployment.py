@@ -11,6 +11,11 @@ from cf_agent_gateway.config import WorkerSettings, load_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "docker-compose.prod.yml"
+DOCKERFILE_PATH = ROOT / "docker" / "Dockerfile"
+DOCKERIGNORE_PATH = ROOT / ".dockerignore"
+CONTAINER_E2E_COMPOSE_PATH = ROOT / "tests" / "container" / "docker-compose.e2e.yml"
+CONTAINER_E2E_CONFIG_PATH = ROOT / "tests" / "container" / "production.yaml"
+CONTAINER_E2E_RUNNER_PATH = ROOT / "tests" / "container" / "run_compose_e2e.py"
 SYSTEMD_DIRECTORY = ROOT / "deploy" / "systemd"
 
 WORKERS = {
@@ -70,7 +75,14 @@ def test_production_compose_defines_independent_v2_workers() -> None:
     compose = _load_compose()
     services = compose["services"]
     assert isinstance(services, dict)
-    assert {"migration", "gateway", "worker", *WORKERS}.issubset(services)
+    assert {"heartbeat-init", "migration", "gateway", "worker", *WORKERS}.issubset(services)
+
+    for service_name in ("migration", "gateway", "worker", *WORKERS):
+        service = services[service_name]
+        assert service["user"] == "10001:10001"
+        assert service["read_only"] is True
+        assert service["cap_drop"] == ["ALL"]
+        assert "no-new-privileges:true" in service["security_opt"]
 
     for service_name, expected in WORKERS.items():
         service = services[service_name]
@@ -123,6 +135,87 @@ def test_production_compose_defines_independent_v2_workers() -> None:
         "${CF_GATEWAY_WORKER_RETRY_LIMIT:-3}"
     )
     assert {"gateway-state", "runtime-heartbeats"}.issubset(compose["volumes"])
+
+
+def test_production_heartbeat_volume_initializer_is_bounded_and_least_privilege() -> None:
+    compose = _load_compose()
+    services = compose["services"]
+    initializer = services["heartbeat-init"]
+
+    assert initializer["user"] == "0:0"
+    assert initializer["restart"] == "no"
+    assert initializer["network_mode"] == "none"
+    assert initializer["read_only"] is True
+    assert initializer["env_file"] == []
+    assert initializer["environment"] == {}
+    assert initializer["volumes"] == ["runtime-heartbeats:/run/cf-agent-gateway"]
+    assert initializer["cap_drop"] == ["ALL"]
+    assert set(initializer["cap_add"]) == {"CHOWN", "FOWNER"}
+    assert "no-new-privileges:true" in initializer["security_opt"]
+
+    command = "\n".join(initializer["command"])
+    assert "10001, 10001, 0o750" in command
+    assert "0o777) ==" in command
+    assert "chmod(path, 0o750)" in command
+    assert "chmod(path, 0o777)" not in command
+    assert services["migration"]["depends_on"]["heartbeat-init"]["condition"] == (
+        "service_completed_successfully"
+    )
+
+    dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert "groupadd --gid 10001 gateway" in dockerfile
+    assert "useradd --uid 10001 --gid gateway" in dockerfile
+    assert "/run/cf-agent-gateway" in dockerfile
+    assert "-m 0750" in dockerfile
+    assert "USER 10001:10001" in dockerfile
+
+    dockerignore = DOCKERIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+    assert ".git" in dockerignore
+    assert ".env" in dockerignore
+    assert ".env.*" in dockerignore
+    assert "!.env.example" in dockerignore
+    assert "tests" not in dockerignore
+
+
+def test_container_e2e_uses_isolated_postgresql_and_synthetic_adapters() -> None:
+    e2e = yaml.safe_load(CONTAINER_E2E_COMPOSE_PATH.read_text(encoding="utf-8"))
+    services = e2e["services"]
+
+    assert services["postgres"]["image"] == "postgres:16-alpine"
+    assert services["postgres"]["restart"] == "no"
+    assert services["heartbeat-init"]["build"] == {
+        "context": ".",
+        "dockerfile": "docker/Dockerfile",
+    }
+    synthetic = services["synthetic-wechat"]
+    assert synthetic["user"] == "10002:10002"
+    assert synthetic["read_only"] is True
+    assert synthetic["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in synthetic["security_opt"]
+
+    config = yaml.safe_load(CONTAINER_E2E_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert config["wechat"]["base_url"] == "http://synthetic-wechat:6174"
+    assert config["hermes"]["base_url"] == "http://synthetic-wechat:6174"
+    assert config["worker"]["enabled"] is True
+    assert "postgres:16-alpine" in CONTAINER_E2E_COMPOSE_PATH.read_text(encoding="utf-8")
+
+    runner = CONTAINER_E2E_RUNNER_PATH.read_text(encoding="utf-8")
+    for evidence in (
+        "ReadonlyRootfs",
+        "/health/runtime",
+        "restart",
+        "pause",
+        "updated_at",
+        "ExitCode",
+        "gateway-must-not-write",
+        "heartbeat-init",
+        "com.docker.compose.project",
+    ):
+        assert evidence in runner
+
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "container-e2e:" in workflow
+    assert "python tests/container/run_compose_e2e.py" in workflow
 
 
 @pytest.mark.parametrize(

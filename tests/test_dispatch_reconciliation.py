@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 
@@ -241,7 +241,7 @@ def test_poison_response_does_not_starve_later_reconciliation_candidate(
         )
         dispatcher = NoHermesDispatcher()
         worker = _worker(factory, dispatcher)
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             assert worker.reconcile_once() is False
             assert worker.reconcile_once() is True
 
@@ -272,7 +272,184 @@ def test_poison_response_does_not_starve_later_reconciliation_candidate(
         ]
         assert len(poison_logs) == 1
         assert poison_logs[0].fields["dispatch_record_id"] == poison.record_id
+        assert poison_logs[0].fields["failure_count"] == 1
+        assert poison_logs[0].fields["recovery_action"] == "candidate_backoff"
         assert "persist the response" not in caplog.text
+    finally:
+        engine.dispose()
+
+
+def test_reconciliation_backoff_survives_worker_restart_and_recovers_when_due(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    factory, engine = _database_factory(tmp_path, "persistent-backoff.db")
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    try:
+        persisted = _persist_raw_success(factory, "persistent-backoff")
+        with factory() as session:
+            raw_response = session.scalar(
+                select(HermesDispatchResponse).where(
+                    HermesDispatchResponse.dispatch_record_id == persisted.record_id
+                )
+            )
+            assert raw_response is not None
+            original_payload = raw_response.response_payload
+            raw_response.response_payload = {"invalid": "envelope"}
+            session.commit()
+
+        first_worker = _worker(factory, NoHermesDispatcher())
+        with caplog.at_level(logging.WARNING):
+            assert first_worker.reconcile_once(now=now) is False
+        with factory() as session:
+            record = session.get(HermesDispatchRecord, persisted.record_id)
+            assert record is not None
+            assert record.reconciliation_failure_count == 1
+            assert record.reconciliation_next_attempt_at is not None
+            due_at = record.reconciliation_next_attempt_at
+
+        restarted_worker = _worker(factory, NoHermesDispatcher())
+        assert restarted_worker.reconcile_once(now=now + timedelta(seconds=1)) is False
+        with factory() as session:
+            record = session.get(HermesDispatchRecord, persisted.record_id)
+            assert record is not None
+            assert record.reconciliation_failure_count == 1
+            raw_response = session.scalar(
+                select(HermesDispatchResponse).where(
+                    HermesDispatchResponse.dispatch_record_id == persisted.record_id
+                )
+            )
+            assert raw_response is not None
+            raw_response.response_payload = original_payload
+            session.commit()
+
+        assert restarted_worker.reconcile_once(
+            now=due_at.replace(tzinfo=UTC) if due_at.tzinfo is None else due_at
+        )
+        with factory() as session:
+            record = session.get(HermesDispatchRecord, persisted.record_id)
+            assert record is not None
+            assert record.reconciliation_failure_count == 0
+            assert record.reconciliation_next_attempt_at is None
+            assert record.reconciliation_quarantined_at is None
+            assert record.reconciliation_last_error_code is None
+            assert session.scalar(select(func.count()).select_from(ResponseRecord)) == 1
+            assert session.scalar(select(func.count()).select_from(DeliveryOutboxRecord)) == 1
+    finally:
+        engine.dispose()
+
+
+def test_reconciliation_quarantines_candidate_after_bounded_failures(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    factory, engine = _database_factory(tmp_path, "quarantine.db")
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    try:
+        persisted = _persist_raw_success(factory, "quarantine")
+        with factory() as session:
+            raw_response = session.scalar(
+                select(HermesDispatchResponse).where(
+                    HermesDispatchResponse.dispatch_record_id == persisted.record_id
+                )
+            )
+            assert raw_response is not None
+            raw_response.response_payload = {"invalid": "envelope"}
+            session.commit()
+
+        worker = _worker(factory, NoHermesDispatcher())
+        with caplog.at_level(logging.WARNING):
+            for expected_failure_count in range(1, 6):
+                assert worker.reconcile_once(now=now) is False
+                with factory() as session:
+                    record = session.get(HermesDispatchRecord, persisted.record_id)
+                    assert record is not None
+                    assert record.reconciliation_failure_count == expected_failure_count
+                    if expected_failure_count < 5:
+                        assert record.reconciliation_next_attempt_at is not None
+                        assert record.reconciliation_quarantined_at is None
+                        next_attempt = record.reconciliation_next_attempt_at
+                        now = (
+                            next_attempt.replace(tzinfo=UTC)
+                            if next_attempt.tzinfo is None
+                            else next_attempt
+                        )
+                    else:
+                        assert record.reconciliation_next_attempt_at is None
+                        assert record.reconciliation_quarantined_at is not None
+
+        assert worker.reconcile_once(now=now + timedelta(days=1)) is False
+        candidate_logs = [
+            record
+            for record in caplog.records
+            if getattr(record, "fields", {}).get("error_code")
+            == "dispatch_reconciliation_candidate_invalid"
+        ]
+        assert len(candidate_logs) == 5
+        assert candidate_logs[-1].fields["recovery_action"] == "candidate_quarantined"
+    finally:
+        engine.dispose()
+
+
+def test_resident_reconciliation_scan_and_backoff_prevent_log_storm(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    factory, engine = _database_factory(tmp_path, "bounded-resident.db")
+    stop_event = Event()
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    ticks = 0
+
+    def monotonic_clock() -> float:
+        nonlocal ticks
+        ticks += 1
+        if ticks >= 100:
+            stop_event.set()
+        return ticks / 10
+
+    try:
+        persisted = _persist_raw_success(factory, "bounded-resident")
+        with factory() as session:
+            raw_response = session.scalar(
+                select(HermesDispatchResponse).where(
+                    HermesDispatchResponse.dispatch_record_id == persisted.record_id
+                )
+            )
+            assert raw_response is not None
+            raw_response.response_payload = {"invalid": "envelope"}
+            session.commit()
+        worker = HermesDispatchWorker(
+            factory,
+            lambda session: NoHermesDispatcher(),
+            lease_seconds=10,
+            retry_limit=1,
+            response_processor_factory=lambda session: ResponsePersistenceProcessor(session),
+            reconcile_persisted_responses=True,
+            clock=lambda: now,
+            monotonic_clock=monotonic_clock,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            worker.run(
+                stop_event=stop_event,
+                concurrency=1,
+                idle_poll_seconds=0.001,
+            )
+
+        candidate_logs = [
+            record
+            for record in caplog.records
+            if getattr(record, "fields", {}).get("error_code")
+            == "dispatch_reconciliation_candidate_invalid"
+        ]
+        assert ticks >= 100
+        assert len(candidate_logs) == 1
+        assert not [
+            record
+            for record in candidate_logs
+            if record.levelno >= logging.ERROR
+            and record.fields["recovery_action"] != "candidate_quarantined"
+        ]
     finally:
         engine.dispose()
 

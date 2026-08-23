@@ -73,9 +73,23 @@ def test_worker_starts_polls_logs_result_and_stops(
         return PollResult(
             logged_in=True,
             chats_seen=3,
+            chats_succeeded=2,
             chats_failed=1,
             messages_seen=5,
             messages_processed=2,
+            messages_new=1,
+            messages_duplicate=1,
+            messages_failed=1,
+            messages_skipped_by_checkpoint=1,
+            messages_skipped_as_self=1,
+            messages_without_server_id=2,
+            bootstrapped_chats=1,
+            failures=[
+                PollFailure(
+                    stage=PollFailureStage.POLL_CHAT,
+                    code="wechat_poll_chat_error",
+                )
+            ],
         )
 
     with caplog.at_level(logging.INFO, logger=worker.logger.name):
@@ -93,9 +107,18 @@ def test_worker_starts_polls_logs_result_and_stops(
     assert records[2].fields == {  # type: ignore[attr-defined]
         "logged_in": True,
         "chats_seen": 3,
+        "chats_succeeded": 2,
         "chats_failed": 1,
         "messages_seen": 5,
         "messages_processed": 2,
+        "messages_new": 1,
+        "messages_duplicate": 1,
+        "messages_skipped_checkpoint": 1,
+        "messages_skipped_self": 1,
+        "messages_failed": 1,
+        "messages_without_server_id": 2,
+        "bootstrapped_chats": 1,
+        "failure_count": 1,
     }
 
 
@@ -131,6 +154,35 @@ def test_worker_publishes_heartbeat_for_a_successful_cycle(settings: Settings) -
         ),
         ("stop", "stopped"),
     ]
+
+
+def test_worker_does_not_poll_when_initial_heartbeat_publish_fails(
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("blocked", encoding="utf-8")
+    heartbeat_publisher = HeartbeatPublisher(
+        FileHeartbeat(blocked_parent / "worker.json"),
+        interval_seconds=0.01,
+    )
+    poll_called = False
+
+    def forbidden_poll(candidate: Settings) -> PollResult:
+        nonlocal poll_called
+        del candidate
+        poll_called = True
+        raise AssertionError("poll must not run without a durable heartbeat")
+
+    with pytest.raises(HeartbeatError, match="initial worker heartbeat publish failed"):
+        worker.run_worker(
+            settings,
+            stop_event=Event(),
+            poll_once=forbidden_poll,
+            heartbeat=heartbeat_publisher,
+        )
+
+    assert poll_called is False
 
 
 def test_worker_marks_returned_poll_failures_unhealthy(settings: Settings) -> None:

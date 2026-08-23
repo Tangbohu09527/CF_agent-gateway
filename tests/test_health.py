@@ -384,8 +384,12 @@ def test_runtime_health_reports_populated_queue_metrics(client: TestClient) -> N
         "stale_running": 1,
         "blocked_threads": 1,
         "missing_delivery": 1,
+        "reconciliation_backlog": 1,
+        "reconciliation_deferred": 0,
+        "reconciliation_poison": 0,
         "oldest_uncertain_age_seconds": 180.0,
         "oldest_backlog_age_seconds": 300.0,
+        "oldest_reconciliation_age_seconds": 107.0,
     }
     assert body["delivery"] == {
         "queued": 0,
@@ -397,6 +401,39 @@ def test_runtime_health_reports_populated_queue_metrics(client: TestClient) -> N
         "missing_delivery": 1,
         "oldest_backlog_age_seconds": 320.0,
     }
+
+
+def test_runtime_health_reports_quarantined_reconciliation_candidate(
+    client: TestClient,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    _seed_runtime_health_graph(client, now=now)
+    with client.app.state.database_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE hermes_dispatch_records "
+                "SET reconciliation_failure_count = 5, "
+                "reconciliation_next_attempt_at = NULL, "
+                "reconciliation_quarantined_at = :quarantined_at, "
+                "reconciliation_last_error_code = "
+                "'dispatch_reconciliation_candidate_invalid' "
+                "WHERE id = 7"
+            ),
+            {"quarantined_at": now - timedelta(seconds=1)},
+        )
+    client.app.state.runtime_health = RuntimeHealthService(
+        client.app.state.database_engine,
+        client.app.state.settings,
+        clock=lambda: now,
+    )
+
+    response = client.get("/health/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["dispatch"]["reconciliation_backlog"] == 1
+    assert response.json()["dispatch"]["reconciliation_deferred"] == 0
+    assert response.json()["dispatch"]["reconciliation_poison"] == 1
 
 
 def test_readiness_checks_the_database(client: TestClient) -> None:
@@ -519,7 +556,7 @@ def test_runtime_health_reads_three_worker_heartbeats_and_wechat_auth(
     assert body["components"]["delivery_worker"]["status"] == "ok"
 
 
-def test_runtime_health_does_not_treat_dispatch_liveness_as_hermes_connectivity(
+def test_runtime_health_treats_healthy_idle_dispatch_worker_as_no_recent_observation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -542,12 +579,12 @@ def test_runtime_health_does_not_treat_dispatch_liveness_as_hermes_connectivity(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "degraded"
+    assert body["status"] == "healthy"
     assert body["components"]["dispatch_worker"]["status"] == "ok"
     assert body["components"]["hermes"] == {
-        "status": "degraded",
+        "status": "ok",
         "configuration": "configured",
-        "connectivity": "unverified",
+        "connectivity": "no_recent_observation",
     }
 
 
@@ -583,9 +620,115 @@ def test_runtime_health_expires_stale_hermes_operation_observation(
 
     assert response.status_code == 200
     assert response.json()["components"]["dispatch_worker"]["status"] == "ok"
+    assert response.json()["status"] == "healthy"
+    assert response.json()["components"]["hermes"] == {
+        "status": "ok",
+        "configuration": "configured",
+        "connectivity": "no_recent_observation",
+    }
+
+
+def test_runtime_health_degrades_for_recent_hermes_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    dispatch_path = tmp_path / "dispatch.json"
+    monkeypatch.setenv(DISPATCH_HEARTBEAT_PATH_ENV, str(dispatch_path))
+    monkeypatch.setenv("HERMES_API_KEY", "test-only-hermes-key")
+    FileHeartbeat(dispatch_path, clock=lambda: now).write(
+        "running",
+        details={
+            "phase": "waiting",
+            "last_operation_succeeded": False,
+            "last_operation_at": now.isoformat().replace("+00:00", "Z"),
+        },
+    )
+    settings = Settings(
+        database=DatabaseSettings(url="sqlite+pysqlite:///:memory:"),
+        hermes=HermesSettings(enabled=True, base_url="https://hermes.test"),
+        worker=WorkerSettings(enabled=True),
+    )
+
+    with TestClient(gateway_app.create_app(settings)) as runtime_client:
+        runtime_client.app.state.runtime_health = RuntimeHealthService(
+            runtime_client.app.state.database_engine,
+            settings,
+            clock=lambda: now,
+        )
+        response = runtime_client.get("/health/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
     assert response.json()["components"]["hermes"] == {
         "status": "degraded",
         "configuration": "configured",
+        "connectivity": "last_operation_failed",
+    }
+
+
+def test_runtime_health_degrades_hermes_when_dispatch_worker_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    dispatch_path = tmp_path / "dispatch.json"
+    monkeypatch.setenv(DISPATCH_HEARTBEAT_PATH_ENV, str(dispatch_path))
+    monkeypatch.setenv("HERMES_API_KEY", "test-only-hermes-key")
+    FileHeartbeat(dispatch_path, clock=lambda: now - timedelta(minutes=5)).write(
+        "running",
+        details={"phase": "waiting"},
+    )
+    settings = Settings(
+        database=DatabaseSettings(url="sqlite+pysqlite:///:memory:"),
+        hermes=HermesSettings(enabled=True, base_url="https://hermes.test"),
+        worker=WorkerSettings(enabled=True),
+    )
+
+    with TestClient(gateway_app.create_app(settings)) as runtime_client:
+        runtime_client.app.state.runtime_health = RuntimeHealthService(
+            runtime_client.app.state.database_engine,
+            settings,
+            clock=lambda: now,
+        )
+        response = runtime_client.get("/health/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["components"]["dispatch_worker"] == {"status": "stale_or_invalid"}
+    assert response.json()["components"]["hermes"] == {
+        "status": "degraded",
+        "configuration": "configured",
+        "connectivity": "no_recent_observation",
+    }
+
+
+def test_runtime_health_degrades_when_hermes_configuration_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    dispatch_path = tmp_path / "dispatch.json"
+    monkeypatch.setenv(DISPATCH_HEARTBEAT_PATH_ENV, str(dispatch_path))
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    FileHeartbeat(dispatch_path, clock=lambda: now).write(
+        "running",
+        details={"phase": "waiting"},
+    )
+    settings = Settings(
+        database=DatabaseSettings(url="sqlite+pysqlite:///:memory:"),
+        hermes=HermesSettings(enabled=True, base_url="https://hermes.test"),
+        worker=WorkerSettings(enabled=True),
+    )
+
+    with TestClient(gateway_app.create_app(settings)) as runtime_client:
+        response = runtime_client.get("/health/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["components"]["hermes"] == {
+        "status": "degraded",
+        "configuration": "unconfigured",
         "connectivity": "unverified",
     }
 

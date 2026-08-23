@@ -7,7 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --system gateway && useradd --system --gid gateway gateway
+RUN groupadd --gid 10001 gateway \
+    && useradd --uid 10001 --gid gateway --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin gateway
 
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -15,10 +17,11 @@ RUN python -m pip install --no-cache-dir .
 
 COPY alembic.ini ./
 COPY config ./config
-RUN mkdir -p /app/data /var/lib/cf-agent-gateway \
-    && chown -R gateway:gateway /app /var/lib/cf-agent-gateway
+RUN install -d -o gateway -g gateway -m 0750 \
+        /app/data /var/lib/cf-agent-gateway /run/cf-agent-gateway \
+    && chown -R gateway:gateway /app
 
-USER gateway
+USER 10001:10001
 EXPOSE 8080
 
 CMD ["python", "-m", "cf_agent_gateway.main"]
