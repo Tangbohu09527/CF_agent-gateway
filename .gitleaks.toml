@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic opaque credentials used by recovery redaction tests"
+stopwords = [
+  "A9m4N7q2R5s8",
+  "B8n3P6r1S4t7",
+  "C7p2Q5s8T3u6",
+  "D6q1R4t7U2v5",
+  "E5r8V3x6Y1z4",
+]
