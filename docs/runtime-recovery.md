@@ -23,7 +23,7 @@ CFserver by this repository change.
 ### Automatic, proven reset
 
 When the visible maximum `localId` is below the checkpoint, or the stored anchored
-`localId` has a different serverId-derived fingerprint, the poller:
+`localId` has a different stored content-free fingerprint, the poller:
 
 1. emits `checkpoint regression detected` with hashed account/conversation references;
 2. CAS-updates the exact old checkpoint;
@@ -40,10 +40,17 @@ generation-scoped.
 
 Migration keeps a nonzero `last_local_id`, sets generation to zero, and leaves the
 anchor null. It does not infer an anchor from Message rows. On the first overlapping
-window containing the exact checkpoint message with a serverId, the poller CAS-enrolls
-the fingerprint and stops that conversation for the cycle. A purely forward window can
-advance normally. A serverId-less checkpoint remains unverified and runtime health is
-degraded.
+window containing exactly one checkpoint message, the poller CAS-enrolls either its
+serverId anchor or a content-free fallback anchor and stops that conversation for the
+cycle. The next cycle must confirm the stored anchor before later messages advance. A
+purely forward window can advance normally.
+
+The fallback continuity digest uses local ID, sender ID, raw type, UTC timestamp, and self
+flag inside the checkpoint's account/conversation scope; it never uses message text or a
+nickname, and it is separate from generation-scoped source-message identity. If those
+fields are missing or the checkpoint local ID is ambiguous, continuity remains
+fail-closed/degraded. An identical ambiguity warning is emitted once per poller process
+state rather than every polling interval.
 
 An empty window, API failure, incomplete response, or missing legacy anchor is not by
 itself proof of regression. The poller does not rewind or switch bootstrap mode in those
@@ -57,10 +64,41 @@ WeChat worker. At-least-once discovery replays the message, Message Store unique
 returns the existing row, and dispatch idempotency returns the existing dispatch. No
 manual Message or dispatch insertion is required.
 
+## Durable admission recovery
+
+Each persisted Message has at most one row in `message_admission_outcomes`:
+
+- no row means Message persistence committed before admission began; replay creates a
+  pending authority and evaluates it;
+- `pending` means evaluation has not completed; a live claim fails closed, while a free
+  or expired lease is reclaimed using the stored request snapshot;
+- completed `denied` or `legacy_unresolved` is terminal admission evidence and is
+  returned without evaluating current policy, Profile, mention, or routing state;
+- completed `allowed` retains the exact identity, Workspace, AIThread, policy, and route
+  evidence; replay may only verify or repair its same idempotent dispatch.
+
+For a new allowed decision, outcome completion and dispatch enqueue commit in one
+transaction. A failure after dispatch staging rolls both facts back, releases the pending
+claim with a stable error code, and permits controlled replay. Do not change completed
+denied/unresolved rows to pending, rerun an old Message against today's policy, or insert a
+dispatch with SQL.
+
+Revision `20260823_03` backfills Messages that already have a dispatch as completed
+`allowed`. Legacy Messages without a dispatch become completed `legacy_unresolved`;
+absence of a dispatch is not proof that an old Message should now be allowed. There is no
+generic operator endpoint that reclassifies this evidence. A different disposition needs a
+separately reviewed data/recovery design.
+
 ## Dispatch `uncertain`
 
 An `uncertain` dispatch represents an ambiguous external effect. It intentionally blocks
 later queue records on the same AIThread and never enters automatic retry.
+
+Every recovery mutation performs its dispatch CAS and audit insert in one transaction.
+Revision `20260823_04` adds database checks for each legal before/after/evidence tuple and
+rejects UPDATE or DELETE of audit rows through PostgreSQL/SQLite triggers. Audit history is
+therefore immutable even to ordinary ORM or direct SQL paths. Do not disable the trigger or
+delete evidence to make a downgrade possible.
 
 Inspect it first:
 
@@ -136,6 +174,20 @@ the existing response/outbox reconciliation path; never resend directly.
 - A persisted response without delivery is a reconciliation issue, not a reason to call
   Hermes or recreate the response.
 
+The resident reconciliation scan is limited to once every five seconds. A candidate that
+cannot be rebuilt stores `reconciliation_failure_count`,
+`reconciliation_next_attempt_at`, and a stable error code. Automatic delays are 30, 60,
+120, and 240 seconds; the fifth failure stores `reconciliation_quarantined_at` and stops
+automatic attempts. The cursor continues to later candidates, and restart retains the
+database schedule.
+
+Use `dispatch.reconciliation_backlog`, `reconciliation_deferred`,
+`reconciliation_poison`, and `oldest_reconciliation_age_seconds` to triage. A deferred
+transition logs once per failed attempt; quarantine logs one ERROR state change rather than
+an ERROR every worker idle loop. Investigate the stable error and source facts. Do not call
+Hermes, clear the fields with ad-hoc SQL, or force delivery; a quarantined record requires a
+reviewed corrective release/data action.
+
 Inspect attempt/receipt evidence and channel provider history. Escalate an ambiguous
 send for manual disposition under site policy; this branch does not add an unaudited
 force-send API.
@@ -153,5 +205,12 @@ supervised restart/cycle. Do not mark ambiguous Hermes or WeChat effects as fail
 because the database was unavailable. A schema-head mismatch is a deployment stop: run
 the reviewed Alembic migration in an exclusive window rather than enabling automatic
 DDL in every service.
+
+Heartbeat persistence is also a startup/runtime gate. The first atomic publish must
+succeed before a worker enters business work. Three consecutive later write failures make
+the worker exit nonzero for supervision; a successful publish resets the failure budget.
+For Compose, confirm the one-shot initializer exited zero, the shared directory is
+`10001:10001` mode `0750`, Worker files are `0600`, and the Gateway mount is read-only.
+Never keep a worker alive without a valid heartbeat by swallowing publisher errors.
 
 See [troubleshooting.md](troubleshooting.md) for symptom-based triage.

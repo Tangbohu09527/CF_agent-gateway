@@ -42,7 +42,7 @@ business payload is returned.
 | `delivery_worker` | Same worker states | Delivery heartbeat is fresh when WeChat is enabled. |
 | `wechat_auth` | `logged_in`, `logged_out`, `unknown`, `disabled` | Last redacted WeChat worker auth observation. |
 | `hermes` | `ok`, `degraded`, `disabled` | Endpoint/key configuration plus the last real Hermes operation observation. |
-| `wechat_checkpoint_continuity` | `ok`, `degraded`, `unknown` | Count of nonzero checkpoints without a verified serverId anchor. |
+| `wechat_checkpoint_continuity` | `ok`, `degraded`, `unknown` | Count of nonzero checkpoints without a verified serverId-first or content-free fallback anchor. |
 
 The runtime reads heartbeat paths from:
 
@@ -57,15 +57,27 @@ Each enabled service must point the Gateway health process at the same heartbeat
 the corresponding worker writes. A missing path produces `unknown`, not fabricated
 health.
 
+In production Compose, `heartbeat-init` prepares the shared directory as `10001:10001`
+with mode `0750`; each Worker then atomically replaces only its own `0600` file. The Gateway
+uses the same numeric identity for read access but its volume mount is read-only. The first
+publish is a startup gate: failure prevents the Worker from entering its business loop.
+After startup, three consecutive write failures request a bounded graceful exit and surface
+a process failure to the supervisor. A successful publish resets that consecutive-failure
+budget.
+
 The Hermes component reports `configuration` separately as `configured`,
 `unconfigured`, or `disabled`. Its `connectivity` is
-`last_operation_succeeded`, `last_operation_failed`, `unverified`, or `disabled`.
-The dispatch worker publishes an observation only after a real Hermes call returns or
-fails; process liveness alone never proves upstream connectivity. A configured worker
-with no observed call is therefore `degraded/unverified`. The operation observation
-expires under the same `CF_GATEWAY_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS` freshness budget
-as worker evidence, so periodic process heartbeats cannot keep an old success green.
-This endpoint does not send a synthetic Hermes request.
+`last_operation_succeeded`, `last_operation_failed`, `no_recent_observation`,
+`unverified`, or `disabled`. The dispatch worker publishes an observation only after a
+real Hermes call returns or fails; process liveness alone never proves upstream
+connectivity.
+
+A configured worker with no recent business call is `ok/no_recent_observation`, including
+after an old success expires. Normal low traffic therefore does not degrade Runtime Health.
+A recent explicit failure remains `degraded/last_operation_failed`. Missing or stale
+dispatch-worker evidence still degrades its worker component, and missing Hermes
+configuration is `degraded/unconfigured/unverified`. This endpoint does not send a
+synthetic Hermes request or claim upstream connectivity during idle time.
 
 ### Dispatch metrics
 
@@ -79,8 +91,12 @@ This endpoint does not send a synthetic Hermes request.
 | `stale_running` | Running records whose lease has expired. |
 | `blocked_threads` | Distinct threads where an uncertain head blocks later work. |
 | `missing_delivery` | Successful dispatches with persisted dispatch response but no delivery row. |
+| `reconciliation_backlog` | Successful WeChat dispatch responses still missing normalized response or delivery facts. |
+| `reconciliation_deferred` | Backlog records whose persistent next-attempt time is still in the future. |
+| `reconciliation_poison` | Backlog records quarantined after five failed reconciliation attempts. |
 | `oldest_uncertain_age_seconds` | Time since the oldest record entered `uncertain` (its terminal transition timestamp), or null. |
 | `oldest_backlog_age_seconds` | Age of the oldest queued/running/failed/uncertain record, or null. |
+| `oldest_reconciliation_age_seconds` | Age of the oldest reconciliation backlog record, or null. |
 
 ### Delivery metrics
 
@@ -96,7 +112,7 @@ This endpoint does not send a synthetic Hermes request.
 - `unhealthy`: database unavailable or migration schema mismatch; returns HTTP `503`.
 - `degraded`: infrastructure is queryable but a worker/config/checkpoint component is
   missing, stale, unknown or degraded, or nonzero failure/uncertain/dead/stale/blocked/
-  missing-delivery metrics require attention; returns HTTP `200`.
+  missing-delivery/reconciliation-poison metrics require attention; returns HTTP `200`.
 - `healthy`: no current degradation predicate is present; returns HTTP `200`.
 
 A `dead` count remains a degraded historical signal until the site's retention and
@@ -111,9 +127,20 @@ login incident. Treat checkpoint continuity `degraded` as a migration/session-co
 investigation, not permission to rewind manually.
 
 Treat Hermes `last_operation_failed` as observed upstream failure. Treat
-`unverified` as missing connectivity evidence: use a controlled end-to-end validation
-under the deployment checklist rather than assuming the heartbeat proves Hermes works.
+`no_recent_observation` as healthy idle runtime with no current upstream evidence, not a
+connectivity success. Treat `unverified` as missing configuration/connectivity evidence.
+Use a controlled end-to-end validation under the deployment checklist rather than assuming
+the heartbeat proves Hermes works.
 
-The GitHub Actions health tests validate payload behavior with controlled fixtures.
-Actual alert thresholds, dashboard conversion to `Asia/Shanghai`, and CFserver endpoint
-monitoring are external responsibilities and were not validated against production.
+Alert when `reconciliation_deferred` remains beyond its scheduled retry or
+`oldest_reconciliation_age_seconds` breaches the site objective. Page/assign every
+`reconciliation_poison`; quarantined candidates do not auto-retry and must not be cleared
+with ad-hoc SQL.
+
+The GitHub Actions unit tests validate payload behavior with controlled fixtures. The
+separate production Compose job is configured to validate heartbeat ownership/mode, Worker
+health, Gateway read-only access, API/Admin token boundaries, stale-heartbeat degradation,
+restart recovery, and clean stop in real Linux containers with synthetic dependencies. A
+green run ID in pull request #4 is the execution evidence. Actual alert thresholds,
+dashboard conversion to `Asia/Shanghai`, and CFserver endpoint monitoring are external
+responsibilities and were not validated against production.

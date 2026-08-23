@@ -55,11 +55,11 @@ run polling, dispatch, or delivery as an in-process background task.
 
 | Owner | Writes | Reads but does not rewrite |
 | --- | --- | --- |
-| WeChat polling | Sync checkpoint, Message Store, admission and one dispatch row | agent-wechat visible window |
+| WeChat polling | Sync checkpoint, Message Store, authoritative admission outcome and one dispatch row | agent-wechat visible window |
 | Dispatch worker | Dispatch claim/lease/status, claim-fenced Hermes response | Message Store, Workspace, AIThread and routing snapshot |
 | Response persistence | Normalized response parts and existing delivery outbox | Persisted Hermes response |
 | Delivery worker | Delivery claims, attempts, receipts and terminal status | Response parts and artifacts |
-| Admin recovery | CAS dispatch transition plus append-only audit row | Dispatch, response and delivery evidence |
+| Admin recovery | CAS dispatch transition plus database-immutable audit row | Dispatch, response and delivery evidence |
 
 There is one dispatch model (`hermes_dispatch_records` and its existing response
 tables) and one delivery model (`delivery_outbox` and its existing attempt/receipt
@@ -84,11 +84,62 @@ poller increments the generation and rewinds to immediately before the first vis
 message. The same visible window then follows the normal persist-first path.
 
 The upstream `serverId`, when present, remains the stable physical-message identity
-across generations. When it is absent, the fallback identity is scoped by the
-checkpoint generation. Message Store uniqueness remains the final idempotency boundary;
-the checkpoint is an optimization and continuity record, not a substitute for that
-constraint. Polling can therefore redeliver after a crash between sink commit and
-checkpoint advance without creating a second Message or dispatch.
+across generations. When it is absent, the source-message identity is scoped by the
+checkpoint generation. Its separate continuity anchor is content-free: the checkpoint row
+provides source-account/conversation/generation scope, while the fallback digest contains
+local ID, conversation ID, sender ID, raw message type, UTC timestamp, and self flag. It
+does not use message text or nickname, and a timestamp alone is never treated as identity.
+
+A newly processed serverId-less checkpoint therefore validates its own anchor on the next
+cycle and can admit later messages. A legacy anchorless checkpoint can CAS-enroll either a
+serverId or content-free fallback anchor from one exact overlapping message, then stops that
+chat for the cycle so the following cycle confirms continuity. If the anchor message is
+absent, duplicated, or lacks the required non-content fields, the chat fails closed.
+Identical ambiguous warnings are deduplicated in the poller process; restart or a changed
+continuity state can produce a new warning.
+
+Message Store uniqueness remains the final idempotency boundary; the checkpoint is an
+optimization and continuity record, not a substitute for that constraint. Polling can
+therefore redeliver after a crash between sink commit and checkpoint advance without
+creating a second Message or dispatch.
+
+## Durable admission authority
+
+`message_admission_outcomes` permits at most one authoritative row per persisted Message,
+enforced by a unique `message_id` and restrictive foreign key. A row can be absent only
+after Message commit and before admission begins. Runtime outcomes begin as
+`pending` with a claim token, lease, attempt count, and stored request facts. Only a free or
+expired lease can be claimed; a live claim makes concurrent replay fail closed. Evaluation
+failure releases the claim, records a stable error code, and leaves the row pending for
+controlled replay.
+
+A completed outcome stores `allowed`, `denied`, or fail-closed `unresolved`, together
+with the reason, task decision, enterprise identity, Workspace/AIThread target, request and
+authorization snapshots, policy IDs/timestamps, routing mode, Profile revision, and
+completion timestamps where applicable. A completed denied/unresolved Message is never
+reevaluated after policy, mention, Profile, or routing changes. A completed allowed Message
+reuses its stored target and repairs only its missing idempotent dispatch.
+
+Message persistence commits before admission, so a crash at that boundary leaves an
+authoritative Message with no outcome and replay may start admission. For a new allowed
+decision, admission completion and dispatch enqueue are staged in one database transaction:
+neither fact can commit alone. The poller still stops before Hermes execution.
+
+Revision `20260823_03` backfills every legacy Message. A Message with an existing dispatch
+becomes completed allowed using that dispatch target; every Message without a dispatch
+becomes completed `legacy_unresolved` and cannot be silently reevaluated. Existing Message,
+dispatch, response, and delivery facts are not rewritten.
+
+## Polling observability
+
+Per-message checkpoint and self skips are DEBUG records. INFO volume is bounded to one
+`poll chat completed` summary per chat and the resident worker's cycle start/completion
+records. Summaries expose redacted account/conversation references and
+`messages_seen`, `messages_processed`, `messages_new`, `messages_duplicate`,
+`messages_skipped_checkpoint`, `messages_skipped_self`, `messages_failed`,
+serverId-less, bootstrap, and failure counts.
+Checkpoint regression detected/recovered remains WARNING. No message body, nickname, token,
+Cookie, connection string, or raw upstream response is logged.
 
 ## Dispatch lifecycle and FIFO
 
@@ -118,6 +169,12 @@ Every transition is CAS-protected, preserves `attempt_count`, and writes an audi
 Replaying the same action/reference is idempotent. `confirm-success` never accepts
 assistant content from an operator and does not enqueue a duplicate delivery.
 
+Revision `20260823_04` makes those audit rows immutable at the database boundary:
+PostgreSQL rejects UPDATE/DELETE through a trigger function and SQLite uses equivalent
+triggers. Database constraints also require the exact retry/mark-dead/confirm-success
+before/after/evidence tuples and permit `manual_retry_approved=true` only on `failed`.
+The ORM and direct SQL are subject to the same invariants.
+
 ## Delivery recovery
 
 Dispatch success and channel delivery are separate durable facts. A delivery failure
@@ -128,6 +185,16 @@ eligible stale claims, records each attempt, and treats an ambiguous outbound re
 If a persisted response has no delivery row, reconciliation uses the existing response
 and delivery tables to create only the missing outbox fact. It does not recreate the
 Message, dispatch, or response. Missing-delivery counts are surfaced by runtime health.
+
+The resident dispatch worker scans reconciliation candidates at most once every five
+seconds, in ID order with a bounded cursor batch. A corrupt candidate records persistent
+failure state and waits 30, 60, 120, then 240 seconds; the fifth failure is quarantined
+without another automatic attempt. State-transition logs are WARNING while deferred and
+ERROR once on quarantine rather than once per 0.25-second worker loop. The cursor continues
+past a poison candidate, and process restart honors the database `next_attempt_at` or
+quarantine. Runtime health reports total, deferred, poison, and oldest reconciliation
+backlog. Quarantine requires investigation and a reviewed corrective change; there is no
+generic force-replay endpoint.
 
 ## Liveness, readiness, and business health
 
@@ -141,18 +208,30 @@ redacted snapshot that covers:
 - dispatch counts and oldest backlog/uncertain ages;
 - stale running leases, blocked threads and dead records;
 - delivery failures, uncertain/stale delivery and missing delivery;
-- checkpoint continuity that is still unverified after migration.
+- checkpoint continuity that is still unverified after migration; and
+- reconciliation backlog, deferred candidates, quarantined poison candidates, and age.
 
 See [runtime-health.md](runtime-health.md) for interpretation. A healthy HTTP process
 does not prove that the end-to-end business chain can reply to WeChat. In particular,
-dispatch-worker liveness does not prove Hermes connectivity; only a recent real operation
-adds that redacted observation, and no active probe sends synthetic business traffic.
+dispatch-worker liveness does not prove Hermes connectivity. A configured, healthy but
+idle worker is `ok/no_recent_observation`; a recent explicit success is
+`last_operation_succeeded`, and a recent explicit failure is degraded. A stale/missing
+dispatch-worker or missing Hermes configuration is degraded. No active probe sends
+synthetic business traffic.
+
+Production Compose runs all long-lived services as `10001:10001` with read-only root
+filesystems. A networkless, Secret-free, one-shot root `heartbeat-init` owns only the
+shared volume initialization step: it enforces directory owner/group `10001:10001` and
+mode `0750`, then exits. Workers atomically replace their own `0600` heartbeat files;
+the Gateway mounts that volume read-only. Failure of the first heartbeat prevents business
+work, and three consecutive later write failures terminate the worker for supervised
+restart.
 
 ## Schema ownership
 
 Alembic is the only schema-evolution mechanism. The repository has one linear revision
-chain and one head. Production deploys run the migration as an exclusive step before
-the four application processes start; normal process startup uses schema-check mode.
+chain with head `20260823_04`. Production deploys run the migration as an exclusive step
+before the four application processes start; normal process startup uses schema-check mode.
 No standalone SQL creates or replaces an existing V2 table, and `create_all` is not a
 production migration mechanism. See [the migration runbook](../migrations/README.md).
 
@@ -169,7 +248,7 @@ cherry-picked as a whole.
 | REJECT | Parallel Hermes dispatch/delivery ledgers, three-state `succeeded/in_progress/failed` model, inline execution, one-service Compose, standalone SQL migration | Not introduced because each conflicts with the V2 durable model. |
 
 PR #3's historical test count is not evidence for this branch. Only the final V2 test
-run and GitHub Actions run attached to the replacement pull request are release evidence.
+run and GitHub Actions run attached to pull request #4 are release evidence.
 
 ## Time contract
 

@@ -9,8 +9,9 @@ implementation and automated tests are separate from site acceptance:
 | Gate | Status owner |
 | --- | --- |
 | Implemented code, migration and configuration | Repository |
-| Local full-suite result | Replacement pull request |
-| GitHub Actions result and run ID | Replacement pull request/check run |
+| Local full-suite result | Pull request #4 |
+| GitHub Actions result and run ID | Pull request #4/check run |
+| Isolated production-Compose container proof | GitHub Actions `container-e2e` job |
 | CFserver smoke test | External deployment owner; not performed by this change |
 | Production backup, credentials, DNS/TLS and rollback authorization | External deployment owner |
 | Resolving any `uncertain` record | Authenticated human operator |
@@ -24,9 +25,10 @@ Production requires external PostgreSQL plus these independent application servi
 3. `dispatch-worker`
 4. `delivery-worker`
 
-`docker-compose.prod.yml` contains an exclusive migration job and the four services.
-PostgreSQL, agent-wechat and Hermes are external dependencies. The Compose `worker`
-service is the resident WeChat poller; it is intentionally not an inline dispatcher.
+`docker-compose.prod.yml` contains a bounded heartbeat-volume initializer, an exclusive
+migration job and the four long-running services. PostgreSQL, agent-wechat and Hermes are
+external dependencies. The Compose `worker` service is the resident WeChat poller; it is
+intentionally not an inline dispatcher.
 
 ## Release inputs
 
@@ -72,15 +74,32 @@ container-private `/run` tmpfs cannot be observed by the Gateway container. With
 use distinct files in the host's `/run` tree and grant the Gateway service read access.
 Never point two workers at the same file.
 
+The image and long-running Compose services use fixed identity `10001:10001`. The one-shot
+`heartbeat-init` dependency runs before migration with no network, no runtime Secret
+environment and only `CHOWN`/`FOWNER`; it repairs both new and existing heartbeat volumes to
+owner/group `10001:10001` and mode `0750`, then exits. It is the only root container in this
+Compose topology and is never resident. Workers create atomic heartbeat files with mode
+`0600`; the Gateway mounts the volume read-only. Do not replace this with `0777`, a resident
+root process, or a writable Gateway mount.
+
+Do not rely on a Docker daemon's raw named-volume owner or copy-up behavior. A fresh or
+reused volume is usable only after `heartbeat-init` asserts the postcondition above. The
+real-container CI creates the named volume, runs that initializer, and independently checks
+directory and file UID/GID/modes inside the running stack.
+
+Set `CF_GATEWAY_CONFIG_FILE` only when the site-specific YAML lives somewhere other than
+`./config/production.yaml`; the container target remains read-only at
+`/app/config/production.yaml`.
+
 ## Pre-deployment gate
 
-1. Confirm the intended commit, immutable image digest and replacement PR's green
+1. Confirm the intended commit, immutable image digest and pull request #4's green
    GitHub Actions run ID.
 2. Verify the database URL points to the intended PostgreSQL database without printing
    the password.
 3. Take and test a restorable backup. Record the backup identifier outside the repo.
 4. Record the current Alembic revision and table/row-count checks from the migration
-   runbook.
+   runbook, including `message_admission_outcomes` and recovery audits.
 5. Confirm there is one Alembic head and no unversioned or unexpected schema.
 6. Stop the Gateway and all three workers, or otherwise enforce an exclusive migration
    window.
@@ -106,15 +125,25 @@ docker compose -f docker-compose.prod.yml --profile worker up -d \
 For systemd, follow [systemd-deployment.md](../systemd-deployment.md). Use this order:
 
 1. PostgreSQL, agent-wechat and Hermes are reachable.
-2. The exclusive migration unit upgrades to the packaged head.
-3. Gateway starts and passes `/ready`.
-4. WeChat polling worker starts and publishes a fresh heartbeat.
-5. Dispatch worker starts and publishes a fresh heartbeat.
-6. Delivery worker starts and publishes a fresh heartbeat.
+2. `heartbeat-init` exits zero after enforcing heartbeat volume ownership and mode.
+3. The exclusive migration unit upgrades to the packaged head.
+4. Gateway starts and passes `/ready`.
+5. WeChat polling worker starts and publishes a fresh heartbeat.
+6. Dispatch worker starts and publishes a fresh heartbeat.
+7. Delivery worker starts and publishes a fresh heartbeat.
 
 The migration job is allowed to upgrade schema. All long-running services use check
 mode and fail closed on a head mismatch. Do not use `Base.metadata.create_all()`, an
-ad-hoc SQL file, or a second Alembic branch.
+ad-hoc SQL file, or a second Alembic branch. This release has one packaged head,
+`20260823_04`.
+
+Revision `20260823_03` creates one durable admission authority per Message. Existing
+dispatch-backed Messages are backfilled completed/allowed with their exact targets;
+Messages without dispatch become completed/`legacy_unresolved` and are never
+automatically reevaluated. Revision `20260823_04` adds persistent reconciliation
+backoff/quarantine fields, exact recovery transition checks, and PostgreSQL/SQLite triggers
+that reject recovery-audit UPDATE/DELETE. Both upgrades validate source data and fail closed
+on partial or inconsistent state.
 
 ## Post-deployment validation
 
@@ -125,15 +154,25 @@ minimum, verify:
 - `/ready` proves startup/database/schema readiness;
 - runtime business health reports all three enabled worker heartbeats;
 - Hermes configuration and the last real operation result are reported separately;
-- Hermes connectivity remains `unverified` until a controlled real dispatch runs;
+- configured, healthy Hermes with no recent call is `ok/no_recent_observation`, not
+  degraded and not proof of connectivity;
 - checkpoint continuity is not ambiguous/degraded;
-- queued/running/failed/uncertain/dead and delivery counts are understood;
+- queued/running/failed/uncertain/dead, reconciliation, and delivery counts are understood;
 - no stale lease, blocked thread, or missing delivery is unexplained;
+- legacy admission outcomes and any pending/stale claims have an owner;
+- recovery audit triggers reject an authorized test UPDATE/DELETE in staging;
 - a controlled synthetic message creates exactly one Message, one dispatch, one
   response, one delivery and one outbound reply.
 
-The synthetic end-to-end test is an external manual action and was not performed on a
-real CFserver by this repository change.
+The repository's real-container CI job uses production Compose plus a minimal override. It
+builds the actual image, starts PostgreSQL 16, migration, Gateway, and all three Workers,
+and verifies non-root/read-only isolation, one-shot initializer restrictions, heartbeat
+owner/group/mode, Gateway write denial, Worker Docker health, Runtime Health, API/Admin
+token separation, stale-heartbeat degradation, restart recovery, clean shutdown, and
+volume cleanup. It uses an empty synthetic WeChat service, seeds no dispatch, makes no
+Hermes call, and does not exercise a real account. Only a green Actions run ID is evidence
+that this job executed. The controlled business-message end-to-end test above remains an
+external manual action and was not performed on a real CFserver by this repository change.
 
 ## Rollback
 
@@ -153,6 +192,13 @@ Application rollback and database rollback are separate decisions.
 Checkpoint generation/anchor columns are operational evidence. A legacy nonzero
 checkpoint with no anchor is not proof of continuity and must not be fabricated during
 rollback.
+
+`20260823_03` refuses downgrade once runtime admission evidence exists. `20260823_04`
+refuses downgrade while any recovery audit or reconciliation failure/quarantine evidence
+exists. Prefer application rollback while retaining the forward-compatible schema. If an
+older schema is mandatory, restore the approved pre-upgrade backup into a separately
+verified database; never delete authoritative admission or audit evidence to force
+downgrade.
 
 ## Time settings
 

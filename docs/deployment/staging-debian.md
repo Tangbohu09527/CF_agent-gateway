@@ -181,7 +181,7 @@ sudo systemctl start cf-agent-gateway-migrate.service
 sudo systemctl status --no-pager cf-agent-gateway-migrate.service
 ```
 
-The expected Alembic head for the production-hardened V2 release is `20260823_02`.
+The expected Alembic head for the production-hardened V2 release is `20260823_04`.
 Gateway and worker processes must
 keep `CF_GATEWAY_STARTUP_MIGRATION_MODE=check`; they must not mutate schema on
 startup. Do not use SQLAlchemy `create_all` and do not add a merge revision.

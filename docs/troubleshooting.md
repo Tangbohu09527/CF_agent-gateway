@@ -22,9 +22,14 @@ an incident ticket.
 3. Compare only local ID bounds and hashed account/conversation references in logs.
 4. Check `components.wechat_checkpoint_continuity` in runtime health.
 
+INFO logs are aggregated per chat/cycle. Individual checkpoint and self skips are DEBUG, so
+raising the polling logger to DEBUG should be a temporary targeted diagnostic rather than
+the normal production level. A large all-skipped window should still produce one chat INFO
+summary, not one INFO record per message.
+
 If the visible maximum is below the checkpoint, or a saved anchor mismatches at the same
 local ID, one poller should CAS-rewind and increment generation. An empty window does not
-prove reset. A legacy checkpoint without a serverId anchor can remain degraded. Do not
+prove reset. A legacy checkpoint without any verified anchor can remain degraded. Do not
 set `last_local_id=0`, change bootstrap mode to `latest`, or delete the checkpoint.
 
 ## Checkpoint recovery repeats or never wins
@@ -34,9 +39,33 @@ resident/one-cycle pollers are not running and reload the current checkpoint. If
 cycle reports conflict without progress, stop duplicate pollers gracefully and restart
 one resident worker. Preserve checkpoint history and Message rows.
 
-If a fingerprint cannot be established because the checkpoint message has no serverId,
-continuity remains fail-closed/degraded. Escalate rather than synthesizing an anchor from
-message text, nickname or timestamp.
+The absence of `serverId` alone no longer makes continuity unverifiable. The poller can
+store a content-free fallback digest of local ID, sender ID, raw type, UTC timestamp, and
+self flag inside the checkpoint's account/conversation scope. That anchor is separate from
+generation-scoped Message identity and lets the next cycle confirm the checkpoint.
+
+Continuity still fails closed if the anchor local ID is absent/duplicated or required
+non-content fields are unavailable. Identical warnings are process-local deduplicated, so
+a restart or changed state can warn again but a stable ambiguous window does not warn every
+three seconds. Escalate rather than synthesizing an anchor from message text, nickname, or
+a timestamp alone.
+
+## Admission repeats or an old denial creates work
+
+Inspect `message_admission_outcomes` through approved read-only database tooling:
+
+- no row means the Message committed before admission started;
+- a live `pending` lease must not be stolen;
+- a free/expired `pending` row can replay from its stored request snapshot;
+- completed `denied` or `legacy_unresolved` must return the stored result without
+  current policy/routing evaluation;
+- completed `allowed` must retain complete identity/Workspace/AIThread targets and at most
+  repair its same idempotent dispatch.
+
+If an allowed outcome exists without a dispatch, normal replay is the repair path. If a
+completed denial changes or a second outcome appears, stop the WeChat worker and preserve
+the Message, outcome, policy, and dispatch facts: that is a database/application invariant
+violation. Do not mark the outcome pending or enqueue historical work with SQL.
 
 ## Dispatch queue stops on one thread
 
@@ -80,6 +109,21 @@ Workspace and AIThread. Run the existing response/outbox reconciliation path und
 procedure. It must create only the absent delivery fact. Do not call Hermes again, insert
 a second response, or send directly to WeChat.
 
+## Reconciliation is deferred or poison
+
+**Signal:** `dispatch.reconciliation_deferred > 0`,
+`dispatch.reconciliation_poison > 0`, or reconciliation age continues to grow.
+
+The resident scan runs no more than once every five seconds. Candidate failures persist a
+stable error and back off for 30, 60, 120, then 240 seconds. Failure five quarantines the
+record, so restart does not recreate a high-frequency ERROR loop. Later candidates should
+continue because the cursor advances past the poison record.
+
+Confirm the dispatch is already `success` with its claim-fenced dispatch response, then
+investigate why normalized response or delivery reconstruction is invalid. Do not call
+Hermes again or clear quarantine fields by ad-hoc SQL. Quarantine has no generic force
+endpoint; assign a reviewed corrective code/data change and preserve the failure evidence.
+
 ## Delivery is stale or uncertain
 
 **Signal:** `delivery.stale_delivering > 0` or `delivery.uncertain > 0`.
@@ -106,6 +150,23 @@ and restart only the affected worker; preserve the heartbeat and logs for the in
 Claim fencing handles stale owners. Do not run an ad-hoc one-cycle command alongside the
 resident process.
 
+For Compose, inspect the exited `heartbeat-init` service before restarting a Worker. It
+must have exited zero, the shared directory must be owned by `10001:10001` with mode `0750`,
+and each heartbeat file must be owned by `10001:10001` with mode `0600`. The Gateway mount
+must remain read-only. Never repair this with `chmod 777` or by running a Worker as root.
+If the initial heartbeat write fails, the Worker fails startup before doing business work;
+after startup, three consecutive write failures make it exit for supervised recovery.
+
+## Hermes is idle or degraded
+
+`ok/no_recent_observation` means Hermes is configured, the dispatch Worker heartbeat is
+healthy, and there is no fresh real-operation observation. It is normal in a low-traffic
+period and is not proof that Hermes is reachable. A recent explicit failure is
+`degraded/last_operation_failed`. Missing configuration is
+`degraded/unconfigured/unverified`; a missing/stale dispatch Worker is independently
+degraded. Use only an approved controlled business call for connectivity evidence; Runtime
+Health does not send a synthetic Hermes request.
+
 ## `/ready` fails or database is unavailable
 
 Check network/DNS/TLS, PostgreSQL availability and connection-pool errors without
@@ -124,10 +185,16 @@ python -m alembic current --verbose
 python -m alembic check
 ```
 
-Expected head is `20260823_02` and there must be exactly one head. Use only the packaged
+Expected head is `20260823_04` and there must be exactly one head. Use only the packaged
 migration runner in an exclusive window. A partial checkpoint-generation schema is
 rejected deliberately. Restore from backup or repair under a reviewed database change;
 do not stamp an unknown schema, run standalone SQL, or invoke `create_all`.
+
+Revision `20260823_03` also rejects partial admission schema/backfill, and
+`20260823_04` rejects inconsistent manual-retry/audit evidence. A downgrade must fail if
+runtime admission evidence, any recovery audit, or reconciliation failure/quarantine facts
+would be discarded. Prefer an application rollback that leaves the database at head or
+restore the tested pre-upgrade backup.
 
 ## Authentication or request rejection
 

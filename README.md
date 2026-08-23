@@ -3,9 +3,10 @@
 Enterprise AI Message Gateway.
 
 > Status: The V2 five-service runtime is implemented with production recovery hardening.
-> Checkpoint regression recovery, audited `uncertain` dispatch resolution, business
-> runtime health, fail-closed API boundaries, and Alembic revision `20260823_02` are in
-> this code line. The replacement pull request records exact local and GitHub Actions
+> Checkpoint regression recovery, durable admission, audited `uncertain` dispatch
+> resolution, bounded response reconciliation, business runtime health, fail-closed API
+> boundaries, and Alembic revision `20260823_04` are in this code line. Pull request #4
+> records exact local and GitHub Actions
 > evidence. No real CFserver, production PostgreSQL, WeChat account, or Hermes environment
 > was modified or validated by this repository work.
 
@@ -85,10 +86,12 @@ implemented:
 - `AgentWechatClient`, WeChat normalization, and explicit Message Store event conversion
 - Finite WeChat polling with `latest` and `backfill` bootstrap modes
 - Durable per-account, per-conversation polling checkpoints and at-least-once delivery
-- Checkpoint generation, serverId-derived continuity anchors, CAS rewind, and
-  generation-scoped serverId-less fallback identity after proven session regression
+- Checkpoint generation, content-free serverId-first/fallback continuity anchors, CAS
+  rewind, and generation-scoped serverId-less source identity after proven session regression
 - Polling-level `is_self=true` filtering that bypasses the sink and advances the checkpoint
 - Persist-first message admission, including identity and access-policy evaluation
+- One authoritative durable admission outcome per Message, with pending lease recovery,
+  completed replay, policy/routing evidence, and atomic allowed-outcome/dispatch commit
 - Workspace creation and conversation-scoped AI-thread reuse for authorized messages
 - Durable Hermes dispatch records with CAS claims, leases, fencing, retry, and FIFO
 - Standalone concurrent `HermesDispatchWorker` with crash recovery and graceful shutdown
@@ -103,14 +106,16 @@ implemented:
 - Resident WeChat worker with configurable polling interval and graceful shutdown
 - Liveness at `GET /health` and database-aware readiness at `GET /ready`
 - Redacted business-chain health at `GET /health/runtime`, including all three worker
-  heartbeats, checkpoint continuity, dispatch blockage/staleness, and missing delivery
-- Authenticated, CAS-protected and append-only-audited Admin recovery for `uncertain`
+  heartbeats, checkpoint continuity, dispatch blockage/staleness, reconciliation
+  backlog/deferred/poison state, and missing delivery
+- Authenticated, CAS-protected and database-immutable-audited Admin recovery for `uncertain`
   dispatch inspection, approved retry, terminal dead, and evidence-backed success
 - Fail-closed Message/Admin bearer authentication, bounded request bodies and pages,
   and strict recovery reason/reference validation
 - Atomic worker heartbeat files with a standalone freshness-check CLI
 - Explicit database migration command and read-only production startup checks
-- Newline-delimited JSON logs with protected core fields and service/process metadata
+- Newline-delimited JSON logs with protected core fields, service/process metadata,
+  DEBUG-only per-message polling skips, and bounded per-chat/per-cycle INFO summaries
 - Development Compose plus hardened production Compose and systemd deployment guidance
 
 Conversation determines context; sender identity determines permission. Admission resolves
@@ -318,7 +323,7 @@ fails the process instead of retrying indefinitely.
 
 ## Test
 
-Run the entire V2 suite and repository checks. The replacement pull request records the
+Run the entire V2 suite and repository checks. Pull request #4 records the
 exact passed/skipped/warning totals and GitHub Actions run ID. The historical V1 Staging
 record of `393 passed` is retained only in
 [docs/v1-staging-validation.md](docs/v1-staging-validation.md); it is not current release
@@ -372,6 +377,21 @@ dropped Linux capabilities, bounded Docker logs, explicit stop grace periods, a 
 gateway healthcheck, and independent heartbeat healthchecks for all workers. Normal gateway
 and worker startup use `CF_GATEWAY_STARTUP_MIGRATION_MODE=check`; only the explicit
 migration command may change the schema.
+
+The application image and all long-running Compose services use the fixed non-root identity
+`10001:10001`. Before migration, the one-shot `heartbeat-init` service repairs the shared
+heartbeat volume to `10001:10001` with mode `0750`; it has no network, receives no runtime
+Secret environment, retains only `CHOWN`/`FOWNER`, and does not remain running. Workers write
+atomic `0600` heartbeat files while the Gateway mounts the same volume read-only. A Worker
+fails startup if its first heartbeat cannot be persisted and exits after three consecutive
+write failures so supervision can restart it.
+
+The GitHub Actions `container-e2e` job runs `tests/container/run_compose_e2e.py`. It builds the
+production image and starts PostgreSQL 16, migration, Gateway, and all three Workers against
+an isolated synthetic agent-wechat service. It verifies actual container identities,
+read-only filesystems, heartbeat ownership/modes, Runtime Health, restart recovery, and clean
+SIGTERM shutdown. It neither connects to a real WeChat/Hermes system nor replaces CFserver
+acceptance.
 
 Operational probes are:
 

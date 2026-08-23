@@ -125,7 +125,9 @@ POST /admin/dispatches/{id}/confirm-success
 ```
 
 The expected current state is always `uncertain`. Each operation performs a database
-CAS and appends an audit row in the same transaction. A successful response is:
+CAS and appends an audit row in the same transaction. PostgreSQL and SQLite database
+triggers reject UPDATE or DELETE of that row, including direct SQL, and check constraints
+enforce each action's exact before/after/evidence tuple. A successful response is:
 
 ```json
 {
@@ -146,5 +148,10 @@ that safe retry is impossible. `confirm-success` accepts no assistant content an
 requires a valid claim-fenced persisted dispatch response; any normalized response
 already present must match the message, Workspace, AIThread and stable response ID.
 The action does not create another delivery.
+
+`retry-approved` is the only action that can set `manual_retry_approved=true`, and the
+database permits that flag only while dispatch status is `failed`. `confirm-success`
+requires non-null matching dispatch-response evidence at the database as well as
+application validation. Do not disable the audit trigger or delete audit data for rollback.
 
 Follow [runtime-recovery.md](runtime-recovery.md) before using any mutating route.
