@@ -182,8 +182,9 @@ Application rollback and database rollback are separate decisions.
 2. Preserve logs, worker heartbeats, queue counts and recovery audit evidence.
 3. If the new schema remains backward-compatible with the prior image, redeploy the
    prior immutable image and keep the database at the new head.
-4. Use Alembic downgrade only when the revision documents a supported downgrade and a
-   restore test proves the prior application accepts it.
+4. Use Alembic downgrade only online, when the revision documents a supported downgrade
+   and a restore test proves the prior application accepts it. Offline `--sql` downgrade
+   is globally rejected before DDL because database evidence cannot be inspected.
 5. If downgrade is unsafe or irreversible, restore the pre-deployment database backup
    into a separately verified target and repoint only after change approval.
 6. Never delete messages, dispatches, responses, delivery attempts or recovery audits

@@ -743,7 +743,7 @@ def test_checkpoint_migration_rejects_partial_schema_without_advancing_revision(
         engine.dispose()
 
 
-def test_checkpoint_migration_renders_postgresql_upgrade_and_downgrade() -> None:
+def test_checkpoint_migration_renders_upgrade_and_rejects_offline_downgrade() -> None:
     upgrade_output = StringIO()
     upgrade_config = migration_config(
         "postgresql+psycopg://gateway:gateway@localhost/gateway",
@@ -766,12 +766,11 @@ def test_checkpoint_migration_renders_postgresql_upgrade_and_downgrade() -> None
         "postgresql+psycopg://gateway:gateway@localhost/gateway",
         output_buffer=downgrade_output,
     )
-    command.downgrade(
-        downgrade_config,
-        f"{CHECKPOINT_REVISION}:{PRE_CHECKPOINT_REVISION}",
-        sql=True,
-    )
-    downgrade_sql = " ".join(downgrade_output.getvalue().lower().split())
+    with pytest.raises(RuntimeError, match="offline downgrade is disabled"):
+        command.downgrade(
+            downgrade_config,
+            f"{CHECKPOINT_REVISION}:{PRE_CHECKPOINT_REVISION}",
+            sql=True,
+        )
 
-    assert "drop column last_message_fingerprint" in downgrade_sql
-    assert "drop column regression_generation" in downgrade_sql
+    assert "drop column" not in downgrade_output.getvalue().lower()

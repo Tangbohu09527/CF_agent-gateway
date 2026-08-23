@@ -196,6 +196,12 @@ runtime admission evidence, any recovery audit, or reconciliation failure/quaran
 would be discarded. Prefer an application rollback that leaves the database at head or
 restore the tested pre-upgrade backup.
 
+Offline `alembic downgrade ... --sql` is intentionally disabled for every revision range:
+without a database transaction the runner cannot prove that protected evidence is absent.
+Use an online, evidence-checked downgrade only during an exclusive approved maintenance
+window. Do not work around the guard by selecting an older revision range; restore the
+verified pre-upgrade backup when an online downgrade cannot be proven safe.
+
 ## Authentication or request rejection
 
 - `401` on Message API: verify the environment variable named by `api.token_env` exists

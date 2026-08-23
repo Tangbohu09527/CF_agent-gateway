@@ -43,6 +43,13 @@ instead of guessing their revision. The single packaged chain is:
     -> 20260823_04 (head)
 ```
 
+Offline SQL rendering (`--sql`) is upgrade-only. The Alembic environment rejects every
+offline downgrade before emitting DDL because it cannot inspect admission, recovery,
+checkpoint, or reconciliation evidence without a live transaction. Run a documented
+downgrade only online in an exclusive maintenance window so each revision can enforce its
+evidence checks. If an online check cannot be performed safely, restore the verified
+pre-upgrade backup instead of generating destructive SQL.
+
 `20260806_01` retains the migration-foundation marker without business DDL.
 `20260806_0001` creates the V1 main schema for an empty database and adopts a complete V1
 schema already versioned at the foundation marker. `20260806_0002` adds the Message Archive

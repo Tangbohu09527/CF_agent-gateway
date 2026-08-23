@@ -311,7 +311,7 @@ def test_durable_admission_migration_renders_for_postgresql() -> None:
         "postgresql+psycopg://gateway:gateway@localhost/gateway",
     )
 
-    with pytest.raises(RuntimeError, match="offline durable admission downgrade is disabled"):
+    with pytest.raises(RuntimeError, match="offline downgrade is disabled"):
         command.downgrade(
             downgrade_config,
             f"{DURABLE_ADMISSION_REVISION}:{PRE_ADMISSION_REVISION}",

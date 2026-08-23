@@ -351,5 +351,25 @@ def test_postgresql_populated_v2_runtime_upgrade_and_downgrade() -> None:
         migration.upgrade_database(engine, HEAD_REVISION)
         assert migration.get_schema_version(engine) == HEAD_REVISION
         assert _counts(engine) == before_counts
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO hermes_dispatch_recovery_audits "
+                    "(dispatch_record_id, action, operator, reference, reason, "
+                    "before_status, after_status, before_error_code) "
+                    "VALUES (1, 'mark_dead', 'operator', 'PG-DOWNGRADE-GUARD', "
+                    "'unsafe to retry', 'uncertain', 'dead', 'hermes_timeout')"
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="recovery audit history exists"):
+            _downgrade(engine, PRE_CHECKPOINT_REVISION)
+
+        assert migration.get_schema_version(engine) == HEAD_REVISION
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(text("SELECT count(*) FROM hermes_dispatch_recovery_audits")) == 1
+            )
     finally:
         engine.dispose()

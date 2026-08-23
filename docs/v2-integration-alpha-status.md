@@ -44,7 +44,7 @@ The packaged Alembic tree has one root, one linear chain, and one head:
 
 The migration runner, packaged migration discovery, SQLite and PostgreSQL migration
 locks, and SQLite foreign-key listener are active. SQLite online upgrades and PostgreSQL
-offline DDL rendering are covered by tests. `Base.metadata.create_all()` is not the
+offline upgrade DDL rendering are covered by tests. `Base.metadata.create_all()` is not the
 application schema-evolution path.
 
 ## Completed Modules
@@ -162,7 +162,7 @@ client.
   received live WeChat end-to-end validation.
 - Inbound image/file content, OCR, archive or ZIP processing, Context Builder, provider
   routing, and Skill execution are outside this alpha.
-- PostgreSQL coverage currently validates offline migration DDL; production online
+- PostgreSQL coverage currently validates offline upgrade DDL; production online
   runtime validation remains a later environment gate.
 - Worker service management, production deployment automation, Artifact storage
   volumes, operational reconciliation, and complete observability are not finished.

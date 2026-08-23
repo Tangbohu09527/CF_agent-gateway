@@ -541,13 +541,43 @@ def test_runtime_invariants_offline_downgrade_fails_closed() -> None:
 
     with pytest.raises(
         RuntimeError,
-        match="offline runtime recovery invariant downgrade is disabled",
+        match="offline downgrade is disabled",
     ):
         command.downgrade(
             config,
             f"{RUNTIME_INVARIANTS_REVISION}:{DURABLE_ADMISSION_REVISION}",
             sql=True,
         )
+
+
+@pytest.mark.parametrize(
+    "revision_range",
+    (
+        f"{RECOVERY_REVISION}:{CHECKPOINT_REVISION}",
+        f"{RECOVERY_REVISION}:base",
+    ),
+)
+def test_global_offline_downgrade_guard_blocks_historical_range_before_ddl(
+    revision_range: str,
+) -> None:
+    output = StringIO()
+    config = migration.create_migration_config()
+    config.output_buffer = output
+    config.set_main_option(
+        "sqlalchemy.url",
+        "postgresql+psycopg://gateway:gateway@localhost/gateway",
+    )
+
+    with pytest.raises(RuntimeError, match="offline downgrade is disabled"):
+        command.downgrade(
+            config,
+            revision_range,
+            sql=True,
+        )
+
+    rendered_sql = output.getvalue().lower()
+    assert "drop table" not in rendered_sql
+    assert "drop index" not in rendered_sql
 
 
 @pytest.mark.parametrize(

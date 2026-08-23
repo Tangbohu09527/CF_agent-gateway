@@ -5,6 +5,8 @@ from os import environ
 from pathlib import Path
 
 from alembic import context
+from alembic.script import ScriptDirectory
+from alembic.script.revision import RangeNotAncestorError
 from sqlalchemy import Connection, engine_from_config, make_url, pool
 
 from cf_agent_gateway.database import Base, load_database_models
@@ -27,6 +29,7 @@ def run_migrations_offline() -> None:
         database_url = config.get_main_option("sqlalchemy.url")
     if not database_url:
         raise RuntimeError("a database URL is required for offline migrations")
+    _require_offline_operation_safe()
 
     context.configure(
         url=database_url,
@@ -39,6 +42,26 @@ def run_migrations_offline() -> None:
 
     with context.begin_transaction():
         context.run_migrations()
+
+
+def _require_offline_operation_safe() -> None:
+    starting_revision = context.get_starting_revision_argument()
+    destination_revision = context.get_revision_argument()
+    if starting_revision is None:
+        return
+    if starting_revision == destination_revision:
+        return
+
+    script = ScriptDirectory.from_config(config)
+    try:
+        next(script.iterate_revisions(starting_revision, destination_revision))
+    except (RangeNotAncestorError, StopIteration):
+        return
+    raise RuntimeError(
+        "offline downgrade is disabled because database evidence cannot be "
+        "inspected safely; use an online evidence-checked downgrade or restore "
+        "the verified pre-upgrade backup"
+    )
 
 
 def run_migrations(connection: Connection) -> None:
