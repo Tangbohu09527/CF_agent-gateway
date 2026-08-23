@@ -40,7 +40,6 @@ from cf_agent_gateway.task.model import (
     HermesDispatchRecord,
     HermesDispatchRecordStore,
     HermesDispatchStatus,
-    build_hermes_dispatch_idempotency_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -298,8 +297,7 @@ class MessageAdmissionService:
         admission = self._admission_outcome_store.to_admission_outcome(stored_admission)
         dispatch_record = None
         if admission.admitted:
-            idempotency_key = build_hermes_dispatch_idempotency_key(admission.message_id)
-            dispatch_record = self._dispatch_record_store.get_by_idempotency_key(idempotency_key)
+            dispatch_record = self._get_dispatch_for_message(admission.message_id)
             if dispatch_record is None:
                 dispatch_record, created = self._dispatch_record_store.enqueue(admission)
                 logger.info(
@@ -332,9 +330,7 @@ class MessageAdmissionService:
         )
 
     def _get_dispatch_for_message(self, message_id: int) -> HermesDispatchRecord | None:
-        return self._dispatch_record_store.get_by_idempotency_key(
-            build_hermes_dispatch_idempotency_key(message_id)
-        )
+        return self._dispatch_record_store.get_by_message_id(message_id)
 
     @staticmethod
     def _log_legacy_dispatch_reconciliation(

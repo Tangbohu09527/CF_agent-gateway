@@ -230,6 +230,9 @@ def test_late_legacy_dispatch_is_adopted_without_policy_reevaluation(session: Se
     assert first.dispatch_record_id is not None
     original_target = (first.workspace_id, first.ai_thread_id)
 
+    legacy_dispatch = session.get(HermesDispatchRecord, first.dispatch_record_id)
+    assert legacy_dispatch is not None
+    legacy_dispatch.idempotency_key = "legacy-dispatch-key"
     session.execute(delete(MessageAdmissionOutcome))
     session.commit()
     AccessPolicyService(session).upsert_user_policy(
@@ -250,6 +253,46 @@ def test_late_legacy_dispatch_is_adopted_without_policy_reevaluation(session: Se
     assert stored is not None
     assert stored.evidence_origin is AdmissionEvidenceOrigin.LEGACY_DISPATCH
     assert stored.decision is AdmissionDecision.ALLOWED
+    assert legacy_dispatch.idempotency_key == "legacy-dispatch-key"
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
+
+
+def test_stale_pending_adopts_legacy_dispatch_and_clears_request_snapshot(
+    session: Session,
+) -> None:
+    provision_sender(session)
+    allow_gateway(session)
+    message = normalized_message()
+    first = MessageAdmissionService(session).process(message)
+    assert first.dispatch_record_id is not None
+
+    session.execute(delete(MessageAdmissionOutcome))
+    session.commit()
+    MessageAdmissionOutcomeStore(session).create_pending(
+        message_id=first.message_id,
+        request=RequestFacts(
+            requested_scope=frozenset({"stale-scope"}),
+            requested_skill_ids=frozenset({"stale-skill"}),
+            risk_level=RiskLevel.HIGH,
+        ),
+        lease_seconds=1,
+        now=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+
+    replay = MessageAdmissionService(
+        session,
+        request_resolver=_NeverResolver(),
+        admission_orchestrator=_NeverAdmissionOrchestrator(),  # type: ignore[arg-type]
+    ).process(message)
+
+    assert replay.admission.admitted is True
+    assert replay.dispatch_record_id == first.dispatch_record_id
+    stored = session.scalar(select(MessageAdmissionOutcome))
+    assert stored is not None
+    assert stored.evidence_origin is AdmissionEvidenceOrigin.LEGACY_DISPATCH
+    assert stored.requested_scope is None
+    assert stored.requested_skill_ids is None
+    assert stored.risk_level is None
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
 

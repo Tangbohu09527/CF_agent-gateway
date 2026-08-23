@@ -62,7 +62,9 @@ class HermesDispatchRecordStore:
             self._session.commit()
         except IntegrityError:
             self._session.rollback()
-            existing = self.get_by_idempotency_key(idempotency_key)
+            existing = self.get_by_message_id(target.message_id)
+            if existing is None:
+                existing = self.get_by_idempotency_key(idempotency_key)
             if existing is not None:
                 return self._compatible_record_or_raise(existing, target), False
             raise
@@ -76,7 +78,9 @@ class HermesDispatchRecordStore:
 
         target = _dispatch_target(admission)
         idempotency_key = build_hermes_dispatch_idempotency_key(target.message_id)
-        existing = self.get_by_idempotency_key(idempotency_key)
+        existing = self.get_by_message_id(target.message_id)
+        if existing is None:
+            existing = self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             return self._compatible_record_or_raise(existing, target), False
 
@@ -84,7 +88,9 @@ class HermesDispatchRecordStore:
         self._session.execute(
             select(AIThread.id).where(AIThread.id == target.ai_thread_id).with_for_update()
         )
-        existing = self.get_by_idempotency_key(idempotency_key)
+        existing = self.get_by_message_id(target.message_id)
+        if existing is None:
+            existing = self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             return self._compatible_record_or_raise(existing, target), False
 
@@ -106,6 +112,14 @@ class HermesDispatchRecordStore:
         statement = (
             select(HermesDispatchRecord)
             .where(HermesDispatchRecord.idempotency_key == idempotency_key)
+            .execution_options(populate_existing=True)
+        )
+        return self._session.scalar(statement)
+
+    def get_by_message_id(self, message_id: int) -> HermesDispatchRecord | None:
+        statement = (
+            select(HermesDispatchRecord)
+            .where(HermesDispatchRecord.message_id == message_id)
             .execution_options(populate_existing=True)
         )
         return self._session.scalar(statement)
