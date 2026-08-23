@@ -134,7 +134,6 @@ jobs:
     timeout-minutes: 40
     env:
       PYTHONPATH: ${{ github.workspace }}/src
-      TMPDIR: ${{ runner.temp }}
 
     services:
       postgres:
