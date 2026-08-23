@@ -16,6 +16,7 @@ from cf_agent_gateway.config import (
     Settings,
     WorkerSettings,
 )
+from cf_agent_gateway.hermes import HermesChatResult
 from cf_agent_gateway.runtime import dispatch_worker
 from cf_agent_gateway.runtime.errors import (
     DispatchWorkerDisabledError,
@@ -156,11 +157,13 @@ def test_runtime_builds_and_runs_worker_with_configured_concurrency(
         session_factory: object,
         hermes_client: object,
         sender_factory: object,
+        operation_observer: object,
     ) -> TrackingWorker:
         assert candidate is settings
         assert session_factory is session_factory_marker
         assert hermes_client is client
         assert sender_factory is sender_factory_marker
+        assert operation_observer is None
         events.append(
             (
                 "build",
@@ -188,9 +191,9 @@ def test_runtime_builds_and_runs_worker_with_configured_concurrency(
     )
 
     assert events == [
-        ("client", "https://hermes.test", "worker-api-key", "hermes-worker-test"),
         ("engine", "sqlite+pysqlite:///:memory:"),
         "initialize_database",
+        ("client", "https://hermes.test", "worker-api-key", "hermes-worker-test"),
         "session_factory",
         ("build", 12.0, 2),
         ("run", stop_event, 3),
@@ -247,6 +250,107 @@ class RecordingDispatchHeartbeat:
 
     def stop(self, state: str = "stopped") -> None:
         self.events.append(("stop", state))
+
+
+def test_dispatch_worker_reports_observed_hermes_operation_to_heartbeat() -> None:
+    heartbeat = RecordingDispatchHeartbeat()
+    observer = dispatch_worker._hermes_operation_observer(
+        heartbeat,  # type: ignore[arg-type]
+        concurrency=3,
+    )
+
+    assert observer is not None
+    observer(True)
+
+    event = heartbeat.events[-1]
+    assert isinstance(event, tuple)
+    assert event[0:2] == ("update", "running")
+    details = event[2]
+    assert isinstance(details, dict)
+    assert details["phase"] == "dispatching"
+    assert details["concurrency"] == 3
+    assert details["last_operation_succeeded"] is True
+    assert str(details["last_operation_at"]).endswith("Z")
+
+
+def test_hermes_operation_observer_wraps_only_the_client_call() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+    observed: list[bool] = []
+
+    class SuccessfulClient:
+        def chat(self, content: str, **kwargs: object) -> HermesChatResult:
+            calls.append((content, kwargs))
+            return HermesChatResult(
+                assistant_content="answer",
+                hermes_thread_id="hermes-thread-next",
+            )
+
+    client = dispatch_worker._OperationObservedHermesClient(
+        SuccessfulClient(),  # type: ignore[arg-type]
+        observed.append,
+    )
+
+    result = client.chat(
+        "question",
+        hermes_thread_id="hermes-thread-current",
+        idempotency_key="dispatch-key",
+    )
+
+    assert result.assistant_content == "answer"
+    assert observed == [True]
+    assert calls == [
+        (
+            "question",
+            {
+                "hermes_thread_id": "hermes-thread-current",
+                "profile_reference": None,
+                "profile_revision": None,
+                "thread_id": None,
+                "session_metadata": None,
+                "idempotency_key": "dispatch-key",
+            },
+        )
+    ]
+
+
+def test_hermes_operation_observer_reports_client_failure_and_preserves_it() -> None:
+    observed: list[bool] = []
+
+    class FailingClient:
+        def chat(self, content: str, **kwargs: object) -> HermesChatResult:
+            del content, kwargs
+            raise RuntimeError("controlled upstream failure")
+
+    client = dispatch_worker._OperationObservedHermesClient(
+        FailingClient(),  # type: ignore[arg-type]
+        observed.append,
+    )
+
+    with pytest.raises(RuntimeError, match="controlled upstream failure"):
+        client.chat("question")
+
+    assert observed == [False]
+
+
+def test_hermes_operation_observer_failure_does_not_break_client_result() -> None:
+    class SuccessfulClient:
+        def chat(self, content: str, **kwargs: object) -> HermesChatResult:
+            del content, kwargs
+            return HermesChatResult(
+                assistant_content="answer",
+                hermes_thread_id="hermes-thread",
+            )
+
+    def failing_observer(succeeded: bool) -> None:
+        del succeeded
+        raise RuntimeError("heartbeat unavailable")
+
+    client = dispatch_worker._OperationObservedHermesClient(
+        SuccessfulClient(),  # type: ignore[arg-type]
+        failing_observer,
+    )
+
+    assert client.chat("question").assistant_content == "answer"
 
 
 def test_dispatch_worker_publishes_heartbeat_while_core_loop_runs() -> None:

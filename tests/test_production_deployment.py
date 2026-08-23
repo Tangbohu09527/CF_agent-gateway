@@ -17,13 +17,29 @@ WORKERS = {
     "dispatch-worker": {
         "module": "cf_agent_gateway.runtime.dispatch_worker",
         "service": "cf-agent-dispatch-worker",
-        "heartbeat": "/run/cf-agent-gateway/dispatch-worker-heartbeat.json",
     },
     "delivery-worker": {
         "module": "cf_agent_gateway.runtime.delivery_worker",
         "service": "cf-agent-delivery-worker",
-        "heartbeat": "/run/cf-agent-gateway/delivery-worker-heartbeat.json",
     },
+}
+
+COMPOSE_WORKER_HEARTBEATS = {
+    "worker": "/run/cf-agent-gateway/wechat-worker-heartbeat.json",
+    "dispatch-worker": "/run/cf-agent-gateway/dispatch-worker-heartbeat.json",
+    "delivery-worker": "/run/cf-agent-gateway/delivery-worker-heartbeat.json",
+}
+
+GATEWAY_HEARTBEAT_ENVIRONMENTS = {
+    "CF_GATEWAY_WECHAT_HEARTBEAT_PATH": COMPOSE_WORKER_HEARTBEATS["worker"],
+    "CF_GATEWAY_DISPATCH_HEARTBEAT_PATH": COMPOSE_WORKER_HEARTBEATS["dispatch-worker"],
+    "CF_GATEWAY_DELIVERY_HEARTBEAT_PATH": COMPOSE_WORKER_HEARTBEATS["delivery-worker"],
+}
+
+SYSTEMD_GATEWAY_HEARTBEATS = {
+    "CF_GATEWAY_WECHAT_HEARTBEAT_PATH": "/run/cf-agent-gateway/worker-heartbeat.json",
+    "CF_GATEWAY_DISPATCH_HEARTBEAT_PATH": "/run/cf-agent-dispatch-worker/heartbeat.json",
+    "CF_GATEWAY_DELIVERY_HEARTBEAT_PATH": "/run/cf-agent-delivery-worker/heartbeat.json",
 }
 
 
@@ -56,7 +72,6 @@ def test_production_compose_defines_independent_v2_workers() -> None:
     assert isinstance(services, dict)
     assert {"migration", "gateway", "worker", *WORKERS}.issubset(services)
 
-    heartbeat_paths: set[str] = set()
     for service_name, expected in WORKERS.items():
         service = services[service_name]
         assert service["command"] == ["python", "-m", expected["module"]]
@@ -67,15 +82,16 @@ def test_production_compose_defines_independent_v2_workers() -> None:
         assert service["cap_drop"] == ["ALL"]
         assert "no-new-privileges:true" in service["security_opt"]
         assert "gateway-state:/var/lib/cf-agent-gateway" in service["volumes"]
-        assert "/run/cf-agent-gateway:size=1m,mode=1777" in service["tmpfs"]
 
         environment = service["environment"]
         assert environment["CF_GATEWAY_SERVICE"] == expected["service"]
         assert environment["CF_GATEWAY_WORKER_ID"] == expected["service"]
-        heartbeat_path = environment["CF_GATEWAY_WORKER_HEARTBEAT_PATH"]
-        assert heartbeat_path == expected["heartbeat"]
-        heartbeat_paths.add(heartbeat_path)
 
+    shared_worker_mount = "runtime-heartbeats:/run/cf-agent-gateway"
+    for service_name, heartbeat_path in COMPOSE_WORKER_HEARTBEATS.items():
+        service = services[service_name]
+        assert shared_worker_mount in service["volumes"]
+        assert service["environment"]["CF_GATEWAY_WORKER_HEARTBEAT_PATH"] == heartbeat_path
         health_test = service["healthcheck"]["test"]
         assert health_test[:4] == [
             "CMD",
@@ -88,7 +104,14 @@ def test_production_compose_defines_independent_v2_workers() -> None:
             "${CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}"
         )
 
-    assert len(heartbeat_paths) == len(WORKERS)
+    assert len(set(COMPOSE_WORKER_HEARTBEATS.values())) == len(COMPOSE_WORKER_HEARTBEATS)
+    gateway = services["gateway"]
+    assert "runtime-heartbeats:/run/cf-agent-gateway:ro" in gateway["volumes"]
+    for name, heartbeat_path in GATEWAY_HEARTBEAT_ENVIRONMENTS.items():
+        assert gateway["environment"][name] == heartbeat_path
+    assert gateway["environment"]["CF_GATEWAY_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS"] == (
+        "${CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}"
+    )
     dispatch_environment = services["dispatch-worker"]["environment"]
     assert dispatch_environment["CF_GATEWAY_WORKER_CONCURRENCY"] == (
         "${CF_GATEWAY_WORKER_CONCURRENCY:-4}"
@@ -99,7 +122,7 @@ def test_production_compose_defines_independent_v2_workers() -> None:
     assert dispatch_environment["CF_GATEWAY_WORKER_RETRY_LIMIT"] == (
         "${CF_GATEWAY_WORKER_RETRY_LIMIT:-3}"
     )
-    assert "gateway-state" in compose["volumes"]
+    assert {"gateway-state", "runtime-heartbeats"}.issubset(compose["volumes"])
 
 
 @pytest.mark.parametrize(
@@ -176,6 +199,9 @@ def test_worker_deployment_configuration_and_documentation(
     assert "CF_GATEWAY_WORKER_HEARTBEAT_PATH=" not in environment_sample
 
     documentation = (ROOT / "docs" / "systemd-deployment.md").read_text(encoding="utf-8")
+    for name, heartbeat_path in SYSTEMD_GATEWAY_HEARTBEATS.items():
+        assert f"Environment={name}={heartbeat_path}" in documentation
+    assert "Environment=CF_GATEWAY_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS=30" in documentation
     for unit_name in ("cf-agent-dispatch-worker", "cf-agent-delivery-worker"):
         assert f"deploy/systemd/{unit_name}.service" in documentation
         assert "systemctl start" in documentation

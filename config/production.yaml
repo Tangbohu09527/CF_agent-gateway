@@ -9,6 +9,12 @@ database:
 logging:
   level: INFO
 
+api:
+  # Only environment variable names are stored here. Values belong in the service environment.
+  token_env: CF_GATEWAY_API_TOKEN
+  admin_token_env: CF_AGENT_GATEWAY_ADMIN_TOKEN
+  max_request_body_bytes: 1048576
+
 artifact:
   storage_root: /var/lib/cf-agent-gateway/artifacts
 

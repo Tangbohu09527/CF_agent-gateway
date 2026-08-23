@@ -88,10 +88,14 @@ def run_worker(
                         phase="waiting",
                         cycle_sequence=cycle_sequence,
                         last_cycle_succeeded=False,
+                        wechat_auth="unknown",
                     )
             else:
+                cycle_succeeded = (
+                    result.logged_in and result.chats_failed == 0 and not result.failures
+                )
                 logger.info(
-                    "messages processed",
+                    "poll cycle completed",
                     extra={
                         "fields": {
                             "logged_in": result.logged_in,
@@ -107,7 +111,8 @@ def run_worker(
                         "running",
                         phase="waiting",
                         cycle_sequence=cycle_sequence,
-                        last_cycle_succeeded=True,
+                        last_cycle_succeeded=cycle_succeeded,
+                        wechat_auth="logged_in" if result.logged_in else "logged_out",
                     )
 
             if heartbeat is None:

@@ -8,7 +8,7 @@ from threading import Event, Thread
 
 import pytest
 
-from cf_agent_gateway.adapters.wechat import PollResult
+from cf_agent_gateway.adapters.wechat import PollFailure, PollFailureStage, PollResult
 from cf_agent_gateway.config import RuntimeSettings, Settings
 from cf_agent_gateway.runtime import worker
 from cf_agent_gateway.runtime.errors import (
@@ -86,7 +86,7 @@ def test_worker_starts_polls_logs_result_and_stops(
     assert [record.getMessage() for record in records] == [
         "worker started",
         "poll cycle started",
-        "messages processed",
+        "poll cycle completed",
         "worker stopped",
     ]
     assert records[0].fields == {"polling_interval_seconds": 1.25}  # type: ignore[attr-defined]
@@ -126,10 +126,44 @@ def test_worker_publishes_heartbeat_for_a_successful_cycle(settings: Settings) -
                 "phase": "waiting",
                 "cycle_sequence": 1,
                 "last_cycle_succeeded": True,
+                "wechat_auth": "logged_in",
             },
         ),
         ("stop", "stopped"),
     ]
+
+
+def test_worker_marks_returned_poll_failures_unhealthy(settings: Settings) -> None:
+    stop_event = Event()
+    heartbeat = RecordingHeartbeat()
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        stop_event.set()
+        return PollResult(
+            logged_in=True,
+            chats_seen=1,
+            chats_failed=1,
+            failures=[
+                PollFailure(
+                    stage=PollFailureStage.LIST_MESSAGES,
+                    code="wechat_timeout",
+                    conversation_id="conversation-1",
+                )
+            ],
+        )
+
+    worker.run_worker(
+        settings,
+        stop_event=stop_event,
+        poll_once=poll_once,
+        heartbeat=heartbeat,  # type: ignore[arg-type]
+    )
+
+    waiting = heartbeat.events[-2]
+    assert isinstance(waiting, tuple)
+    assert waiting[2]["last_cycle_succeeded"] is False
+    assert waiting[2]["wechat_auth"] == "logged_in"
 
 
 def test_worker_does_not_poll_when_stop_is_already_set(

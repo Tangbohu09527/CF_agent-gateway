@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -33,6 +34,8 @@ from cf_agent_gateway.delivery.errors import (
 from cf_agent_gateway.delivery.models import DeliveryOutboxRecord, DeliveryStatus
 from cf_agent_gateway.delivery.outbox import DeliveryOutboxStore
 from cf_agent_gateway.response.models import ResponsePartKind, ResponsePartRecord
+
+logger = logging.getLogger(__name__)
 
 
 class ChannelDeliverySender(Protocol):
@@ -163,6 +166,10 @@ class ChannelDeliveryWorker:
         )
         if delivery is None:
             return None
+        logger.info(
+            "delivery claimed",
+            extra={"fields": {"delivery_id": delivery.id, "attempt_count": delivery.attempt_count}},
+        )
 
         sender: ChannelDeliverySender | None = None
         try:
@@ -423,7 +430,7 @@ def _run_result(
     *,
     error_code: str | None = None,
 ) -> DeliveryRunResult:
-    return DeliveryRunResult(
+    result = DeliveryRunResult(
         delivery_id=delivery.id,
         response_id=delivery.response_id,
         status=delivery.status,
@@ -431,6 +438,23 @@ def _run_result(
         attempt_count=delivery.attempt_count,
         error_code=error_code,
     )
+    event = {
+        DeliveryStatus.DELIVERED: "delivery delivered",
+        DeliveryStatus.FAILED: "delivery failed",
+        DeliveryStatus.UNCERTAIN: "delivery uncertain",
+    }.get(result.status, "delivery processed")
+    logger.info(
+        event,
+        extra={
+            "fields": {
+                "delivery_id": result.delivery_id,
+                "status": result.status.value,
+                "attempt_count": result.attempt_count,
+                "error_code": result.error_code,
+            }
+        },
+    )
+    return result
 
 
 def _utc_now() -> datetime:

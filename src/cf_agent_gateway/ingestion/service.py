@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -34,6 +35,8 @@ from cf_agent_gateway.task.model import (
     HermesDispatchStatus,
     build_hermes_dispatch_idempotency_key,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AdmissionRequestResolver(Protocol):
@@ -97,6 +100,10 @@ class MessageAdmissionService:
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         event = wechat_message_to_event(message)
         stored_message, message_created = self._message_store.create(event)
+        logger.info(
+            "message persisted" if message_created else "message duplicate",
+            extra={"fields": {"message_id": stored_message.id}},
+        )
 
         persisted_message = self._message_store.get(stored_message.id)
         if persisted_message is None:
@@ -142,6 +149,15 @@ class MessageAdmissionService:
             risk_level=request.risk_level,
         )
         admission = self._admission_orchestrator.admit(candidate)
+        logger.info(
+            "admission allowed" if admission.admitted else "admission denied",
+            extra={
+                "fields": {
+                    "message_id": message_id,
+                    "admission_reason": admission.reason.value,
+                }
+            },
+        )
         dispatch_record = None
         dispatch_record_created = False
         if admission.admitted and admission.reason is AdmissionReason.ALLOWED:
@@ -157,6 +173,15 @@ class MessageAdmissionService:
 
             dispatch_record, dispatch_record_created = self._dispatch_record_store.enqueue(
                 admission
+            )
+            logger.info(
+                "dispatch enqueued" if dispatch_record_created else "dispatch duplicate",
+                extra={
+                    "fields": {
+                        "message_id": message_id,
+                        "dispatch_record_id": dispatch_record.id,
+                    }
+                },
             )
             if not dispatch_record_created:
                 return self._replay_persisted_dispatch_target(

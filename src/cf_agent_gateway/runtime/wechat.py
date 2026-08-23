@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Protocol
 
 from sqlalchemy import Engine
@@ -31,6 +32,7 @@ from cf_agent_gateway.runtime.errors import (
     WechatRuntimeDisabledError,
     WechatTokenEnvironmentError,
 )
+from cf_agent_gateway.runtime.poll_gate import acquire_wechat_poll_gate
 from cf_agent_gateway.runtime.startup import (
     check_database_migrations,
     database_startup_check_enabled,
@@ -97,12 +99,14 @@ def run_wechat_poll_once(
     engine: Engine | None = None
     checkpoint_session = None
     client: ClosableWechatPollingClient | None = None
+    runtime_stack = ExitStack()
     try:
         engine = engine_factory(settings.database.url)
         if database_startup_check_enabled():
             check_database_migrations(engine)
         else:
             initialize_database(engine)
+        runtime_stack.enter_context(acquire_wechat_poll_gate(engine))
         session_factory = create_database_session_factory(engine)
         checkpoint_session = session_factory()
         checkpoint_store = WechatSyncCheckpointStore(checkpoint_session)
@@ -143,5 +147,8 @@ def run_wechat_poll_once(
                 if checkpoint_session is not None:
                     checkpoint_session.close()
             finally:
-                if engine is not None:
-                    engine.dispose()
+                try:
+                    runtime_stack.close()
+                finally:
+                    if engine is not None:
+                        engine.dispose()

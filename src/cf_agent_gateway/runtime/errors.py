@@ -69,3 +69,10 @@ class WechatPollingExecutionError(WechatRuntimeError):
 
     def __init__(self) -> None:
         super().__init__("cannot complete the WeChat polling cycle")
+
+
+class WechatPollGateUnavailableError(WechatRuntimeError):
+    code = "wechat_poll_gate_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("another WeChat polling cycle owns the runtime gate")

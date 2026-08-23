@@ -11,12 +11,19 @@ from threading import TIMEOUT_MAX, Event, Thread
 from typing import Protocol
 from uuid import uuid4
 
+from sqlalchemy import exists, or_, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
+from cf_agent_gateway.delivery.models import DeliveryOutboxRecord
 from cf_agent_gateway.hermes.models import HermesDispatchOutcome
 from cf_agent_gateway.hermes.outbox import dispatch_error_code, dispatch_failure_status
 from cf_agent_gateway.hermes.response import HermesResponseProcessor
+from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
 from cf_agent_gateway.hermes.result_store import HermesDispatchResponseStore
+from cf_agent_gateway.message.models import Message
+from cf_agent_gateway.response.models import ResponseRecord
+from cf_agent_gateway.response.store import DeliveryTarget, ResponseStore
 from cf_agent_gateway.task.model import (
     HermesDispatchRecord,
     HermesDispatchRecordStore,
@@ -25,6 +32,7 @@ from cf_agent_gateway.task.model import (
 )
 
 logger = logging.getLogger(__name__)
+RECONCILIATION_BATCH_SIZE = 25
 
 DispatcherFactory = Callable[[Session], "HermesRecordDispatcher"]
 ResponseProcessorFactory = Callable[[Session], HermesResponseProcessor]
@@ -64,6 +72,7 @@ class HermesDispatchWorker:
         lease_seconds: float,
         retry_limit: int,
         response_processor_factory: ResponseProcessorFactory | None = None,
+        reconcile_persisted_responses: bool = False,
     ) -> None:
         if (
             isinstance(lease_seconds, bool)
@@ -75,9 +84,13 @@ class HermesDispatchWorker:
             raise ValueError("lease_seconds must be a positive number")
         if isinstance(retry_limit, bool) or not isinstance(retry_limit, int) or retry_limit < 0:
             raise ValueError("retry_limit must be a non-negative integer")
+        if not isinstance(reconcile_persisted_responses, bool):
+            raise TypeError("reconcile_persisted_responses must be a boolean")
         self._session_factory = session_factory
         self._dispatcher_factory = dispatcher_factory
         self._response_processor_factory = response_processor_factory
+        self._reconcile_persisted_responses = reconcile_persisted_responses
+        self._reconciliation_cursor = 0
         self._lease_seconds = float(lease_seconds)
         self._retry_limit = retry_limit
 
@@ -99,7 +112,7 @@ class HermesDispatchWorker:
                     record_id=record.id,
                     expected_status=HermesDispatchStatus.RUNNING,
                 )
-            return DispatchClaim(
+            claim = DispatchClaim(
                 record_id=record.id,
                 claim_token=record.claim_token,
                 ai_thread_id=record.ai_thread_id,
@@ -107,6 +120,16 @@ class HermesDispatchWorker:
                 attempt_count=record.attempt_count,
                 lease_expires_at=record.lease_expires_at,
             )
+            logger.info(
+                "dispatch claimed",
+                extra={
+                    "fields": {
+                        "dispatch_record_id": claim.record_id,
+                        "attempt_count": claim.attempt_count,
+                    }
+                },
+            )
+            return claim
 
     def process_claim(self, claim: DispatchClaim) -> DispatchProcessResult:
         """Execute one claim, persist its response, then invoke the delivery pipeline."""
@@ -143,20 +166,130 @@ class HermesDispatchWorker:
             execution_session.close()
 
         delivery_error_code = self._deliver(outcome)
-        return DispatchProcessResult(
+        result = DispatchProcessResult(
             record_id=claim.record_id,
             status=HermesDispatchStatus.SUCCESS,
             response_id=response.id,
             delivery_error_code=delivery_error_code,
         )
+        self._log_result(result)
+        return result
 
     def run_once(self, *, now: datetime | None = None) -> DispatchProcessResult | None:
         """Claim and synchronously process at most one dispatch."""
 
+        self.reconcile_once()
         claim = self.claim_once(now=now)
         if claim is None:
             return None
         return self.process_claim(claim)
+
+    def reconcile_once(self) -> bool:
+        """Repair one persisted Hermes result without making another Hermes call."""
+
+        if not self._reconcile_persisted_responses:
+            return False
+        candidate_ids = self._reconciliation_candidate_ids(
+            after_record_id=self._reconciliation_cursor
+        )
+        if not candidate_ids and self._reconciliation_cursor:
+            self._reconciliation_cursor = 0
+            candidate_ids = self._reconciliation_candidate_ids(after_record_id=0)
+        for record_id in candidate_ids:
+            self._reconciliation_cursor = record_id
+            try:
+                if self._reconcile_candidate(record_id):
+                    return True
+            except DBAPIError:
+                raise
+            except Exception:
+                logger.error(
+                    "dispatch response reconciliation candidate failed",
+                    extra={
+                        "fields": {
+                            "dispatch_record_id": record_id,
+                            "error_code": "dispatch_reconciliation_candidate_invalid",
+                            "recovery_action": "candidate_skipped",
+                        }
+                    },
+                )
+        return False
+
+    def _reconciliation_candidate_ids(self, *, after_record_id: int) -> list[int]:
+        with self._session_factory() as session:
+            response_exists = exists(
+                select(ResponseRecord.response_id)
+                .where(ResponseRecord.message_id == HermesDispatchRecord.message_id)
+                .correlate(HermesDispatchRecord)
+            )
+            delivery_exists = exists(
+                select(DeliveryOutboxRecord.id)
+                .join(
+                    ResponseRecord,
+                    ResponseRecord.response_id == DeliveryOutboxRecord.response_id,
+                )
+                .where(ResponseRecord.message_id == HermesDispatchRecord.message_id)
+                .correlate(HermesDispatchRecord)
+            )
+            statement = (
+                select(HermesDispatchRecord.id)
+                .join(
+                    HermesDispatchResponse,
+                    HermesDispatchResponse.dispatch_record_id == HermesDispatchRecord.id,
+                )
+                .join(Message, Message.id == HermesDispatchRecord.message_id)
+                .where(
+                    HermesDispatchRecord.status == HermesDispatchStatus.SUCCESS,
+                    HermesDispatchRecord.id > after_record_id,
+                    Message.source == "wechat",
+                    or_(~response_exists, ~delivery_exists),
+                )
+                .order_by(HermesDispatchRecord.id)
+                .limit(RECONCILIATION_BATCH_SIZE)
+            )
+            return list(session.scalars(statement))
+
+    def _reconcile_candidate(self, record_id: int) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(HermesDispatchRecord, HermesDispatchResponse, Message)
+                .join(
+                    HermesDispatchResponse,
+                    HermesDispatchResponse.dispatch_record_id == HermesDispatchRecord.id,
+                )
+                .join(Message, Message.id == HermesDispatchRecord.message_id)
+                .where(
+                    HermesDispatchRecord.id == record_id,
+                    HermesDispatchRecord.status == HermesDispatchStatus.SUCCESS,
+                    Message.source == "wechat",
+                )
+            )
+            row = session.execute(statement).one_or_none()
+            if row is None:
+                return False
+            record, raw_response, message = row
+            outcome = HermesDispatchResponseStore.to_outcome(raw_response, record)
+            _, delivery, created = ResponseStore(session).save_generated(
+                outcome,
+                target=DeliveryTarget(
+                    channel=message.source,
+                    account_id=message.source_account_id,
+                    conversation_id=message.conversation_id,
+                ),
+            )
+            logger.info(
+                "dispatch response reconciled",
+                extra={
+                    "fields": {
+                        "dispatch_record_id": record.id,
+                        "message_id": record.message_id,
+                        "delivery_id": delivery.id,
+                        "created": created,
+                        "recovery_action": "persisted_response_replayed",
+                    }
+                },
+            )
+            return created
 
     def run(
         self,
@@ -182,9 +315,25 @@ class HermesDispatchWorker:
             thread_name_prefix="hermes-dispatch",
         ) as executor:
             while not stop_event.is_set():
+                try:
+                    self.reconcile_once()
+                except DBAPIError:
+                    self._log_database_retry("reconciliation")
+                    stop_event.wait(idle_poll_seconds)
+                    continue
+                except Exception:
+                    logger.error(
+                        "dispatch response reconciliation failed",
+                        extra={"fields": {"error_code": "dispatch_reconciliation_failed"}},
+                    )
                 claimed = False
                 while len(active) < concurrency and not stop_event.is_set():
-                    claim = self.claim_once()
+                    try:
+                        claim = self.claim_once()
+                    except DBAPIError:
+                        self._log_database_retry("claim")
+                        stop_event.wait(idle_poll_seconds)
+                        break
                     if claim is None:
                         break
                     active.add(executor.submit(self.process_claim, claim))
@@ -203,6 +352,18 @@ class HermesDispatchWorker:
 
             for future in active:
                 self._log_future(future)
+
+    @staticmethod
+    def _log_database_retry(operation: str) -> None:
+        logger.warning(
+            "dispatch database operation will retry",
+            extra={
+                "fields": {
+                    "operation": operation,
+                    "error_code": "dispatch_database_temporarily_unavailable",
+                }
+            },
+        )
 
     def _record_failure(
         self,
@@ -226,11 +387,13 @@ class HermesDispatchWorker:
                     claim_token=claim.claim_token,
                     error_code=error_code,
                 )
-        return DispatchProcessResult(
+        result = DispatchProcessResult(
             record_id=claim.record_id,
             status=record.status,
             error_code=error_code,
         )
+        self._log_result(result)
+        return result
 
     def _deliver(self, outcome: HermesDispatchOutcome) -> str | None:
         if self._response_processor_factory is None:
@@ -265,12 +428,37 @@ class HermesDispatchWorker:
     @staticmethod
     def _log_future(future: Future[DispatchProcessResult]) -> None:
         try:
-            result = future.result()
-        except Exception:
-            logger.exception("dispatch processing failed")
+            future.result()
+        except Exception as error:
+            logger.error(
+                "dispatch processing failed",
+                extra={
+                    "fields": {
+                        "error_code": "dispatch_processing_failed",
+                        "exception_type": type(error).__name__,
+                    }
+                },
+            )
             return
-        logger.info(
-            "dispatch processed",
+
+    @staticmethod
+    def _log_result(result: DispatchProcessResult) -> None:
+        event = {
+            HermesDispatchStatus.SUCCESS: "dispatch success",
+            HermesDispatchStatus.FAILED: "dispatch failed",
+            HermesDispatchStatus.UNCERTAIN: "dispatch uncertain",
+            HermesDispatchStatus.DEAD: "dispatch dead",
+        }.get(result.status, "dispatch processed")
+        level = (
+            logging.INFO
+            if result.status is HermesDispatchStatus.SUCCESS
+            else logging.ERROR
+            if result.status is HermesDispatchStatus.DEAD
+            else logging.WARNING
+        )
+        logger.log(
+            level,
+            event,
             extra={
                 "fields": {
                     "dispatch_record_id": result.record_id,
@@ -328,5 +516,15 @@ class _LeaseHeartbeat:
                         claim_token=self._claim.claim_token,
                         lease_seconds=self._lease_seconds,
                     )
-            except Exception:
+            except Exception as error:
+                logger.warning(
+                    "worker lease lost",
+                    extra={
+                        "fields": {
+                            "dispatch_record_id": self._claim.record_id,
+                            "error_code": "dispatch_lease_renewal_failed",
+                            "exception_type": type(error).__name__,
+                        }
+                    },
+                )
                 return

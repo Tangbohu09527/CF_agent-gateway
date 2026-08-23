@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
+from time import sleep
 
 import pytest
 from sqlalchemy import select
@@ -268,7 +270,10 @@ def test_fifo_blocks_same_thread_but_allows_parallel_threads(tmp_path: Path) -> 
         engine.dispose()
 
 
-def test_expired_lease_is_reclaimed_with_new_token(tmp_path: Path) -> None:
+def test_expired_lease_is_reclaimed_with_new_token(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     factory, engine = database_factory(tmp_path)
     try:
         with factory() as session:
@@ -281,11 +286,11 @@ def test_expired_lease_is_reclaimed_with_new_token(tmp_path: Path) -> None:
             retry_limit=2,
         )
         now = datetime.now(UTC)
-        first = worker.claim_once(now=now)
-        assert first is not None
-        assert worker.claim_once(now=now + timedelta(milliseconds=500)) is None
-
-        recovered = worker.claim_once(now=now + timedelta(seconds=2))
+        with caplog.at_level(logging.INFO):
+            first = worker.claim_once(now=now)
+            assert first is not None
+            assert worker.claim_once(now=now + timedelta(milliseconds=500)) is None
+            recovered = worker.claim_once(now=now + timedelta(seconds=2))
         assert recovered is not None
         assert recovered.record_id == first.record_id
         assert recovered.claim_token != first.claim_token
@@ -298,11 +303,20 @@ def test_expired_lease_is_reclaimed_with_new_token(tmp_path: Path) -> None:
         result = worker.process_claim(recovered)
         assert result.status is HermesDispatchStatus.SUCCESS
         assert dispatcher.calls == [(recovered.record_id, recovered.idempotency_key)]
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages.count("worker lease acquired") == 2
+        assert messages.count("dispatch claimed") == 2
+        assert messages.count("stale takeover") == 1
+        assert first.claim_token not in caplog.text
+        assert recovered.claim_token not in caplog.text
     finally:
         engine.dispose()
 
 
-def test_retry_limit_moves_definite_failures_to_dead(tmp_path: Path) -> None:
+def test_retry_limit_moves_definite_failures_to_dead(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     factory, engine = database_factory(tmp_path)
     try:
         with factory() as session:
@@ -311,8 +325,9 @@ def test_retry_limit_moves_definite_failures_to_dead(tmp_path: Path) -> None:
         dispatcher = ControlledDispatcher(failures={record.message_id: failure})
         worker = make_worker(factory, dispatcher, retry_limit=1)
 
-        first = worker.run_once()
-        second = worker.run_once()
+        with caplog.at_level(logging.INFO):
+            first = worker.run_once()
+            second = worker.run_once()
 
         assert first is not None
         assert first.status is HermesDispatchStatus.FAILED
@@ -323,6 +338,9 @@ def test_retry_limit_moves_definite_failures_to_dead(tmp_path: Path) -> None:
             persisted = session.get(HermesDispatchRecord, record.id)
             assert persisted is not None
             assert persisted.attempt_count == 2
+        messages = [record.getMessage() for record in caplog.records]
+        assert "dispatch failed" in messages
+        assert "dispatch dead" in messages
     finally:
         engine.dispose()
 
@@ -460,4 +478,116 @@ def test_expired_claim_is_rejected_before_hermes_execution(tmp_path: Path) -> No
 
         assert dispatcher.calls == []
     finally:
+        engine.dispose()
+
+
+def test_claim_next_prioritizes_lower_attempt_thread_head(tmp_path: Path) -> None:
+    factory, engine = database_factory(tmp_path)
+    try:
+        with factory() as session:
+            poison = enqueue_message(
+                session,
+                create_thread(session, "poison-fairness"),
+                "poison-fairness",
+            )
+            fresh = enqueue_message(
+                session,
+                create_thread(session, "fresh-fairness"),
+                "fresh-fairness",
+            )
+            store = HermesDispatchRecordStore(session)
+            claimed_poison = store.claim(poison.id, claim_token="poison-attempt")
+            store.mark_failed(
+                claimed_poison.id,
+                claim_token="poison-attempt",
+                error_code="retryable_failure",
+            )
+
+        with factory() as session:
+            claimed = HermesDispatchRecordStore(session).claim_next(
+                claim_token="fair-claim",
+                retry_limit=3,
+            )
+            assert claimed is not None
+            assert claimed.id == fresh.id
+            assert claimed.attempt_count == 1
+    finally:
+        engine.dispose()
+
+
+def test_dispatch_future_failure_log_does_not_include_exception_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_text = "assistant-response-body-that-must-not-be-logged"
+    future: Future[object] = Future()
+    future.set_exception(RuntimeError(sensitive_text))
+
+    with caplog.at_level(logging.ERROR):
+        HermesDispatchWorker._log_future(future)  # type: ignore[arg-type]
+
+    record = next(
+        item for item in caplog.records if item.getMessage() == "dispatch processing failed"
+    )
+    assert sensitive_text not in caplog.text
+    assert record.exc_info is None
+    assert record.fields == {  # type: ignore[attr-defined]
+        "error_code": "dispatch_processing_failed",
+        "exception_type": "RuntimeError",
+    }
+
+
+def test_dispatch_lease_renewal_failure_is_logged_without_error_text(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, engine = database_factory(tmp_path)
+    started = Event()
+    release = Event()
+    sensitive_text = "database-connection-detail-that-must-not-be-logged"
+
+    class BlockingDispatcher(ControlledDispatcher):
+        def dispatch_record(self, record: HermesDispatchRecord) -> HermesDispatchOutcome:
+            started.set()
+            assert release.wait(timeout=2)
+            return super().dispatch_record(record)
+
+    original_renew = HermesDispatchRecordStore.renew_lease
+    renewal_calls = 0
+
+    def flaky_renew(self, *args, **kwargs):
+        nonlocal renewal_calls
+        renewal_calls += 1
+        if renewal_calls > 1:
+            raise RuntimeError(sensitive_text)
+        return original_renew(self, *args, **kwargs)
+
+    try:
+        with factory() as session:
+            enqueue_message(session, create_thread(session, "lease-log"), "lease-log")
+        worker = make_worker(
+            factory,
+            BlockingDispatcher(),
+            lease_seconds=0.3,
+        )
+        claim = worker.claim_once()
+        assert claim is not None
+        monkeypatch.setattr(HermesDispatchRecordStore, "renew_lease", flaky_renew)
+
+        with caplog.at_level(logging.WARNING), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(worker.process_claim, claim)
+            assert started.wait(timeout=2)
+            sleep(0.12)
+            release.set()
+            assert future.result(timeout=2).status is HermesDispatchStatus.SUCCESS
+
+        record = next(item for item in caplog.records if item.getMessage() == "worker lease lost")
+        assert sensitive_text not in caplog.text
+        assert record.fields == {  # type: ignore[attr-defined]
+            "dispatch_record_id": claim.record_id,
+            "error_code": "dispatch_lease_renewal_failed",
+            "exception_type": "RuntimeError",
+        }
+    finally:
+        release.set()
         engine.dispose()
