@@ -127,7 +127,10 @@ def _assert_application_containers(
     assert initializer["Config"]["User"] == "0:0"
     assert initializer["HostConfig"]["ReadonlyRootfs"] is True
     assert initializer["HostConfig"]["NetworkMode"] == "none"
-    assert set(initializer["HostConfig"]["CapAdd"]) == {"CHOWN", "FOWNER"}
+    cap_add = {
+        capability.removeprefix("CAP_") for capability in initializer["HostConfig"]["CapAdd"]
+    }
+    assert cap_add == {"CHOWN", "FOWNER"}
     assert initializer["HostConfig"]["CapDrop"] == ["ALL"]
     initializer_environment = "\n".join(initializer["Config"]["Env"])
     for secret_name in (
