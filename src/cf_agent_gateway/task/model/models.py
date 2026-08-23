@@ -78,6 +78,29 @@ class HermesDispatchRecord(Base):
             name="ck_hermes_dispatch_nonempty_claim_token",
         ),
         CheckConstraint(
+            "manual_retry_approved = false OR status = 'failed'",
+            name="ck_hermes_dispatch_manual_retry_status",
+        ),
+        CheckConstraint(
+            "reconciliation_failure_count >= 0",
+            name="ck_hermes_dispatch_reconciliation_failure_count",
+        ),
+        CheckConstraint(
+            "(reconciliation_failure_count = 0 "
+            "AND reconciliation_next_attempt_at IS NULL "
+            "AND reconciliation_quarantined_at IS NULL "
+            "AND reconciliation_last_error_code IS NULL) OR "
+            "(reconciliation_failure_count BETWEEN 1 AND 4 "
+            "AND reconciliation_next_attempt_at IS NOT NULL "
+            "AND reconciliation_quarantined_at IS NULL "
+            "AND reconciliation_last_error_code IS NOT NULL) OR "
+            "(reconciliation_failure_count >= 5 "
+            "AND reconciliation_next_attempt_at IS NULL "
+            "AND reconciliation_quarantined_at IS NOT NULL "
+            "AND reconciliation_last_error_code IS NOT NULL)",
+            name="ck_hermes_dispatch_reconciliation_state",
+        ),
+        CheckConstraint(
             "(status = 'queued' AND claim_token IS NULL "
             "AND claimed_at IS NULL AND lease_expires_at IS NULL "
             "AND completed_at IS NULL "
@@ -129,6 +152,13 @@ class HermesDispatchRecord(Base):
             "status",
         ),
         Index(
+            "ix_hermes_dispatch_reconciliation",
+            "status",
+            "reconciliation_quarantined_at",
+            "reconciliation_next_attempt_at",
+            "id",
+        ),
+        Index(
             "uq_hermes_dispatch_running_thread",
             "ai_thread_id",
             unique=True,
@@ -173,6 +203,23 @@ class HermesDispatchRecord(Base):
         DateTime(timezone=True), nullable=True
     )
     last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reconciliation_failure_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+    )
+    reconciliation_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    reconciliation_quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    reconciliation_last_error_code: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -199,6 +246,15 @@ class HermesDispatchRecoveryAudit(Base):
         CheckConstraint(
             "after_status IN ('queued', 'running', 'success', 'failed', 'uncertain', 'dead')",
             name="ck_dispatch_recovery_after_status",
+        ),
+        CheckConstraint(
+            "(action = 'retry_approved' AND before_status = 'uncertain' "
+            "AND after_status = 'failed' AND evidence_dispatch_response_id IS NULL) OR "
+            "(action = 'mark_dead' AND before_status = 'uncertain' "
+            "AND after_status = 'dead' AND evidence_dispatch_response_id IS NULL) OR "
+            "(action = 'confirm_success' AND before_status = 'uncertain' "
+            "AND after_status = 'success' AND evidence_dispatch_response_id IS NOT NULL)",
+            name="ck_dispatch_recovery_action_transition",
         ),
         CheckConstraint("length(trim(operator)) > 0", name="ck_dispatch_recovery_operator"),
         CheckConstraint("length(trim(reference)) > 0", name="ck_dispatch_recovery_reference"),

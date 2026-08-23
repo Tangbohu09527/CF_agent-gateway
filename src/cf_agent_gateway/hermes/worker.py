@@ -6,12 +6,13 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from threading import TIMEOUT_MAX, Event, Thread
+from time import monotonic
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -33,6 +34,11 @@ from cf_agent_gateway.task.model import (
 
 logger = logging.getLogger(__name__)
 RECONCILIATION_BATCH_SIZE = 25
+RECONCILIATION_SCAN_INTERVAL_SECONDS = 5.0
+RECONCILIATION_BACKOFF_BASE_SECONDS = 30.0
+RECONCILIATION_BACKOFF_MAX_SECONDS = 300.0
+RECONCILIATION_QUARANTINE_FAILURES = 5
+RECONCILIATION_ERROR_CODE = "dispatch_reconciliation_candidate_invalid"
 
 DispatcherFactory = Callable[[Session], "HermesRecordDispatcher"]
 ResponseProcessorFactory = Callable[[Session], HermesResponseProcessor]
@@ -61,6 +67,14 @@ class DispatchProcessResult:
     delivery_error_code: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ReconciliationFailureState:
+    record_id: int
+    failure_count: int
+    next_attempt_at: datetime | None
+    quarantined_at: datetime | None
+
+
 class HermesDispatchWorker:
     """Claim and execute durable Hermes dispatches with per-thread FIFO."""
 
@@ -73,6 +87,8 @@ class HermesDispatchWorker:
         retry_limit: int,
         response_processor_factory: ResponseProcessorFactory | None = None,
         reconcile_persisted_responses: bool = False,
+        clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         if (
             isinstance(lease_seconds, bool)
@@ -91,6 +107,9 @@ class HermesDispatchWorker:
         self._response_processor_factory = response_processor_factory
         self._reconcile_persisted_responses = reconcile_persisted_responses
         self._reconciliation_cursor = 0
+        self._next_reconciliation_scan_at = 0.0
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic_clock = monotonic_clock or monotonic
         self._lease_seconds = float(lease_seconds)
         self._retry_limit = retry_limit
 
@@ -178,23 +197,28 @@ class HermesDispatchWorker:
     def run_once(self, *, now: datetime | None = None) -> DispatchProcessResult | None:
         """Claim and synchronously process at most one dispatch."""
 
-        self.reconcile_once()
+        self.reconcile_once(now=now)
         claim = self.claim_once(now=now)
         if claim is None:
             return None
         return self.process_claim(claim)
 
-    def reconcile_once(self) -> bool:
+    def reconcile_once(self, *, now: datetime | None = None) -> bool:
         """Repair one persisted Hermes result without making another Hermes call."""
 
         if not self._reconcile_persisted_responses:
             return False
+        reconciliation_now = _validated_reconciliation_now(now or self._clock())
         candidate_ids = self._reconciliation_candidate_ids(
-            after_record_id=self._reconciliation_cursor
+            after_record_id=self._reconciliation_cursor,
+            now=reconciliation_now,
         )
         if not candidate_ids and self._reconciliation_cursor:
             self._reconciliation_cursor = 0
-            candidate_ids = self._reconciliation_candidate_ids(after_record_id=0)
+            candidate_ids = self._reconciliation_candidate_ids(
+                after_record_id=0,
+                now=reconciliation_now,
+            )
         for record_id in candidate_ids:
             self._reconciliation_cursor = record_id
             try:
@@ -203,19 +227,20 @@ class HermesDispatchWorker:
             except DBAPIError:
                 raise
             except Exception:
-                logger.error(
-                    "dispatch response reconciliation candidate failed",
-                    extra={
-                        "fields": {
-                            "dispatch_record_id": record_id,
-                            "error_code": "dispatch_reconciliation_candidate_invalid",
-                            "recovery_action": "candidate_skipped",
-                        }
-                    },
+                failure = self._defer_reconciliation_candidate(
+                    record_id,
+                    now=reconciliation_now,
                 )
+                if failure is not None:
+                    self._log_reconciliation_failure(failure)
         return False
 
-    def _reconciliation_candidate_ids(self, *, after_record_id: int) -> list[int]:
+    def _reconciliation_candidate_ids(
+        self,
+        *,
+        after_record_id: int,
+        now: datetime,
+    ) -> list[int]:
         with self._session_factory() as session:
             response_exists = exists(
                 select(ResponseRecord.response_id)
@@ -242,6 +267,11 @@ class HermesDispatchWorker:
                     HermesDispatchRecord.status == HermesDispatchStatus.SUCCESS,
                     HermesDispatchRecord.id > after_record_id,
                     Message.source == "wechat",
+                    HermesDispatchRecord.reconciliation_quarantined_at.is_(None),
+                    or_(
+                        HermesDispatchRecord.reconciliation_next_attempt_at.is_(None),
+                        HermesDispatchRecord.reconciliation_next_attempt_at <= now,
+                    ),
                     or_(~response_exists, ~delivery_exists),
                 )
                 .order_by(HermesDispatchRecord.id)
@@ -277,6 +307,7 @@ class HermesDispatchWorker:
                     conversation_id=message.conversation_id,
                 ),
             )
+            self._clear_reconciliation_failure(session, record.id)
             logger.info(
                 "dispatch response reconciled",
                 extra={
@@ -290,6 +321,120 @@ class HermesDispatchWorker:
                 },
             )
             return created
+
+    def _defer_reconciliation_candidate(
+        self,
+        record_id: int,
+        *,
+        now: datetime,
+    ) -> ReconciliationFailureState | None:
+        with self._session_factory() as session:
+            record = session.get(HermesDispatchRecord, record_id)
+            if (
+                record is None
+                or record.reconciliation_quarantined_at is not None
+                or (
+                    record.reconciliation_next_attempt_at is not None
+                    and _aware_database_datetime(record.reconciliation_next_attempt_at) > now
+                )
+            ):
+                return None
+            failure_count = record.reconciliation_failure_count + 1
+            quarantined_at = now if failure_count >= RECONCILIATION_QUARANTINE_FAILURES else None
+            next_attempt_at = None
+            if quarantined_at is None:
+                delay_seconds = min(
+                    RECONCILIATION_BACKOFF_MAX_SECONDS,
+                    RECONCILIATION_BACKOFF_BASE_SECONDS * (2 ** (failure_count - 1)),
+                )
+                next_attempt_at = now + timedelta(seconds=delay_seconds)
+            statement = (
+                update(HermesDispatchRecord)
+                .where(
+                    HermesDispatchRecord.id == record_id,
+                    HermesDispatchRecord.reconciliation_failure_count
+                    == record.reconciliation_failure_count,
+                    HermesDispatchRecord.reconciliation_quarantined_at.is_(None),
+                    or_(
+                        HermesDispatchRecord.reconciliation_next_attempt_at.is_(None),
+                        HermesDispatchRecord.reconciliation_next_attempt_at <= now,
+                    ),
+                )
+                .values(
+                    reconciliation_failure_count=failure_count,
+                    reconciliation_next_attempt_at=next_attempt_at,
+                    reconciliation_quarantined_at=quarantined_at,
+                    reconciliation_last_error_code=RECONCILIATION_ERROR_CODE,
+                    updated_at=func.now(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            result = session.execute(statement)
+            if result.rowcount != 1:
+                session.rollback()
+                return None
+            session.commit()
+            return ReconciliationFailureState(
+                record_id=record_id,
+                failure_count=failure_count,
+                next_attempt_at=next_attempt_at,
+                quarantined_at=quarantined_at,
+            )
+
+    @staticmethod
+    def _clear_reconciliation_failure(session: Session, record_id: int) -> None:
+        statement = (
+            update(HermesDispatchRecord)
+            .where(
+                HermesDispatchRecord.id == record_id,
+                HermesDispatchRecord.reconciliation_failure_count > 0,
+            )
+            .values(
+                reconciliation_failure_count=0,
+                reconciliation_next_attempt_at=None,
+                reconciliation_quarantined_at=None,
+                reconciliation_last_error_code=None,
+                updated_at=func.now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        result = session.execute(statement)
+        if result.rowcount:
+            session.commit()
+
+    @staticmethod
+    def _log_reconciliation_failure(failure: ReconciliationFailureState) -> None:
+        quarantined = failure.quarantined_at is not None
+        logger.log(
+            logging.ERROR if quarantined else logging.WARNING,
+            (
+                "dispatch response reconciliation candidate quarantined"
+                if quarantined
+                else "dispatch response reconciliation candidate deferred"
+            ),
+            extra={
+                "fields": {
+                    "dispatch_record_id": failure.record_id,
+                    "error_code": RECONCILIATION_ERROR_CODE,
+                    "failure_count": failure.failure_count,
+                    "next_attempt_at": (
+                        failure.next_attempt_at.isoformat().replace("+00:00", "Z")
+                        if failure.next_attempt_at is not None
+                        else None
+                    ),
+                    "recovery_action": (
+                        "candidate_quarantined" if quarantined else "candidate_backoff"
+                    ),
+                }
+            },
+        )
+
+    def _reconcile_if_due(self) -> bool:
+        now = float(self._monotonic_clock())
+        if now < self._next_reconciliation_scan_at:
+            return False
+        self._next_reconciliation_scan_at = now + RECONCILIATION_SCAN_INTERVAL_SECONDS
+        return self.reconcile_once()
 
     def run(
         self,
@@ -316,7 +461,7 @@ class HermesDispatchWorker:
         ) as executor:
             while not stop_event.is_set():
                 try:
-                    self.reconcile_once()
+                    self._reconcile_if_due()
                 except DBAPIError:
                     self._log_database_retry("reconciliation")
                     stop_event.wait(idle_poll_seconds)
@@ -528,3 +673,15 @@ class _LeaseHeartbeat:
                     },
                 )
                 return
+
+
+def _validated_reconciliation_now(value: datetime) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("reconciliation clock must return a timezone-aware datetime")
+    return value.astimezone(UTC)
+
+
+def _aware_database_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

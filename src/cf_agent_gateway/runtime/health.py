@@ -18,6 +18,7 @@ from cf_agent_gateway.config import Settings
 from cf_agent_gateway.database import check_database_migrations
 from cf_agent_gateway.delivery.models import DeliveryOutboxRecord, DeliveryStatus
 from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
+from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.response.models import ResponseRecord
 from cf_agent_gateway.runtime.heartbeat import HeartbeatError, check_heartbeat
 from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispatchStatus
@@ -153,7 +154,14 @@ class RuntimeHealthService:
             )
             or any(
                 dispatch[key]
-                for key in ("failed", "uncertain", "dead", "stale_running", "blocked_threads")
+                for key in (
+                    "failed",
+                    "uncertain",
+                    "dead",
+                    "stale_running",
+                    "blocked_threads",
+                    "reconciliation_poison",
+                )
             )
             or any(
                 delivery[key]
@@ -237,6 +245,7 @@ class RuntimeHealthService:
                 "configuration": "unconfigured",
                 "connectivity": "unverified",
             }
+        worker_healthy = worker.get("status") == "ok"
         details = worker.get("details")
         operation_succeeded = (
             details.get("last_operation_succeeded") if isinstance(details, dict) else None
@@ -253,9 +262,9 @@ class RuntimeHealthService:
         elif operation_succeeded is False:
             connectivity = "last_operation_failed"
         else:
-            connectivity = "unverified"
+            connectivity = "no_recent_observation"
         return {
-            "status": "ok" if operation_succeeded is True else "degraded",
+            "status": ("ok" if worker_healthy and operation_succeeded is not False else "degraded"),
             "configuration": "configured",
             "connectivity": connectivity,
         }
@@ -413,6 +422,68 @@ def _dispatch_metrics(session: Session, *, now: datetime) -> dict[str, object]:
             DeliveryOutboxRecord.id.is_(None),
         )
     )
+    normalized_response_exists = exists(
+        select(ResponseRecord.response_id)
+        .where(ResponseRecord.message_id == HermesDispatchRecord.message_id)
+        .correlate(HermesDispatchRecord)
+    )
+    reconciliation_delivery_exists = exists(
+        select(DeliveryOutboxRecord.id)
+        .join(
+            ResponseRecord,
+            ResponseRecord.response_id == DeliveryOutboxRecord.response_id,
+        )
+        .where(ResponseRecord.message_id == HermesDispatchRecord.message_id)
+        .correlate(HermesDispatchRecord)
+    )
+    reconciliation_filter = (
+        HermesDispatchRecord.status == HermesDispatchStatus.SUCCESS,
+        Message.source == "wechat",
+        or_(~normalized_response_exists, ~reconciliation_delivery_exists),
+    )
+    reconciliation_backlog = session.scalar(
+        select(func.count(func.distinct(HermesDispatchRecord.id)))
+        .join(
+            HermesDispatchResponse,
+            HermesDispatchResponse.dispatch_record_id == HermesDispatchRecord.id,
+        )
+        .join(Message, Message.id == HermesDispatchRecord.message_id)
+        .where(*reconciliation_filter)
+    )
+    reconciliation_deferred = session.scalar(
+        select(func.count(func.distinct(HermesDispatchRecord.id)))
+        .join(
+            HermesDispatchResponse,
+            HermesDispatchResponse.dispatch_record_id == HermesDispatchRecord.id,
+        )
+        .join(Message, Message.id == HermesDispatchRecord.message_id)
+        .where(
+            *reconciliation_filter,
+            HermesDispatchRecord.reconciliation_quarantined_at.is_(None),
+            HermesDispatchRecord.reconciliation_next_attempt_at > now,
+        )
+    )
+    reconciliation_poison = session.scalar(
+        select(func.count(func.distinct(HermesDispatchRecord.id)))
+        .join(
+            HermesDispatchResponse,
+            HermesDispatchResponse.dispatch_record_id == HermesDispatchRecord.id,
+        )
+        .join(Message, Message.id == HermesDispatchRecord.message_id)
+        .where(
+            *reconciliation_filter,
+            HermesDispatchRecord.reconciliation_quarantined_at.is_not(None),
+        )
+    )
+    oldest_reconciliation_at = session.scalar(
+        select(func.min(HermesDispatchRecord.created_at))
+        .join(
+            HermesDispatchResponse,
+            HermesDispatchResponse.dispatch_record_id == HermesDispatchRecord.id,
+        )
+        .join(Message, Message.id == HermesDispatchRecord.message_id)
+        .where(*reconciliation_filter)
+    )
     stale_running = session.scalar(
         select(func.count(HermesDispatchRecord.id)).where(
             HermesDispatchRecord.status == HermesDispatchStatus.RUNNING,
@@ -428,8 +499,15 @@ def _dispatch_metrics(session: Session, *, now: datetime) -> dict[str, object]:
         "stale_running": stale_running or 0,
         "blocked_threads": blocked_threads or 0,
         "missing_delivery": missing_delivery or 0,
+        "reconciliation_backlog": reconciliation_backlog or 0,
+        "reconciliation_deferred": reconciliation_deferred or 0,
+        "reconciliation_poison": reconciliation_poison or 0,
         "oldest_uncertain_age_seconds": _age_seconds(now, uncertain_created_at),
         "oldest_backlog_age_seconds": _age_seconds(now, oldest_backlog_at),
+        "oldest_reconciliation_age_seconds": _age_seconds(
+            now,
+            oldest_reconciliation_at,
+        ),
     }
 
 
@@ -502,8 +580,12 @@ def _empty_dispatch_metrics() -> dict[str, object]:
         "stale_running": 0,
         "blocked_threads": 0,
         "missing_delivery": 0,
+        "reconciliation_backlog": 0,
+        "reconciliation_deferred": 0,
+        "reconciliation_poison": 0,
         "oldest_uncertain_age_seconds": None,
         "oldest_backlog_age_seconds": None,
+        "oldest_reconciliation_age_seconds": None,
     }
 
 

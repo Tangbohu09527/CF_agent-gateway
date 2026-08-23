@@ -57,6 +57,25 @@ class HermesDispatchRecordStore:
     def enqueue(self, admission: AdmissionOutcome) -> tuple[HermesDispatchRecord, bool]:
         target = _dispatch_target(admission)
         idempotency_key = build_hermes_dispatch_idempotency_key(target.message_id)
+        try:
+            record, created = self.stage_enqueue(admission)
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self.get_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return self._compatible_record_or_raise(existing, target), False
+            raise
+        except Exception:
+            self._session.rollback()
+            raise
+        return record, created
+
+    def stage_enqueue(self, admission: AdmissionOutcome) -> tuple[HermesDispatchRecord, bool]:
+        """Stage an enqueue so a caller can commit it with related durable state."""
+
+        target = _dispatch_target(admission)
+        idempotency_key = build_hermes_dispatch_idempotency_key(target.message_id)
         existing = self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             return self._compatible_record_or_raise(existing, target), False
@@ -77,17 +96,7 @@ class HermesDispatchRecordStore:
             ai_thread_id=target.ai_thread_id,
         )
         self._session.add(record)
-        try:
-            self._session.commit()
-        except IntegrityError:
-            self._session.rollback()
-            existing = self.get_by_idempotency_key(idempotency_key)
-            if existing is not None:
-                return self._compatible_record_or_raise(existing, target), False
-            raise
-        except Exception:
-            self._session.rollback()
-            raise
+        self._session.flush()
         return record, True
 
     def get(self, record_id: int) -> HermesDispatchRecord | None:
