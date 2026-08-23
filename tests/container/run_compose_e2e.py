@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -23,6 +23,16 @@ HEARTBEAT_FILES = (
     "wechat-worker-heartbeat.json",
     "dispatch-worker-heartbeat.json",
     "delivery-worker-heartbeat.json",
+)
+HEARTBEAT_MAX_AGE_SECONDS = 10.0
+HEARTBEAT_RENEWAL_CYCLES = 2
+CLEANUP_ATTEMPTS = 2
+GATEWAY_CLEAN_SHUTDOWN_MARKERS = (
+    '"message": "Shutting down"',
+    '"message": "Waiting for application shutdown."',
+    '"message": "gateway stopped"',
+    '"message": "Application shutdown complete."',
+    '"message": "Finished server process [',
 )
 
 
@@ -249,6 +259,20 @@ def _wait_for_heartbeat_advances(
     raise AssertionError(f"heartbeat files did not advance: {last_payloads!r}")
 
 
+def _assert_continuous_heartbeat_updates(
+    compose: list[str],
+    environment: dict[str, str],
+    *,
+    renewal_cycles: int = HEARTBEAT_RENEWAL_CYCLES,
+) -> dict[str, dict[str, Any]]:
+    if renewal_cycles < 2:
+        raise ValueError("renewal_cycles must prove at least two heartbeat renewals")
+    payloads = _heartbeat_payloads(compose, environment)
+    for _ in range(renewal_cycles):
+        payloads = _wait_for_heartbeat_advances(compose, environment, payloads)
+    return payloads
+
+
 def _assert_gateway_is_read_only(compose: list[str], environment: dict[str, str]) -> None:
     script = """
 from pathlib import Path
@@ -387,12 +411,17 @@ def _assert_stale_heartbeat_and_recovery(
         assert _heartbeat_timestamp(frozen[dispatch_name]) == _heartbeat_timestamp(
             before[dispatch_name]
         )
+        assert datetime.now(UTC) - _heartbeat_timestamp(frozen[dispatch_name]) > timedelta(
+            seconds=HEARTBEAT_MAX_AGE_SECONDS
+        )
     finally:
-        _run(
+        unpause = _run(
             [*compose, "unpause", "dispatch-worker"],
             environment=environment,
             check=False,
         )
+    if unpause.returncode != 0:
+        raise AssertionError("dispatch-worker could not be unpaused after stale-heartbeat proof")
     _wait_for_heartbeat_advances(
         compose,
         environment,
@@ -415,7 +444,8 @@ def _assert_restart_recovery(
         [*compose, "restart", "--timeout", "20", "dispatch-worker"],
         environment=environment,
     )
-    after = _wait_for_healthy(compose, "dispatch-worker", environment)
+    after = _inspect(_container_id(compose, "dispatch-worker", environment), environment)
+    assert after["State"]["Running"] is True
     assert after["State"]["StartedAt"] != before["State"]["StartedAt"]
     recovered = _wait_for_heartbeat_advances(
         compose,
@@ -426,6 +456,7 @@ def _assert_restart_recovery(
     assert _heartbeat_timestamp(recovered[dispatch_name]) >= _heartbeat_timestamp(
         {"updated_at": after["State"]["StartedAt"]}
     )
+    _wait_for_healthy(compose, "dispatch-worker", environment)
     assert _runtime_health(port)["components"]["dispatch_worker"]["status"] == "ok"
 
 
@@ -433,16 +464,45 @@ def _wait_for_clean_stop(
     compose: list[str],
     service: str,
     environment: dict[str, str],
-) -> None:
+    *,
+    allowed_exit_codes: frozenset[int] = frozenset({0}),
+) -> dict[str, Any]:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         inspected = _inspect(_container_id(compose, service, environment), environment)
         if not inspected["State"]["Running"]:
-            assert inspected["State"]["ExitCode"] == 0
             assert inspected["State"]["OOMKilled"] is False
-            return
+            exit_code = inspected["State"]["ExitCode"]
+            if exit_code not in allowed_exit_codes:
+                raise AssertionError(f"{service} exited with code {exit_code}")
+            return inspected
         time.sleep(0.5)
     raise AssertionError(f"{service} did not stop cleanly")
+
+
+def _assert_gateway_shutdown_completed(
+    environment: dict[str, str],
+    inspected: dict[str, Any],
+) -> None:
+    exit_code = inspected["State"]["ExitCode"]
+    if exit_code not in {0, 143}:
+        raise AssertionError(f"gateway exited with unexpected code {exit_code}")
+    result = _run(
+        ["docker", "logs", str(inspected["Id"])],
+        environment=environment,
+        capture_output=True,
+    )
+    logs = result.stdout + result.stderr
+    positions = [logs.find(marker) for marker in GATEWAY_CLEAN_SHUTDOWN_MARKERS]
+    missing = [
+        marker
+        for marker, position in zip(GATEWAY_CLEAN_SHUTDOWN_MARKERS, positions, strict=True)
+        if position < 0
+    ]
+    if missing:
+        raise AssertionError(f"gateway shutdown log sequence is incomplete: {missing!r}")
+    if positions != sorted(positions):
+        raise AssertionError("gateway shutdown log markers are out of order")
 
 
 def _assert_clean_shutdown(compose: list[str], environment: dict[str, str]) -> None:
@@ -468,7 +528,16 @@ assert not list(directory.glob('*.tmp'))
         environment=environment,
     )
     _run([*compose, "stop", "--timeout", "20", "gateway"], environment=environment)
-    _wait_for_clean_stop(compose, "gateway", environment)
+    gateway = _wait_for_clean_stop(
+        compose,
+        "gateway",
+        environment,
+        # Docker's injected Tini reports SIGTERM as 143 even after Uvicorn completes
+        # its lifespan shutdown. The log postcondition below distinguishes that from
+        # an interrupted or SIGKILL shutdown.
+        allowed_exit_codes=frozenset({0, 143}),
+    )
+    _assert_gateway_shutdown_completed(environment, gateway)
 
 
 def _assert_project_resources_removed(
@@ -507,6 +576,35 @@ def _assert_project_resources_removed(
             raise AssertionError(f"Compose project left {resource}: {result.stdout!r}")
 
 
+def _cleanup_project(
+    compose: list[str],
+    environment: dict[str, str],
+    project_name: str,
+) -> None:
+    down: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(CLEANUP_ATTEMPTS):
+        down = _run(
+            [*compose, "down", "--volumes", "--remove-orphans", "--timeout", "20"],
+            environment=environment,
+            check=False,
+        )
+        if down.returncode == 0:
+            break
+        if attempt + 1 < CLEANUP_ATTEMPTS:
+            time.sleep(1)
+
+    cleanup_errors: list[str] = []
+    assert down is not None
+    if down.returncode != 0:
+        cleanup_errors.append(f"compose down returned {down.returncode}")
+    try:
+        _assert_project_resources_removed(project_name, environment)
+    except AssertionError as error:
+        cleanup_errors.append(str(error))
+    if cleanup_errors:
+        raise AssertionError("Compose cleanup failed: " + "; ".join(cleanup_errors))
+
+
 def main() -> int:
     port = _available_port()
     project_name = f"cf-agent-gateway-e2e-{os.getpid()}"
@@ -539,7 +637,7 @@ def main() -> int:
                 "CF_GATEWAY_PORT": str(port),
                 "CF_GATEWAY_WORKER_CONCURRENCY": "1",
                 "CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS": "1",
-                "CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS": "10",
+                "CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS": str(int(HEARTBEAT_MAX_AGE_SECONDS)),
                 "CF_GATEWAY_STOP_GRACE_PERIOD": "20s",
             }
         )
@@ -555,7 +653,7 @@ def main() -> int:
             "--profile",
             "worker",
         ]
-        succeeded = False
+        primary_error: BaseException | None = None
         try:
             _run([*compose, "config", "--quiet"], environment=environment)
             _run(
@@ -574,16 +672,15 @@ def main() -> int:
             _assert_application_containers(compose, environment)
             _assert_postgresql_16(compose, environment)
             _assert_heartbeat_permissions(compose, environment)
-            initial_heartbeats = _heartbeat_payloads(compose, environment)
-            _wait_for_heartbeat_advances(compose, environment, initial_heartbeats)
+            _assert_continuous_heartbeat_updates(compose, environment)
             _assert_gateway_is_read_only(compose, environment)
             _assert_runtime_health(port)
             _assert_token_boundaries(port)
             _assert_stale_heartbeat_and_recovery(compose, environment, port)
             _assert_restart_recovery(compose, environment, port)
             _assert_clean_shutdown(compose, environment)
-            succeeded = True
-        except BaseException:
+        except BaseException as error:
+            primary_error = error
             _run([*compose, "ps", "--all"], environment=environment, check=False)
             _run(
                 [*compose, "logs", "--no-color", "--timestamps"],
@@ -592,17 +689,12 @@ def main() -> int:
             )
             raise
         finally:
-            down = _run(
-                [*compose, "down", "--volumes", "--remove-orphans", "--timeout", "20"],
-                environment=environment,
-                check=False,
-            )
-            if succeeded:
-                if down.returncode != 0:
-                    raise AssertionError(
-                        f"successful E2E failed to clean up Compose resources: {down.returncode}"
-                    )
-                _assert_project_resources_removed(project_name, environment)
+            try:
+                _cleanup_project(compose, environment, project_name)
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"additional Compose cleanup failure: {cleanup_error}")
     print("real-container production Compose E2E passed")
     return 0
 
