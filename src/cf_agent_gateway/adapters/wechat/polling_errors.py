@@ -42,6 +42,34 @@ class WechatCheckpointValueError(WechatPollingError, ValueError):
         super().__init__("checkpoint last_local_id must fit the non-negative BigInteger range")
 
 
+class WechatCheckpointGenerationError(WechatPollingError, ValueError):
+    code = "wechat_checkpoint_generation_error"
+
+    def __init__(self) -> None:
+        super().__init__("checkpoint generation must fit the non-negative BigInteger range")
+
+
+class WechatCheckpointFingerprintError(WechatPollingError, ValueError):
+    code = "wechat_checkpoint_fingerprint_error"
+
+    def __init__(self) -> None:
+        super().__init__("checkpoint fingerprint must be a lowercase SHA-256 digest")
+
+
+class WechatCheckpointStateConflictError(WechatPollingError):
+    code = "wechat_checkpoint_state_conflict"
+
+    def __init__(self) -> None:
+        super().__init__("checkpoint changed concurrently")
+
+
+class WechatCheckpointContinuityError(WechatPollingError):
+    code = "wechat_checkpoint_continuity_unverified"
+
+    def __init__(self) -> None:
+        super().__init__("checkpoint continuity cannot be verified safely")
+
+
 class WechatConversationMismatchError(WechatPollingError):
     code = "wechat_conversation_mismatch"
 

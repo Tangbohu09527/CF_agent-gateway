@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from cf_agent_gateway.database import Base
 
 MAX_CHECKPOINT_LOCAL_ID = 2**63 - 1
+CHECKPOINT_FINGERPRINT_LENGTH = 64
 
 
 class BootstrapMode(StrEnum):
@@ -79,12 +80,29 @@ class WechatSyncCheckpoint(Base):
             "last_local_id >= 0",
             name="ck_wechat_sync_checkpoint_nonnegative_local_id",
         ),
+        CheckConstraint(
+            "regression_generation >= 0",
+            name="ck_wechat_sync_checkpoint_nonnegative_generation",
+        ),
+        CheckConstraint(
+            "last_message_fingerprint IS NULL OR length(last_message_fingerprint) = 64",
+            name="ck_wechat_sync_checkpoint_fingerprint_length",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_account_id: Mapped[str] = mapped_column(String(255))
     conversation_id: Mapped[str] = mapped_column(String(255))
     last_local_id: Mapped[int] = mapped_column(BigInteger)
+    regression_generation: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default="0",
+    )
+    last_message_fingerprint: Mapped[str | None] = mapped_column(
+        String(CHECKPOINT_FINGERPRINT_LENGTH),
+        nullable=True,
+    )
     initialized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
