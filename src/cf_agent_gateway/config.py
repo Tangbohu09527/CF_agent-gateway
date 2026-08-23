@@ -19,6 +19,17 @@ WORKER_LEASE_SECONDS_ENV = "CF_GATEWAY_WORKER_LEASE_SECONDS"
 WORKER_RETRY_LIMIT_ENV = "CF_GATEWAY_WORKER_RETRY_LIMIT"
 
 
+def _environment_variable_name(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must name an environment variable")
+    normalized = value.strip()
+    if "=" in normalized or any(
+        ord(character) < 0x21 or ord(character) > 0x7E for character in normalized
+    ):
+        raise ValueError(f"{field_name} must name an environment variable")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class ServerSettings:
     host: str = "0.0.0.0"
@@ -33,6 +44,31 @@ class DatabaseSettings:
 @dataclass(frozen=True, slots=True)
 class LoggingSettings:
     level: str = "INFO"
+
+
+@dataclass(frozen=True, slots=True)
+class APISettings:
+    token_env: str = "CF_GATEWAY_API_TOKEN"
+    admin_token_env: str = "CF_AGENT_GATEWAY_ADMIN_TOKEN"
+    max_request_body_bytes: int = 1_048_576
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "token_env",
+            _environment_variable_name(self.token_env, "api.token_env"),
+        )
+        object.__setattr__(
+            self,
+            "admin_token_env",
+            _environment_variable_name(self.admin_token_env, "api.admin_token_env"),
+        )
+        if (
+            isinstance(self.max_request_body_bytes, bool)
+            or not isinstance(self.max_request_body_bytes, int)
+            or not 1 <= self.max_request_body_bytes <= 64 * 1024 * 1024
+        ):
+            raise ValueError("api.max_request_body_bytes must be between 1 and 67108864")
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +242,7 @@ class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
+    api: APISettings = APISettings()
     artifact: ArtifactSettings = ArtifactSettings()
     wechat: WechatSettings = WechatSettings()
     hermes: HermesSettings = HermesSettings()
@@ -228,6 +265,7 @@ def load_settings(path: str | Path) -> Settings:
     server = _mapping(raw, "server")
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
+    api = _mapping(raw, "api")
     artifact = _mapping(raw, "artifact")
     runtime = _mapping(raw, "runtime")
     wechat = _mapping(raw, "wechat")
@@ -258,6 +296,14 @@ def load_settings(path: str | Path) -> Settings:
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
+        api=APISettings(
+            token_env=api.get("token_env", "CF_GATEWAY_API_TOKEN"),
+            admin_token_env=api.get(
+                "admin_token_env",
+                "CF_AGENT_GATEWAY_ADMIN_TOKEN",
+            ),
+            max_request_body_bytes=api.get("max_request_body_bytes", 1_048_576),
+        ),
         artifact=ArtifactSettings(
             storage_root=artifact.get("storage_root", "./data/artifacts"),
         ),

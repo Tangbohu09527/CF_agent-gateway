@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,8 @@ _BLOCKING_STATUSES = (
     HermesDispatchStatus.FAILED,
     HermesDispatchStatus.UNCERTAIN,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +121,7 @@ class HermesDispatchRecordStore:
 
         for _ in range(32):
             statement = (
-                select(HermesDispatchRecord.id)
+                select(HermesDispatchRecord.id, HermesDispatchRecord.status)
                 .where(
                     _claimable_predicate(
                         HermesDispatchRecord,
@@ -128,14 +131,19 @@ class HermesDispatchRecordStore:
                     _thread_head_predicate(HermesDispatchRecord),
                     _thread_idle_predicate(HermesDispatchRecord),
                 )
-                .order_by(HermesDispatchRecord.created_at, HermesDispatchRecord.id)
+                .order_by(
+                    HermesDispatchRecord.attempt_count,
+                    HermesDispatchRecord.created_at,
+                    HermesDispatchRecord.id,
+                )
                 .limit(1)
             )
-            record_id = self._session.scalar(statement)
-            if record_id is None:
+            candidate = self._session.execute(statement).one_or_none()
+            if candidate is None:
                 return None
+            record_id, claimed_from_status = candidate
             try:
-                return self.claim(
+                record = self.claim(
                     record_id,
                     claim_token=token,
                     lease_seconds=lease,
@@ -144,6 +152,28 @@ class HermesDispatchRecordStore:
                 )
             except HermesDispatchStateConflictError:
                 continue
+            logger.info(
+                "worker lease acquired",
+                extra={
+                    "fields": {
+                        "dispatch_record_id": record.id,
+                        "attempt_count": record.attempt_count,
+                        "claimed_from_status": claimed_from_status.value,
+                    }
+                },
+            )
+            if claimed_from_status is HermesDispatchStatus.RUNNING:
+                logger.warning(
+                    "stale takeover",
+                    extra={
+                        "fields": {
+                            "dispatch_record_id": record.id,
+                            "attempt_count": record.attempt_count,
+                            "recovery_action": "expired_dispatch_lease_reclaimed",
+                        }
+                    },
+                )
+            return record
         return None
 
     def claim(
@@ -178,6 +208,7 @@ class HermesDispatchRecordStore:
             .values(
                 status=HermesDispatchStatus.RUNNING,
                 attempt_count=HermesDispatchRecord.attempt_count + 1,
+                manual_retry_approved=False,
                 claim_token=token,
                 claimed_at=claimed_at,
                 lease_expires_at=claimed_at + timedelta(seconds=lease),
@@ -345,6 +376,7 @@ class HermesDispatchRecordStore:
             .where(
                 HermesDispatchRecord.status == HermesDispatchStatus.FAILED,
                 HermesDispatchRecord.attempt_count >= max_attempts,
+                HermesDispatchRecord.manual_retry_approved.is_(False),
             )
             .values(status=HermesDispatchStatus.DEAD, updated_at=func.now())
             .execution_options(synchronize_session=False)
@@ -447,7 +479,10 @@ def _claimable_predicate(
         record.status == HermesDispatchStatus.QUEUED,
         and_(
             record.status == HermesDispatchStatus.FAILED,
-            record.attempt_count < max_attempts,
+            or_(
+                record.attempt_count < max_attempts,
+                record.manual_retry_approved.is_(True),
+            ),
         ),
         and_(
             record.status == HermesDispatchStatus.RUNNING,

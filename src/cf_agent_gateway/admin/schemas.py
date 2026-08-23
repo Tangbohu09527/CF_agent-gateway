@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
+from unicodedata import category
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cf_agent_gateway.message.schemas import MessageResponse
+from cf_agent_gateway.task.model import (
+    HermesDispatchRecoveryAction,
+    HermesDispatchStatus,
+)
+
+_SECRET_PATTERN = re.compile(
+    r"(?i)(?:\bauthorization\b|\bbearer\b|\btoken\b|\bsecret\b|"
+    r"\bpassword\b|\bpasswd\b|\bapi[ _-]?key\b)"
+)
 
 
 class AdminPage[ItemT](BaseModel):
@@ -113,3 +124,52 @@ class AdminDeliveryItem(BaseModel):
     last_error_code: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class AdminDispatchRecoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    operator: str = Field(min_length=1, max_length=128)
+    reference: str = Field(min_length=1, max_length=255)
+    reason: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("operator", "reference", "reason", mode="before")
+    @classmethod
+    def validate_recovery_text(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if any(category(character) == "Cc" for character in value):
+            raise ValueError("recovery metadata contains invalid characters")
+        if _SECRET_PATTERN.search(value):
+            raise ValueError("recovery metadata may not contain secret material")
+        return value
+
+
+class AdminDispatchInspection(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    dispatch_record_id: int
+    status: HermesDispatchStatus
+    message_id: int
+    ai_thread_id: str
+    attempt_count: int = Field(ge=0)
+    last_error_code: str | None
+    has_dispatch_response: bool
+    has_hermes_response: bool
+    has_delivery: bool
+    blocks_following_dispatch: bool
+    created_at: datetime
+    updated_at: datetime
+    claimed_at: datetime | None
+    completed_at: datetime | None
+    lease_expires_at: datetime | None
+
+
+class AdminDispatchRecoveryResult(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    dispatch_record_id: int
+    action: HermesDispatchRecoveryAction
+    status: HermesDispatchStatus
+    audit_id: int
+    idempotent: bool
