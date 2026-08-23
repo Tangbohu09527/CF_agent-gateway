@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import UTC
 from typing import Any
 from xml.etree import ElementTree
 
@@ -22,6 +23,7 @@ EVENT_ID_VERSION = 1
 LOCAL_MESSAGE_ID_VERSION = 1
 GENERATION_LOCAL_MESSAGE_ID_VERSION = 2
 CHECKPOINT_FINGERPRINT_VERSION = 1
+FALLBACK_CHECKPOINT_FINGERPRINT_VERSION = 1
 WECHAT_SOURCE = "wechat"
 
 
@@ -90,17 +92,38 @@ def normalize_wechat_message(
 def build_wechat_checkpoint_fingerprint(
     raw: RawWechatMessage | Mapping[str, Any],
 ) -> str | None:
-    """Build a content-free continuity anchor when agent-wechat supplies serverId."""
+    """Build a content-free continuity anchor, preferring stable server identity."""
 
     message = _raw_message(raw)
     server_id = _usable_id(message.server_id)
-    if server_id is None:
+    if server_id is not None:
+        return _digest(
+            {
+                "identity": "server",
+                "server_id": server_id,
+                "version": CHECKPOINT_FINGERPRINT_VERSION,
+            }
+        )
+
+    local_id = _usable_id(message.local_id)
+    chat_id = _optional_string(message.chat_id)
+    if local_id is None or chat_id is None:
         return None
+    timestamp = (
+        message.timestamp.replace(tzinfo=UTC)
+        if message.timestamp.tzinfo is None
+        else message.timestamp.astimezone(UTC)
+    )
     return _digest(
         {
-            "identity": "server",
-            "server_id": server_id,
-            "version": CHECKPOINT_FINGERPRINT_VERSION,
+            "chat_id": chat_id,
+            "identity": "fallback",
+            "is_self": message.is_self is True,
+            "local_id": local_id,
+            "message_type": message.type,
+            "sender_id": _optional_string(message.sender),
+            "timestamp": timestamp.isoformat(),
+            "version": FALLBACK_CHECKPOINT_FINGERPRINT_VERSION,
         }
     )
 

@@ -5,7 +5,7 @@ from contextlib import suppress
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from cf_agent_gateway.adapters.wechat import NormalizedWechatMessage
+from cf_agent_gateway.adapters.wechat import MessageSinkDisposition, NormalizedWechatMessage
 from cf_agent_gateway.hermes import HermesDispatcher
 from cf_agent_gateway.ingestion.models import MessageIngestionOutcome
 from cf_agent_gateway.ingestion.service import AdmissionRequestResolver, MessageAdmissionService
@@ -19,6 +19,17 @@ class MessageStoreAdmissionSink:
 
     def handle(self, message: NormalizedWechatMessage) -> None:
         self.process(message)
+
+    def handle_with_disposition(
+        self,
+        message: NormalizedWechatMessage,
+    ) -> MessageSinkDisposition:
+        outcome = self.process(message)
+        return (
+            MessageSinkDisposition.CREATED
+            if outcome.message_created
+            else MessageSinkDisposition.DUPLICATE
+        )
 
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         return self._service.process(message)
@@ -42,6 +53,17 @@ class SessionFactoryMessageStoreAdmissionSink:
 
     def handle(self, message: NormalizedWechatMessage) -> None:
         self.process(message)
+
+    def handle_with_disposition(
+        self,
+        message: NormalizedWechatMessage,
+    ) -> MessageSinkDisposition:
+        outcome = self.process(message)
+        return (
+            MessageSinkDisposition.CREATED
+            if outcome.message_created
+            else MessageSinkDisposition.DUPLICATE
+        )
 
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         session = self._session_factory()

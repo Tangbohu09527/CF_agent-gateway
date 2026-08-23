@@ -24,6 +24,7 @@ from cf_agent_gateway.adapters.wechat.polling_models import (
     MAX_CHECKPOINT_LOCAL_ID,
     BootstrapMode,
     ChatPollResult,
+    MessageSinkDisposition,
     PollFailure,
     PollFailureStage,
     PollResult,
@@ -32,6 +33,7 @@ from cf_agent_gateway.adapters.wechat.polling_store import WechatSyncCheckpointS
 from cf_agent_gateway.adapters.wechat.raw_models import AgentWechatAuthStatus, RawWechatMessage
 
 logger = logging.getLogger(__name__)
+_MAX_CONTINUITY_WARNING_KEYS = 1024
 
 
 class WechatPollingClient(Protocol):
@@ -71,6 +73,7 @@ class WechatPollingService:
         self._client = client
         self._checkpoint_store = checkpoint_store
         self._sink = sink
+        self._continuity_warning_keys: set[str] = set()
         try:
             self._bootstrap_mode = BootstrapMode(bootstrap_mode)
         except (TypeError, ValueError):
@@ -112,6 +115,7 @@ class WechatPollingService:
                 chat,
                 failed_conversation_ids=failed_conversation_ids,
             )
+            _log_chat_result(source_account_id, result)
             chat_results.append(result)
             if not result.succeeded and result.conversation_id is not None:
                 failed_conversation_ids.add(result.conversation_id)
@@ -124,8 +128,17 @@ class WechatPollingService:
             chats_failed=sum(not result.succeeded for result in chat_results),
             messages_seen=sum(result.messages_seen for result in chat_results),
             messages_processed=sum(result.messages_processed for result in chat_results),
+            messages_new=sum(result.messages_new for result in chat_results),
+            messages_duplicate=sum(result.messages_duplicate for result in chat_results),
+            messages_failed=sum(result.messages_failed for result in chat_results),
             messages_skipped_by_checkpoint=sum(
                 result.messages_skipped_by_checkpoint for result in chat_results
+            ),
+            messages_skipped_as_self=sum(
+                result.messages_skipped_as_self for result in chat_results
+            ),
+            messages_without_server_id=sum(
+                result.messages_without_server_id for result in chat_results
             ),
             bootstrapped_chats=sum(result.bootstrapped for result in chat_results),
             failures=failures,
@@ -198,6 +211,9 @@ class WechatPollingService:
                 ],
             )
 
+        messages_without_server_id = sum(
+            not _message_has_usable_server_id(raw_message) for _, raw_message in ordered_messages
+        )
         try:
             checkpoint = self._checkpoint_store.get(
                 source_account_id=source_account_id,
@@ -209,6 +225,7 @@ class WechatPollingService:
                 conversation_name=conversation_name,
                 succeeded=False,
                 messages_seen=messages_seen,
+                messages_without_server_id=messages_without_server_id,
                 failures=[
                     _failure(
                         PollFailureStage.CHECKPOINT,
@@ -243,6 +260,7 @@ class WechatPollingService:
                     conversation_name=conversation_name,
                     succeeded=False,
                     messages_seen=messages_seen,
+                    messages_without_server_id=messages_without_server_id,
                     failures=[
                         _failure(
                             PollFailureStage.CHECKPOINT,
@@ -273,6 +291,7 @@ class WechatPollingService:
                     succeeded=True,
                     messages_seen=messages_seen,
                     messages_skipped_by_checkpoint=messages_seen,
+                    messages_without_server_id=messages_without_server_id,
                     bootstrapped=True,
                 )
 
@@ -302,12 +321,14 @@ class WechatPollingService:
                         conversation_name=conversation_name,
                         messages_seen=messages_seen,
                         messages_skipped=skipped_visible,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                         checkpoint=old_checkpoint,
                         generation=old_generation,
                         remote_first_local_id=remote_first_local_id,
                         remote_latest_local_id=remote_latest_local_id,
                         recovery_action="stop_chat_anchor_ambiguous",
+                        warning_keys=self._continuity_warning_keys,
                     )
 
                 remote_fingerprint = build_wechat_checkpoint_fingerprint(anchor_candidates[0])
@@ -320,12 +341,14 @@ class WechatPollingService:
                             conversation_name=conversation_name,
                             messages_seen=messages_seen,
                             messages_skipped=skipped_visible,
+                            messages_without_server_id=messages_without_server_id,
                             bootstrapped=bootstrapped,
                             checkpoint=old_checkpoint,
                             generation=old_generation,
                             remote_first_local_id=remote_first_local_id,
                             remote_latest_local_id=remote_latest_local_id,
                             recovery_action="stop_chat_anchor_unavailable",
+                            warning_keys=self._continuity_warning_keys,
                         )
                     try:
                         _, enrolled = self._checkpoint_store.enroll_anchor(
@@ -342,6 +365,7 @@ class WechatPollingService:
                             succeeded=False,
                             messages_seen=messages_seen,
                             messages_skipped_by_checkpoint=skipped_visible,
+                            messages_without_server_id=messages_without_server_id,
                             bootstrapped=bootstrapped,
                             failures=[
                                 _failure(
@@ -369,6 +393,7 @@ class WechatPollingService:
                         conversation_name=conversation_name,
                         messages_seen=messages_seen,
                         messages_skipped=skipped_visible,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                     )
 
@@ -379,12 +404,14 @@ class WechatPollingService:
                         conversation_name=conversation_name,
                         messages_seen=messages_seen,
                         messages_skipped=skipped_visible,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                         checkpoint=old_checkpoint,
                         generation=old_generation,
                         remote_first_local_id=remote_first_local_id,
                         remote_latest_local_id=remote_latest_local_id,
                         recovery_action="stop_chat_remote_anchor_unavailable",
+                        warning_keys=self._continuity_warning_keys,
                     )
                 anchor_match = saved_fingerprint == remote_fingerprint
                 regression_detected = not anchor_match
@@ -418,6 +445,7 @@ class WechatPollingService:
                         conversation_name=conversation_name,
                         succeeded=False,
                         messages_seen=messages_seen,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                         failures=[
                             _failure(
@@ -452,6 +480,7 @@ class WechatPollingService:
                         conversation_name=conversation_name,
                         succeeded=False,
                         messages_seen=messages_seen,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                         failures=[
                             _failure(
@@ -464,7 +493,10 @@ class WechatPollingService:
 
         current_local_id = checkpoint.last_local_id
         messages_processed = 0
+        messages_new = 0
+        messages_duplicate = 0
         messages_skipped = 0
+        messages_skipped_as_self = 0
         for local_id, raw_message in ordered_messages:
             if local_id <= current_local_id:
                 messages_skipped += 1
@@ -500,13 +532,22 @@ class WechatPollingService:
                         succeeded=False,
                         messages_seen=messages_seen,
                         messages_processed=messages_processed,
+                        messages_new=messages_new,
+                        messages_duplicate=messages_duplicate,
+                        messages_failed=1,
                         messages_skipped_by_checkpoint=messages_skipped,
+                        messages_skipped_as_self=messages_skipped_as_self,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                         failures=[failure],
                     )
 
                 try:
-                    self._sink.handle(normalized)
+                    sink_disposition = _handle_with_disposition(self._sink, normalized)
+                    if sink_disposition is MessageSinkDisposition.DUPLICATE:
+                        messages_duplicate += 1
+                    else:
+                        messages_new += 1
                 except Exception as error:
                     failure = _failure(
                         PollFailureStage.SINK,
@@ -520,11 +561,17 @@ class WechatPollingService:
                         succeeded=False,
                         messages_seen=messages_seen,
                         messages_processed=messages_processed,
+                        messages_new=messages_new,
+                        messages_duplicate=messages_duplicate,
+                        messages_failed=1,
                         messages_skipped_by_checkpoint=messages_skipped,
+                        messages_skipped_as_self=messages_skipped_as_self,
+                        messages_without_server_id=messages_without_server_id,
                         bootstrapped=bootstrapped,
                         failures=[failure],
                     )
             else:
+                messages_skipped_as_self += 1
                 _log_message_skip(
                     "message skipped as self",
                     source_account_id=source_account_id,
@@ -567,7 +614,12 @@ class WechatPollingService:
                     succeeded=False,
                     messages_seen=messages_seen,
                     messages_processed=messages_processed,
+                    messages_new=messages_new,
+                    messages_duplicate=messages_duplicate,
+                    messages_failed=1,
                     messages_skipped_by_checkpoint=messages_skipped,
+                    messages_skipped_as_self=messages_skipped_as_self,
+                    messages_without_server_id=messages_without_server_id,
                     bootstrapped=bootstrapped,
                     failures=[failure],
                 )
@@ -582,7 +634,12 @@ class WechatPollingService:
             succeeded=True,
             messages_seen=messages_seen,
             messages_processed=messages_processed,
+            messages_new=messages_new,
+            messages_duplicate=messages_duplicate,
+            messages_failed=0,
             messages_skipped_by_checkpoint=messages_skipped,
+            messages_skipped_as_self=messages_skipped_as_self,
+            messages_without_server_id=messages_without_server_id,
             bootstrapped=bootstrapped,
         )
 
@@ -596,6 +653,21 @@ def _parse_chat(chat: Mapping[str, Any]) -> tuple[str, str | None]:
     if conversation_id is None:
         raise WechatChatIdentityError()
     return conversation_id, _nonempty_string(chat.get("name"))
+
+
+def _handle_with_disposition(
+    sink: NormalizedMessageSink,
+    message: NormalizedWechatMessage,
+) -> MessageSinkDisposition:
+    disposition_handler = getattr(sink, "handle_with_disposition", None)
+    if disposition_handler is None:
+        sink.handle(message)
+        return MessageSinkDisposition.CREATED
+    disposition = disposition_handler(message)
+    try:
+        return MessageSinkDisposition(disposition)
+    except (TypeError, ValueError):
+        raise TypeError("message sink returned an invalid disposition") from None
 
 
 def _numeric_local_id(message: RawWechatMessage | Mapping[str, Any]) -> int:
@@ -631,6 +703,26 @@ def _is_self_message(message: RawWechatMessage | Mapping[str, Any]) -> bool:
         else None
     )
     return value is True
+
+
+def _message_has_usable_server_id(
+    message: RawWechatMessage | Mapping[str, Any],
+) -> bool:
+    value = (
+        message.server_id
+        if isinstance(message, RawWechatMessage)
+        else message.get("serverId")
+        if isinstance(message, Mapping)
+        else None
+    )
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, int):
+        return value > 0
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return bool(normalized and normalized != "0")
 
 
 def _validated_ordered_messages(
@@ -697,31 +789,49 @@ def _continuity_failure_result(
     conversation_name: str | None,
     messages_seen: int,
     messages_skipped: int,
+    messages_without_server_id: int,
     bootstrapped: bool,
     checkpoint: int,
     generation: int,
     remote_first_local_id: int,
     remote_latest_local_id: int,
     recovery_action: str,
+    warning_keys: set[str],
 ) -> ChatPollResult:
-    _log_checkpoint_event(
-        "checkpoint continuity unverified",
-        source_account_id=source_account_id,
-        conversation_id=conversation_id,
-        old_checkpoint=checkpoint,
-        remote_first_local_id=remote_first_local_id,
-        remote_latest_local_id=remote_latest_local_id,
-        old_generation=generation,
-        new_generation=generation,
-        anchor_match=None,
-        recovery_action=recovery_action,
-        cas_result=None,
+    warning_key = "|".join(
+        (
+            _redacted_reference("source_account", source_account_id),
+            _redacted_reference("conversation", conversation_id),
+            str(checkpoint),
+            str(generation),
+            str(remote_first_local_id),
+            str(remote_latest_local_id),
+            recovery_action,
+        )
     )
+    if warning_key not in warning_keys:
+        if len(warning_keys) >= _MAX_CONTINUITY_WARNING_KEYS:
+            warning_keys.clear()
+        warning_keys.add(warning_key)
+        _log_checkpoint_event(
+            "checkpoint continuity unverified",
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            old_checkpoint=checkpoint,
+            remote_first_local_id=remote_first_local_id,
+            remote_latest_local_id=remote_latest_local_id,
+            old_generation=generation,
+            new_generation=generation,
+            anchor_match=None,
+            recovery_action=recovery_action,
+            cas_result=None,
+        )
     return _continuity_failure(
         conversation_id=conversation_id,
         conversation_name=conversation_name,
         messages_seen=messages_seen,
         messages_skipped=messages_skipped,
+        messages_without_server_id=messages_without_server_id,
         bootstrapped=bootstrapped,
     )
 
@@ -732,6 +842,7 @@ def _continuity_failure(
     conversation_name: str | None,
     messages_seen: int,
     messages_skipped: int,
+    messages_without_server_id: int,
     bootstrapped: bool,
 ) -> ChatPollResult:
     return ChatPollResult(
@@ -740,6 +851,7 @@ def _continuity_failure(
         succeeded=False,
         messages_seen=messages_seen,
         messages_skipped_by_checkpoint=messages_skipped,
+        messages_without_server_id=messages_without_server_id,
         bootstrapped=bootstrapped,
         failures=[
             _failure(
@@ -792,7 +904,7 @@ def _log_message_skip(
     local_id: int,
     generation: int,
 ) -> None:
-    logger.info(
+    logger.debug(
         message,
         extra={
             "fields": {
@@ -800,6 +912,33 @@ def _log_message_skip(
                 "conversation_id_ref": _redacted_reference("conversation", conversation_id),
                 "local_id": local_id,
                 "generation": generation,
+            }
+        },
+    )
+
+
+def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
+    logger.info(
+        "poll chat completed",
+        extra={
+            "fields": {
+                "source_account_id_ref": _redacted_reference("source_account", source_account_id),
+                "conversation_id_ref": (
+                    _redacted_reference("conversation", result.conversation_id)
+                    if result.conversation_id is not None
+                    else None
+                ),
+                "succeeded": result.succeeded,
+                "failure_count": len(result.failures),
+                "messages_seen": result.messages_seen,
+                "messages_processed": result.messages_processed,
+                "messages_new": result.messages_new,
+                "messages_duplicate": result.messages_duplicate,
+                "messages_skipped_checkpoint": result.messages_skipped_by_checkpoint,
+                "messages_skipped_self": result.messages_skipped_as_self,
+                "messages_failed": result.messages_failed,
+                "messages_without_server_id": result.messages_without_server_id,
+                "bootstrapped": result.bootstrapped,
             }
         },
     )

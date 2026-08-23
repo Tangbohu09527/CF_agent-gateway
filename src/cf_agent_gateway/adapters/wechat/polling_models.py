@@ -30,6 +30,11 @@ class PollFailureStage(StrEnum):
     CHECKPOINT = "checkpoint"
 
 
+class MessageSinkDisposition(StrEnum):
+    CREATED = "created"
+    DUPLICATE = "duplicate"
+
+
 class PollFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -47,7 +52,12 @@ class ChatPollResult(BaseModel):
     succeeded: bool
     messages_seen: int = 0
     messages_processed: int = 0
+    messages_new: int = 0
+    messages_duplicate: int = 0
+    messages_failed: int = 0
     messages_skipped_by_checkpoint: int = 0
+    messages_skipped_as_self: int = 0
+    messages_without_server_id: int = 0
     bootstrapped: bool = False
     failures: list[PollFailure] = Field(default_factory=list)
 
@@ -62,7 +72,12 @@ class PollResult(BaseModel):
     chats_failed: int = 0
     messages_seen: int = 0
     messages_processed: int = 0
+    messages_new: int = 0
+    messages_duplicate: int = 0
+    messages_failed: int = 0
     messages_skipped_by_checkpoint: int = 0
+    messages_skipped_as_self: int = 0
+    messages_without_server_id: int = 0
     bootstrapped_chats: int = 0
     failures: list[PollFailure] = Field(default_factory=list)
     chat_results: list[ChatPollResult] = Field(default_factory=list)

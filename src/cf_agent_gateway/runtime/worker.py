@@ -100,9 +100,18 @@ def run_worker(
                         "fields": {
                             "logged_in": result.logged_in,
                             "chats_seen": result.chats_seen,
+                            "chats_succeeded": result.chats_succeeded,
                             "chats_failed": result.chats_failed,
                             "messages_seen": result.messages_seen,
                             "messages_processed": result.messages_processed,
+                            "messages_new": result.messages_new,
+                            "messages_duplicate": result.messages_duplicate,
+                            "messages_skipped_checkpoint": (result.messages_skipped_by_checkpoint),
+                            "messages_skipped_self": result.messages_skipped_as_self,
+                            "messages_failed": result.messages_failed,
+                            "messages_without_server_id": result.messages_without_server_id,
+                            "bootstrapped_chats": result.bootstrapped_chats,
+                            "failure_count": len(result.failures),
                         }
                     },
                 )
