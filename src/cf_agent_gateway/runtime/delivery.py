@@ -21,14 +21,12 @@ from cf_agent_gateway.delivery import (
     ChannelDeliveryWorker,
     DeliveryBatchResult,
 )
-from cf_agent_gateway.runtime.errors import (
-    WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
-)
+from cf_agent_gateway.runtime.errors import WechatRuntimeDisabledError
 from cf_agent_gateway.runtime.startup import (
     check_database_migrations,
     database_startup_check_enabled,
 )
+from cf_agent_gateway.runtime.wechat_token import resolve_wechat_token
 
 
 def drain_wechat_delivery_outbox(
@@ -63,9 +61,10 @@ def run_wechat_delivery_once(
 
     if not settings.wechat.enabled:
         raise WechatRuntimeDisabledError()
-    token = environment_reader(settings.wechat.token_env)
-    if token is None or not token.strip():
-        raise WechatTokenEnvironmentError(settings.wechat.token_env)
+    token = resolve_wechat_token(
+        settings.wechat.token_env,
+        environment_reader=environment_reader,
+    )
 
     engine: Engine | None = None
     try:
@@ -81,7 +80,9 @@ def run_wechat_delivery_once(
                 WechatHttpMediaSender,
                 base_url=settings.wechat.base_url,
                 token_env=settings.wechat.token_env,
-                environment_reader=environment_reader,
+                environment_reader=lambda name: (
+                    token if name == settings.wechat.token_env else None
+                ),
             )
         return drain_wechat_delivery_outbox(
             session_factory,

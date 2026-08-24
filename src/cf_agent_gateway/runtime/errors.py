@@ -49,12 +49,37 @@ class WechatRuntimeDisabledError(WechatRuntimeError):
         super().__init__("WeChat runtime is disabled")
 
 
-class WechatTokenEnvironmentError(WechatRuntimeError):
-    code = "wechat_token_environment_missing"
+class WechatTokenContractError(WechatRuntimeError):
+    """A redacted failure to resolve the agent-wechat authentication token."""
+
+
+class WechatTokenMissingError(WechatTokenContractError):
+    code = "token_missing"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class WechatTokenEnvironmentError(WechatTokenMissingError):
+    """Backward-compatible exception type for the development environment source."""
 
     def __init__(self, environment_variable: str) -> None:
         self.environment_variable = environment_variable
-        super().__init__(f"missing WeChat token environment variable: {environment_variable}")
+        super().__init__()
+
+
+class WechatTokenSourceConflictError(WechatTokenContractError):
+    code = "token_source_conflict"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class WechatTokenFileInvalidError(WechatTokenContractError):
+    code = "token_file_invalid"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
 
 
 class WechatClientInitializationError(WechatRuntimeError):

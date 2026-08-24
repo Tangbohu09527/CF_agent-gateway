@@ -30,13 +30,13 @@ from cf_agent_gateway.runtime.errors import (
     WechatClientInitializationError,
     WechatPollingExecutionError,
     WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
 )
 from cf_agent_gateway.runtime.poll_gate import acquire_wechat_poll_gate
 from cf_agent_gateway.runtime.startup import (
     check_database_migrations,
     database_startup_check_enabled,
 )
+from cf_agent_gateway.runtime.wechat_token import resolve_wechat_token
 
 
 class ClosableWechatPollingClient(WechatPollingClient, Protocol):
@@ -92,9 +92,10 @@ def run_wechat_poll_once(
     if not settings.wechat.enabled:
         raise WechatRuntimeDisabledError()
 
-    token = environment_reader(settings.wechat.token_env)
-    if token is None or not token.strip():
-        raise WechatTokenEnvironmentError(settings.wechat.token_env)
+    token = resolve_wechat_token(
+        settings.wechat.token_env,
+        environment_reader=environment_reader,
+    )
 
     engine: Engine | None = None
     checkpoint_session = None

@@ -118,6 +118,17 @@ services:
       CF_GATEWAY_SERVICE: cf-agent-gateway-worker
       CF_GATEWAY_WORKER_HEARTBEAT_PATH: /run/cf-agent-gateway/wechat-worker-heartbeat.json
       CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+      CF_AGENT_WECHAT_TOKEN_FILE: /run/secrets/cf-agent-wechat-auth-token
+    volumes:
+      - ${CF_GATEWAY_CONFIG_FILE:-./config/production.yaml}:/app/config/production.yaml:ro
+      - gateway-state:/var/lib/cf-agent-gateway
+      - runtime-heartbeats:/run/cf-agent-gateway
+      - type: bind
+        source: ${CF_AGENT_WECHAT_TOKEN_HOST_FILE:-/srv/storage/cf-agent-wechat/secrets/auth-token}
+        target: /run/secrets/cf-agent-wechat-auth-token
+        read_only: true
+        bind:
+          create_host_path: false
     tmpfs:
       - /tmp:size=64m,mode=1777
     restart: unless-stopped
@@ -191,6 +202,17 @@ services:
       CF_GATEWAY_WORKER_ID: cf-agent-delivery-worker
       CF_GATEWAY_WORKER_HEARTBEAT_PATH: /run/cf-agent-gateway/delivery-worker-heartbeat.json
       CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+      CF_AGENT_WECHAT_TOKEN_FILE: /run/secrets/cf-agent-wechat-auth-token
+    volumes:
+      - ${CF_GATEWAY_CONFIG_FILE:-./config/production.yaml}:/app/config/production.yaml:ro
+      - gateway-state:/var/lib/cf-agent-gateway
+      - runtime-heartbeats:/run/cf-agent-gateway
+      - type: bind
+        source: ${CF_AGENT_WECHAT_TOKEN_HOST_FILE:-/srv/storage/cf-agent-wechat/secrets/auth-token}
+        target: /run/secrets/cf-agent-wechat-auth-token
+        read_only: true
+        bind:
+          create_host_path: false
     tmpfs:
       - /tmp:size=64m,mode=1777
     restart: unless-stopped

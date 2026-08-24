@@ -7,11 +7,8 @@ from typing import Any, TextIO
 
 from cf_agent_gateway.adapters.wechat import PollResult
 from cf_agent_gateway.config import load_settings
-from cf_agent_gateway.runtime import (
-    WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
-    run_wechat_poll_once,
-)
+from cf_agent_gateway.runtime import WechatRuntimeDisabledError, run_wechat_poll_once
+from cf_agent_gateway.runtime.errors import WechatTokenContractError
 
 DEFAULT_CONFIG_PATH = "config/config.yaml"
 
@@ -54,14 +51,8 @@ def main() -> int:
     except WechatRuntimeDisabledError as error:
         _write_json({"error_code": error.code}, file=sys.stderr)
         return 2
-    except WechatTokenEnvironmentError as error:
-        _write_json(
-            {
-                "error_code": error.code,
-                "environment_variable": error.environment_variable,
-            },
-            file=sys.stderr,
-        )
+    except WechatTokenContractError as error:
+        _write_json({"error_code": error.code}, file=sys.stderr)
         return 1
     except Exception:
         _write_json({"error_code": "wechat_poll_once_failed"}, file=sys.stderr)

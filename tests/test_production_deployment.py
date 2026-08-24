@@ -34,6 +34,11 @@ COMPOSE_WORKER_HEARTBEATS = {
     "dispatch-worker": "/run/cf-agent-gateway/dispatch-worker-heartbeat.json",
     "delivery-worker": "/run/cf-agent-gateway/delivery-worker-heartbeat.json",
 }
+TOKEN_FILE_SERVICES = frozenset({"worker", "delivery-worker"})
+TOKEN_CONTAINER_PATH = "/run/secrets/cf-agent-wechat-auth-token"
+TOKEN_HOST_SOURCE = (
+    "${CF_AGENT_WECHAT_TOKEN_HOST_FILE:-/srv/storage/cf-agent-wechat/secrets/auth-token}"
+)
 
 GATEWAY_HEARTBEAT_ENVIRONMENTS = {
     "CF_GATEWAY_WECHAT_HEARTBEAT_PATH": COMPOSE_WORKER_HEARTBEATS["worker"],
@@ -52,6 +57,18 @@ def _load_compose() -> dict[str, object]:
     loaded = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _targets_token_file(mount: object) -> bool:
+    if isinstance(mount, dict):
+        return mount.get("target") == TOKEN_CONTAINER_PATH
+    if isinstance(mount, str):
+        return (
+            mount == TOKEN_CONTAINER_PATH
+            or mount.startswith(f"{TOKEN_CONTAINER_PATH}:")
+            or f":{TOKEN_CONTAINER_PATH}" in mount
+        )
+    return False
 
 
 def _parse_unit(path: Path) -> dict[str, dict[str, list[str]]]:
@@ -135,6 +152,39 @@ def test_production_compose_defines_independent_v2_workers() -> None:
         "${CF_GATEWAY_WORKER_RETRY_LIMIT:-3}"
     )
     assert {"gateway-state", "runtime-heartbeats"}.issubset(compose["volumes"])
+
+
+def test_production_compose_limits_wechat_token_file_to_allowed_workers() -> None:
+    compose = _load_compose()
+    services = compose["services"]
+    observed_mounts: set[str] = set()
+
+    for service_name, service in services.items():
+        environment = service.get("environment", {})
+        assert "CF_AGENT_WECHAT_TOKEN" not in environment
+        token_mounts = [mount for mount in service.get("volumes", []) if _targets_token_file(mount)]
+        if service_name in TOKEN_FILE_SERVICES:
+            assert environment["CF_AGENT_WECHAT_TOKEN_FILE"] == TOKEN_CONTAINER_PATH
+            assert token_mounts == [
+                {
+                    "type": "bind",
+                    "source": TOKEN_HOST_SOURCE,
+                    "target": TOKEN_CONTAINER_PATH,
+                    "read_only": True,
+                    "bind": {"create_host_path": False},
+                }
+            ]
+            observed_mounts.add(service_name)
+        else:
+            assert "CF_AGENT_WECHAT_TOKEN_FILE" not in environment
+            assert token_mounts == []
+
+        non_environment_surfaces = {
+            name: service.get(name) for name in ("command", "labels", "healthcheck")
+        }
+        assert "CF_AGENT_WECHAT_TOKEN" not in yaml.safe_dump(non_environment_surfaces)
+
+    assert observed_mounts == TOKEN_FILE_SERVICES
 
 
 def test_production_heartbeat_volume_initializer_is_bounded_and_least_privilege() -> None:

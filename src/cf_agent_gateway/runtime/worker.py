@@ -17,7 +17,7 @@ from cf_agent_gateway.runtime.errors import (
     HermesRuntimeError,
     WechatRuntimeDisabledError,
     WechatRuntimeError,
-    WechatTokenEnvironmentError,
+    WechatTokenContractError,
 )
 from cf_agent_gateway.runtime.heartbeat import (
     HeartbeatPublisher,
@@ -37,7 +37,7 @@ PollOnce = Callable[[Settings], PollResult]
 _FATAL_POLL_ERRORS = (
     HermesAPIKeyEnvironmentError,
     WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
+    WechatTokenContractError,
 )
 
 

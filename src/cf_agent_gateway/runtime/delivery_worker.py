@@ -18,7 +18,7 @@ from cf_agent_gateway.runtime.delivery import run_wechat_delivery_once
 from cf_agent_gateway.runtime.errors import (
     WechatRuntimeDisabledError,
     WechatRuntimeError,
-    WechatTokenEnvironmentError,
+    WechatTokenContractError,
 )
 from cf_agent_gateway.runtime.heartbeat import (
     HeartbeatPublisher,
@@ -68,7 +68,7 @@ def run_delivery_worker(
             while not shutdown.is_set():
                 try:
                     result = execute_delivery(settings)
-                except (WechatRuntimeDisabledError, WechatTokenEnvironmentError):
+                except (WechatRuntimeDisabledError, WechatTokenContractError):
                     raise
                 except DBAPIError:
                     logger.error(

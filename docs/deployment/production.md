@@ -40,13 +40,18 @@ CF_GATEWAY_IMAGE=<immutable-image>
 CF_AGENT_GATEWAY_DATABASE_URL=postgresql+psycopg://...
 CF_GATEWAY_API_TOKEN=<random-client-token>
 CF_AGENT_GATEWAY_ADMIN_TOKEN=<separate-random-admin-token>
-CF_AGENT_WECHAT_TOKEN=<agent-wechat-token>
+CF_AGENT_WECHAT_TOKEN_HOST_FILE=/srv/storage/cf-agent-wechat/secrets/auth-token
 HERMES_API_KEY=<hermes-api-key>
 ```
 
-The API, WeChat and Hermes token values are read only from the environment variables
-named by `config/production.yaml`. Never store the secret value in YAML, a Compose
-command, logs, screenshots, a recovery reason/reference, or a pull request.
+The API and Hermes values are read from their configured environment variables. The
+agent-wechat Token is read only from the protected host file above, mounted read-only at
+`/run/secrets/cf-agent-wechat-auth-token` on `worker` and `delivery-worker`. Provision it
+as UID/GID `10001:10001`, mode `0400` or `0600`, with visible ASCII content and no
+newline. Remove `CF_AGENT_WECHAT_TOKEN` from the production environment file; setting
+both sources fails closed. See the [runtime contract](../wechat-runtime-contract.md).
+Never store a secret value in YAML, a Compose command, labels, healthchecks, logs,
+screenshots, a recovery reason/reference, or a pull request.
 
 Render a site-specific copy of `config/production.yaml`:
 

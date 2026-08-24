@@ -159,8 +159,9 @@ def test_cli_runtime_boundary_exit_codes(
     assert wechat_poll_once.main() == expected_exit_code
     captured = capsys.readouterr()
     assert captured.out == ""
-    payload = json.loads(captured.err)
-    assert payload["error_code"] == error.code  # type: ignore[attr-defined]
+    assert json.loads(captured.err) == {
+        "error_code": error.code,  # type: ignore[attr-defined]
+    }
 
 
 def test_python_module_entrypoint_exits_two_when_runtime_is_disabled(tmp_path: Path) -> None:

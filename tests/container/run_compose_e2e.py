@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import socket
 import subprocess
@@ -19,6 +20,8 @@ E2E_COMPOSE = ROOT / "tests" / "container" / "docker-compose.e2e.yml"
 E2E_CONFIG = ROOT / "tests" / "container" / "production.yaml"
 APP_SERVICES = ("gateway", "worker", "dispatch-worker", "delivery-worker")
 WORKER_SERVICES = ("worker", "dispatch-worker", "delivery-worker")
+TOKEN_FILE_SERVICES = ("worker", "delivery-worker")
+TOKEN_CONTAINER_PATH = "/run/secrets/cf-agent-wechat-auth-token"
 HEARTBEAT_FILES = (
     "wechat-worker-heartbeat.json",
     "dispatch-worker-heartbeat.json",
@@ -51,6 +54,49 @@ def _run(
         check=check,
         capture_output=capture_output,
         text=True,
+    )
+
+
+def _prepare_token_file_for_container(
+    token_file: Path,
+    environment: dict[str, str],
+) -> None:
+    script = """
+import os
+import stat
+
+path = '/auth-token'
+os.chown(path, 10001, 10001)
+os.chmod(path, 0o400)
+status = os.stat(path)
+assert stat.S_ISREG(status.st_mode)
+assert (status.st_uid, status.st_gid, stat.S_IMODE(status.st_mode)) == (10001, 10001, 0o400)
+"""
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "FOWNER",
+            "--mount",
+            f"type=bind,source={token_file},target=/auth-token",
+            "--entrypoint",
+            "python",
+            environment["CF_GATEWAY_IMAGE"],
+            "-c",
+            script,
+        ],
+        environment=environment,
     )
 
 
@@ -147,10 +193,92 @@ def _assert_application_containers(
         "CF_GATEWAY_API_TOKEN",
         "CF_AGENT_GATEWAY_ADMIN_TOKEN",
         "CF_AGENT_WECHAT_TOKEN",
+        "CF_AGENT_WECHAT_TOKEN_FILE",
         "HERMES_API_KEY",
         "CF_AGENT_GATEWAY_DATABASE_URL",
     ):
         assert secret_name not in initializer_environment
+
+
+def _assert_wechat_token_file_contract(
+    compose: list[str],
+    environment: dict[str, str],
+    token_file: Path,
+    token_sentinel: str,
+) -> None:
+    expected_token_source = os.path.normcase(os.path.abspath(token_file))
+    inspected_services = (
+        "heartbeat-init",
+        "migration",
+        "postgres",
+        "synthetic-wechat",
+        *APP_SERVICES,
+    )
+    for service in inspected_services:
+        inspected = _inspect(_container_id(compose, service, environment), environment)
+        container_environment = inspected["Config"]["Env"]
+        serialized_environment = "\n".join(container_environment)
+        assert token_sentinel not in serialized_environment
+        assert not any(
+            entry.startswith("CF_AGENT_WECHAT_TOKEN=") for entry in container_environment
+        )
+
+        file_environment = [
+            entry
+            for entry in container_environment
+            if entry.startswith("CF_AGENT_WECHAT_TOKEN_FILE=")
+        ]
+        token_mounts = [
+            mount for mount in inspected["Mounts"] if mount["Destination"] == TOKEN_CONTAINER_PATH
+        ]
+        if service in TOKEN_FILE_SERVICES:
+            assert file_environment == [f"CF_AGENT_WECHAT_TOKEN_FILE={TOKEN_CONTAINER_PATH}"]
+            assert len(token_mounts) == 1
+            assert token_mounts[0]["Type"] == "bind"
+            assert token_mounts[0]["RW"] is False
+            mount_source = token_mounts[0].get("Source")
+            assert isinstance(mount_source, str)
+            assert os.path.normcase(os.path.abspath(mount_source)) == expected_token_source
+        else:
+            assert file_environment == []
+            assert token_mounts == []
+
+        serialized_surfaces = json.dumps(
+            {
+                "command": inspected["Config"].get("Cmd"),
+                "healthcheck": inspected["Config"].get("Healthcheck"),
+                "labels": inspected["Config"].get("Labels"),
+            },
+            sort_keys=True,
+        )
+        assert token_sentinel not in serialized_surfaces
+
+    script = f"""
+import os
+import stat
+
+path = {TOKEN_CONTAINER_PATH!r}
+status = os.lstat(path)
+assert stat.S_ISREG(status.st_mode)
+assert status.st_nlink == 1
+assert stat.S_IMODE(status.st_mode) == 0o400
+with open(path, 'rb') as token_file:
+    content = token_file.read(4097)
+assert content and len(content) <= 4096
+"""
+    for service in TOKEN_FILE_SERVICES:
+        _run(
+            [*compose, "exec", "--no-TTY", service, "python", "-c", script],
+            environment=environment,
+        )
+
+    logs = _run(
+        [*compose, "logs", "--no-color"],
+        environment=environment,
+        capture_output=True,
+    )
+    assert token_sentinel not in logs.stdout
+    assert token_sentinel not in logs.stderr
 
 
 def _assert_postgresql_16(compose: list[str], environment: dict[str, str]) -> None:
@@ -609,13 +737,17 @@ def main() -> int:
     port = _available_port()
     project_name = f"cf-agent-gateway-e2e-{os.getpid()}"
     with tempfile.TemporaryDirectory(prefix="cf-agent-gateway-e2e-") as temporary:
+        token_sentinel = secrets.token_urlsafe(32)
+        token_file = Path(temporary) / "auth-token"
+        token_file.write_bytes(token_sentinel.encode("ascii"))
+        token_file.chmod(0o600)
+
         env_file = Path(temporary) / "runtime.env"
         env_file.write_text(
             "\n".join(
                 (
                     "CF_GATEWAY_API_TOKEN=e2e-api-value",
                     "CF_AGENT_GATEWAY_ADMIN_TOKEN=e2e-admin-value",
-                    "CF_AGENT_WECHAT_TOKEN=e2e-wechat-value",
                     "HERMES_API_KEY=e2e-hermes-value",
                     "",
                 )
@@ -629,6 +761,7 @@ def main() -> int:
                 "CF_GATEWAY_IMAGE": "cf-agent-gateway:e2e",
                 "CF_GATEWAY_ENV_FILE": str(env_file),
                 "CF_GATEWAY_CONFIG_FILE": str(E2E_CONFIG),
+                "CF_AGENT_WECHAT_TOKEN_HOST_FILE": str(token_file),
                 "CF_AGENT_GATEWAY_DATABASE_URL": (
                     "postgresql+psycopg://gateway:e2e_database_value@"
                     "postgres:5432/gateway?connect_timeout=5"
@@ -656,6 +789,8 @@ def main() -> int:
         primary_error: BaseException | None = None
         try:
             _run([*compose, "config", "--quiet"], environment=environment)
+            _run([*compose, "build", "heartbeat-init"], environment=environment)
+            _prepare_token_file_for_container(token_file, environment)
             _run(
                 [
                     *compose,
@@ -670,6 +805,7 @@ def main() -> int:
                 environment=environment,
             )
             _assert_application_containers(compose, environment)
+            _assert_wechat_token_file_contract(compose, environment, token_file, token_sentinel)
             _assert_postgresql_16(compose, environment)
             _assert_heartbeat_permissions(compose, environment)
             _assert_continuous_heartbeat_updates(compose, environment)
@@ -682,11 +818,15 @@ def main() -> int:
         except BaseException as error:
             primary_error = error
             _run([*compose, "ps", "--all"], environment=environment, check=False)
-            _run(
+            logs = _run(
                 [*compose, "logs", "--no-color", "--timestamps"],
                 environment=environment,
+                capture_output=True,
                 check=False,
             )
+            redacted_logs = "\n".join(part for part in (logs.stdout, logs.stderr) if part)
+            if redacted_logs:
+                print(redacted_logs.replace(token_sentinel, "[REDACTED]"), flush=True)
             raise
         finally:
             try:

@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+CONTRACT_VERSION = 1
+POLL_WORKER_SERVICE = "worker"
+DELIVERY_WORKER_SERVICE = "delivery-worker"
+DISPATCH_WORKER_SERVICE = "dispatch-worker"
+CONTROLLED_SERVICES = (POLL_WORKER_SERVICE, DELIVERY_WORKER_SERVICE)
+TOKEN_ENV = "CF_AGENT_WECHAT_TOKEN"
+TOKEN_FILE_ENV = "CF_AGENT_WECHAT_TOKEN_FILE"
+TOKEN_CONTAINER_PATH = "/run/secrets/cf-agent-wechat-auth-token"
+MAX_TOKEN_FILE_BYTES = 4096
+SERVICE_IDENTITY = (10001, 10001)
+HEARTBEAT_PATHS = {
+    POLL_WORKER_SERVICE: "/run/cf-agent-gateway/wechat-worker-heartbeat.json",
+    DELIVERY_WORKER_SERVICE: "/run/cf-agent-gateway/delivery-worker-heartbeat.json",
+}
+DEFAULT_TIMEOUT_SECONDS = 180.0
+ROOT = Path(__file__).resolve().parents[1]
+COMPOSE_FILE = ROOT / "docker-compose.prod.yml"
+
+
+class ControlError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+@dataclass(frozen=True, slots=True)
+class Deadline:
+    expires_at: float
+    failure_code: str
+
+    def remaining(self) -> float:
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            raise ControlError(self.failure_code)
+        return remaining
+
+
+def _validate_file_status(status: os.stat_result) -> None:
+    unsafe_posix = os.name == "posix" and (
+        stat.S_IMODE(status.st_mode) not in {0o400, 0o600}
+        or (status.st_uid, status.st_gid) != SERVICE_IDENTITY
+    )
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+        or not 1 <= status.st_size <= MAX_TOKEN_FILE_BYTES
+        or unsafe_posix
+    ):
+        raise ValueError
+
+
+def _validate_host_token_source(source: str, deadline: Deadline) -> None:
+    try:
+        deadline.remaining()
+        if not source or os.path.abspath(source) != source:
+            raise ValueError
+        before = os.lstat(source)
+        _validate_file_status(before)
+        flags = os.O_RDONLY | sum(
+            getattr(os, name, 0) for name in ("O_BINARY", "O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK")
+        )
+        descriptor = os.open(source, flags)
+        try:
+            opened = os.fstat(descriptor)
+            _validate_file_status(opened)
+            content = os.read(descriptor, MAX_TOKEN_FILE_BYTES + 1)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        _validate_file_status(after)
+        ctime_changed = os.name == "posix" and before.st_ctime_ns != opened.st_ctime_ns
+        if (
+            before[:7] != opened[:7]
+            or opened[:7] != after[:7]
+            or before.st_mtime_ns != opened.st_mtime_ns
+            or ctime_changed
+            or opened.st_mtime_ns != after.st_mtime_ns
+            or opened.st_ctime_ns != after.st_ctime_ns
+            or len(content) != after.st_size
+        ):
+            raise ValueError
+        if any(byte < 0x21 or byte > 0x7E for byte in content):
+            raise ValueError
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise ControlError("token_file_invalid") from None
+    deadline.remaining()
+
+
+def _run(arguments: list[str], *, deadline: Deadline, error_code: str) -> str:
+    try:
+        result = subprocess.run(
+            arguments,
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=deadline.remaining(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ControlError(error_code) from None
+    if result.returncode != 0:
+        raise ControlError(error_code)
+    return result.stdout
+
+
+def _compose(
+    arguments: list[str],
+    *,
+    deadline: Deadline,
+    error_code: str = "runtime_control_unavailable",
+) -> str:
+    return _run(
+        [
+            "docker",
+            "compose",
+            "--file",
+            str(COMPOSE_FILE),
+            "--profile",
+            "worker",
+            *arguments,
+        ],
+        deadline=deadline,
+        error_code=error_code,
+    )
+
+
+def _token_host_source(deadline: Deadline) -> str:
+    output = _compose(["config", "--format", "json"], deadline=deadline)
+    try:
+        services = json.loads(output)["services"]
+        sources: set[str] = set()
+        for service in CONTROLLED_SERVICES:
+            volumes = services[service]["volumes"]
+            mounts = [
+                item
+                for item in volumes
+                if isinstance(item, dict) and item.get("target") == TOKEN_CONTAINER_PATH
+            ]
+            if len(mounts) != 1:
+                raise ValueError
+            mount = mounts[0]
+            source = mount.get("source")
+            if (
+                mount.get("type") != "bind"
+                or mount.get("read_only") is not True
+                or not isinstance(source, str)
+                or not source
+            ):
+                raise ValueError
+            candidate = source if os.path.isabs(source) else os.path.join(ROOT, source)
+            sources.add(os.path.normcase(os.path.abspath(candidate)))
+        if len(sources) != 1:
+            raise ValueError
+        return sources.pop()
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ControlError("token_file_invalid") from None
+
+
+def _container_id(service: str, *, deadline: Deadline) -> str | None:
+    output = _compose(
+        ["ps", "--all", "--quiet", service],
+        deadline=deadline,
+    )
+    identifiers = output.split()
+    if not identifiers:
+        return None
+    if len(identifiers) != 1:
+        raise ControlError("runtime_control_unavailable")
+    return identifiers[0]
+
+
+def _inspect(container_id: str, *, deadline: Deadline) -> dict[str, Any]:
+    output = _run(
+        ["docker", "inspect", container_id],
+        deadline=deadline,
+        error_code="runtime_control_unavailable",
+    )
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError):
+        raise ControlError("runtime_control_unavailable") from None
+    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+        raise ControlError("runtime_control_unavailable")
+    return payload[0]
+
+
+def _token_contract_valid(inspection: dict[str, Any], token_host_source: str) -> bool:
+    config = inspection.get("Config")
+    mounts = inspection.get("Mounts")
+    if not isinstance(config, dict) or not isinstance(mounts, list):
+        return False
+    environment = config.get("Env")
+    if not isinstance(environment, list) or not all(isinstance(item, str) for item in environment):
+        return False
+    if any(item.startswith(f"{TOKEN_ENV}=") for item in environment):
+        return False
+    file_entries = [item for item in environment if item.startswith(f"{TOKEN_FILE_ENV}=")]
+    if file_entries != [f"{TOKEN_FILE_ENV}={TOKEN_CONTAINER_PATH}"]:
+        return False
+    token_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == TOKEN_CONTAINER_PATH
+    ]
+    source = token_mounts[0].get("Source") if len(token_mounts) == 1 else None
+    return (
+        len(token_mounts) == 1
+        and token_mounts[0].get("Type") == "bind"
+        and token_mounts[0].get("RW") is False
+        and isinstance(source, str)
+        and os.path.normcase(os.path.abspath(source)) == token_host_source
+    )
+
+
+def _heartbeat_age(service: str, *, deadline: Deadline) -> float | None:
+    script = """
+import json
+import time
+from datetime import datetime
+
+with open(PATH, encoding='utf-8') as heartbeat_file:
+    updated_at = json.load(heartbeat_file)['updated_at']
+timestamp = datetime.fromisoformat(updated_at.replace('Z', '+00:00')).timestamp()
+print(f'{max(0.0, time.time() - timestamp):.6f}')
+""".replace("PATH", repr(HEARTBEAT_PATHS[service]))
+    try:
+        output = _compose(
+            ["exec", "--no-TTY", service, "python", "-c", script],
+            deadline=deadline,
+        )
+    except ControlError:
+        return None
+    try:
+        age = float(output.strip())
+    except (TypeError, ValueError):
+        return None
+    if age < 0:
+        return None
+    return age
+
+
+def _service_snapshot(
+    service: str,
+    *,
+    deadline: Deadline,
+    token_host_source: str,
+) -> tuple[str, float | None, bool]:
+    container_id = _container_id(service, deadline=deadline)
+    if container_id is None:
+        return ("not_created", None, False)
+
+    inspection = _inspect(container_id, deadline=deadline)
+    state = inspection.get("State")
+    if not isinstance(state, dict):
+        return ("unknown", None, False)
+    running = state.get("Running") is True
+    token_valid = _token_contract_valid(inspection, token_host_source)
+    if not running:
+        return ("stopped", None, token_valid)
+
+    health_payload = state.get("Health")
+    health = health_payload.get("Status") if isinstance(health_payload, dict) else None
+    if health not in {"healthy", "starting", "unhealthy"}:
+        health = "unknown"
+    return (
+        health,
+        _heartbeat_age(service, deadline=deadline),
+        token_valid,
+    )
+
+
+def _heartbeat_max_age() -> float:
+    try:
+        value = float(os.getenv("CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS", "30"))
+    except (TypeError, ValueError):
+        raise ControlError("runtime_control_invalid") from None
+    if not 0 < value <= 600:
+        raise ControlError("runtime_control_invalid")
+    return value
+
+
+def _status(*, deadline: Deadline, strict_token: bool = False) -> dict[str, Any]:
+    try:
+        token_host_source = _token_host_source(deadline)
+        _validate_host_token_source(token_host_source, deadline)
+    except ControlError as error:
+        if strict_token or error.code != "token_file_invalid":
+            raise
+        return {
+            "worker_health": "unknown",
+            "delivery_health": "unknown",
+            "heartbeat_age": None,
+            "token_contract_valid": False,
+            "ready": False,
+        }
+    snapshots = {
+        service: _service_snapshot(
+            service,
+            deadline=deadline,
+            token_host_source=token_host_source,
+        )
+        for service in CONTROLLED_SERVICES
+    }
+    ages = [snapshot[1] for snapshot in snapshots.values()]
+    heartbeat_age = (
+        round(max(age for age in ages if age is not None), 3)
+        if all(age is not None for age in ages)
+        else None
+    )
+    max_age = _heartbeat_max_age()
+    token_valid = all(snapshot[2] for snapshot in snapshots.values())
+    ready = (
+        all(snapshot[0] == "healthy" for snapshot in snapshots.values())
+        and all(age is not None and age <= max_age for age in ages)
+        and token_valid
+    )
+    return {
+        "worker_health": snapshots[POLL_WORKER_SERVICE][0],
+        "delivery_health": snapshots[DELIVERY_WORKER_SERVICE][0],
+        "heartbeat_age": heartbeat_age,
+        "token_contract_valid": token_valid,
+        "ready": ready,
+    }
+
+
+def _wait_until_stopped(*, deadline: Deadline) -> None:
+    while True:
+        running = []
+        for service in CONTROLLED_SERVICES:
+            container_id = _container_id(service, deadline=deadline)
+            if container_id is None:
+                running.append(False)
+                continue
+            inspection = _inspect(container_id, deadline=deadline)
+            state = inspection.get("State")
+            running.append(isinstance(state, dict) and state.get("Running") is True)
+        if not any(running):
+            return
+        time.sleep(min(1, deadline.remaining()))
+
+
+def _stop(*, deadline: Deadline) -> dict[str, bool]:
+    stop_timeout = max(1, int(deadline.remaining()))
+    _compose(
+        ["stop", "--timeout", str(stop_timeout), *CONTROLLED_SERVICES],
+        deadline=deadline,
+        error_code="runtime_stop_failed",
+    )
+    _wait_until_stopped(deadline=deadline)
+    return {"stopped": True}
+
+
+def _start(*, deadline: Deadline) -> dict[str, Any]:
+    token_host_source = _token_host_source(deadline)
+    _validate_host_token_source(token_host_source, deadline)
+    _compose(
+        ["up", "--detach", "--no-deps", "--force-recreate", *CONTROLLED_SERVICES],
+        deadline=deadline,
+        error_code="runtime_start_failed",
+    )
+    while True:
+        payload = _status(deadline=deadline, strict_token=True)
+        if payload["ready"] is True:
+            return payload
+        time.sleep(min(1, deadline.remaining()))
+
+
+def _contract() -> dict[str, Any]:
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "poll_worker_service": POLL_WORKER_SERVICE,
+        "delivery_worker_service": DELIVERY_WORKER_SERVICE,
+        "dispatch_worker_service": DISPATCH_WORKER_SERVICE,
+        "token_mode": "file",
+        "token_container_path": TOKEN_CONTAINER_PATH,
+    }
+
+
+def main(arguments: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="wechat-runtime-control")
+    parser.add_argument("action", choices=("contract", "stop", "start", "status"))
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+    )
+    options = parser.parse_args(arguments)
+    if not 0 < options.timeout_seconds <= 600:
+        parser.error("timeout must be between 0 and 600 seconds")
+
+    failure_code = (
+        "runtime_control_unavailable"
+        if options.action == "status"
+        else f"runtime_{options.action}_failed"
+    )
+    deadline = Deadline(time.monotonic() + options.timeout_seconds, failure_code)
+
+    try:
+        if options.action == "contract":
+            payload = _contract()
+        elif options.action == "stop":
+            payload = _stop(deadline=deadline)
+        elif options.action == "start":
+            payload = _start(deadline=deadline)
+        else:
+            payload = _status(deadline=deadline)
+    except ControlError as error:
+        print(json.dumps({"error_code": error.code}, sort_keys=True), file=sys.stderr)
+        return 1
+
+    print(json.dumps(payload, sort_keys=True))
+    return int(options.action == "status" and payload["ready"] is not True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
