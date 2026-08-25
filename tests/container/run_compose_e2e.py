@@ -18,10 +18,25 @@ ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_COMPOSE = ROOT / "docker-compose.prod.yml"
 E2E_COMPOSE = ROOT / "tests" / "container" / "docker-compose.e2e.yml"
 E2E_CONFIG = ROOT / "tests" / "container" / "production.yaml"
+RUNTIME_CONTROL = ROOT / "deploy" / "wechat-runtime-control"
 APP_SERVICES = ("gateway", "worker", "dispatch-worker", "delivery-worker")
 WORKER_SERVICES = ("worker", "dispatch-worker", "delivery-worker")
 TOKEN_FILE_SERVICES = ("worker", "delivery-worker")
 TOKEN_CONTAINER_PATH = "/run/secrets/cf-agent-wechat-auth-token"
+RUNTIME_CONTROL_ENVIRONMENT = (
+    "COMPOSE_PROJECT_NAME",
+    "CF_GATEWAY_IMAGE",
+    "CF_GATEWAY_ENV_FILE",
+    "CF_GATEWAY_CONFIG_FILE",
+    "CF_AGENT_WECHAT_TOKEN_HOST_FILE",
+    "CF_AGENT_GATEWAY_DATABASE_URL",
+    "CF_GATEWAY_BIND_ADDRESS",
+    "CF_GATEWAY_PORT",
+    "CF_GATEWAY_WORKER_CONCURRENCY",
+    "CF_GATEWAY_WORKER_HEARTBEAT_INTERVAL_SECONDS",
+    "CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS",
+    "CF_GATEWAY_STOP_GRACE_PERIOD",
+)
 HEARTBEAT_FILES = (
     "wechat-worker-heartbeat.json",
     "dispatch-worker-heartbeat.json",
@@ -54,6 +69,28 @@ def _run(
         check=check,
         capture_output=capture_output,
         text=True,
+    )
+
+
+def _run_runtime_control(
+    action: str,
+    environment: dict[str, str],
+    *,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "sudo",
+            "--non-interactive",
+            f"--preserve-env={','.join(RUNTIME_CONTROL_ENVIRONMENT)}",
+            str(RUNTIME_CONTROL),
+            action,
+            "--timeout-seconds",
+            str(timeout_seconds),
+        ],
+        environment=environment,
+        capture_output=True,
+        check=False,
     )
 
 
@@ -588,6 +625,63 @@ def _assert_restart_recovery(
     assert _runtime_health(port)["components"]["dispatch_worker"]["status"] == "ok"
 
 
+def _assert_runtime_control_failed_release_and_recovery(
+    compose: list[str],
+    environment: dict[str, str],
+    port: int,
+    token_file: Path,
+    token_sentinel: str,
+) -> None:
+    protected_services = ("gateway", "dispatch-worker", "postgres", "migration")
+    protected = {
+        service: _inspect(_container_id(compose, service, environment), environment)
+        for service in protected_services
+    }
+
+    def assert_protected_services_unchanged() -> None:
+        for service in protected_services:
+            current = _inspect(_container_id(compose, service, environment), environment)
+            assert current["Id"] == protected[service]["Id"]
+            if service == "migration":
+                assert current["State"]["Running"] is False
+                assert current["State"]["ExitCode"] == 0
+                assert current["State"]["StartedAt"] == protected[service]["State"]["StartedAt"]
+                assert current["State"]["FinishedAt"] == protected[service]["State"]["FinishedAt"]
+            else:
+                assert current["State"]["Running"] is True
+                assert current["State"]["Health"]["Status"] == "healthy"
+
+    failing_environment = environment.copy()
+    failing_environment["CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS"] = "1e-9"
+    failed = _run_runtime_control("start", failing_environment, timeout_seconds=30)
+    assert failed.returncode == 1
+    assert failed.stdout == ""
+    assert json.loads(failed.stderr) == {"error_code": "runtime_start_failed"}
+    serialized_failure = failed.stdout + failed.stderr
+    for protected_value in (
+        token_sentinel,
+        str(token_file),
+        environment["CF_AGENT_GATEWAY_DATABASE_URL"],
+    ):
+        assert protected_value not in serialized_failure
+
+    for service in TOKEN_FILE_SERVICES:
+        inspected = _inspect(_container_id(compose, service, environment), environment)
+        assert inspected["State"]["Running"] is False
+    assert_protected_services_unchanged()
+
+    recovered = _run_runtime_control("start", environment, timeout_seconds=90)
+    assert recovered.returncode == 0
+    assert recovered.stderr == ""
+    payload = json.loads(recovered.stdout)
+    assert payload["ready"] is True
+    assert payload["token_contract_valid"] is True
+    for service in TOKEN_FILE_SERVICES:
+        _wait_for_healthy(compose, service, environment)
+    assert_protected_services_unchanged()
+    _assert_runtime_health(port)
+
+
 def _wait_for_clean_stop(
     compose: list[str],
     service: str,
@@ -758,6 +852,7 @@ def main() -> int:
         environment = os.environ.copy()
         environment.update(
             {
+                "COMPOSE_PROJECT_NAME": project_name,
                 "CF_GATEWAY_IMAGE": "cf-agent-gateway:e2e",
                 "CF_GATEWAY_ENV_FILE": str(env_file),
                 "CF_GATEWAY_CONFIG_FILE": str(E2E_CONFIG),
@@ -814,6 +909,13 @@ def main() -> int:
             _assert_token_boundaries(port)
             _assert_stale_heartbeat_and_recovery(compose, environment, port)
             _assert_restart_recovery(compose, environment, port)
+            _assert_runtime_control_failed_release_and_recovery(
+                compose,
+                environment,
+                port,
+                token_file,
+                token_sentinel,
+            )
             _assert_clean_shutdown(compose, environment)
         except BaseException as error:
             primary_error = error

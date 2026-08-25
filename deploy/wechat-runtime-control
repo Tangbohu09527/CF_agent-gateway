@@ -17,6 +17,7 @@ POLL_WORKER_SERVICE = "worker"
 DELIVERY_WORKER_SERVICE = "delivery-worker"
 DISPATCH_WORKER_SERVICE = "dispatch-worker"
 CONTROLLED_SERVICES = (POLL_WORKER_SERVICE, DELIVERY_WORKER_SERVICE)
+PROHIBITED_TOKEN_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration")
 TOKEN_ENV = "CF_AGENT_WECHAT_TOKEN"
 TOKEN_FILE_ENV = "CF_AGENT_WECHAT_TOKEN_FILE"
 TOKEN_CONTAINER_PATH = "/run/secrets/cf-agent-wechat-auth-token"
@@ -27,6 +28,7 @@ HEARTBEAT_PATHS = {
     DELIVERY_WORKER_SERVICE: "/run/cf-agent-gateway/delivery-worker-heartbeat.json",
 }
 DEFAULT_TIMEOUT_SECONDS = 180.0
+START_ROLLBACK_TIMEOUT_SECONDS = 30.0
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "docker-compose.prod.yml"
 
@@ -110,6 +112,8 @@ def _run(arguments: list[str], *, deadline: Deadline, error_code: str) -> str:
             text=True,
             timeout=deadline.remaining(),
         )
+    except subprocess.TimeoutExpired:
+        raise ControlError(deadline.failure_code) from None
     except (OSError, subprocess.SubprocessError):
         raise ControlError(error_code) from None
     if result.returncode != 0:
@@ -138,19 +142,43 @@ def _compose(
     )
 
 
+def _normalized_host_source(source: str) -> str:
+    candidate = source if os.path.isabs(source) else os.path.join(ROOT, source)
+    return os.path.normcase(os.path.abspath(candidate))
+
+
+def _rendered_token_contract(
+    services: dict[str, Any], service: str
+) -> tuple[dict[str, Any], list[Any], list[dict[str, Any]]]:
+    definition = services[service]
+    if not isinstance(definition, dict):
+        raise ValueError
+    environment = definition.get("environment", {})
+    volumes = definition.get("volumes", [])
+    if not isinstance(environment, dict) or not isinstance(volumes, list):
+        raise ValueError
+    mounts = [
+        item
+        for item in volumes
+        if isinstance(item, dict) and item.get("target") == TOKEN_CONTAINER_PATH
+    ]
+    return environment, volumes, mounts
+
+
 def _token_host_source(deadline: Deadline) -> str:
     output = _compose(["config", "--format", "json"], deadline=deadline)
     try:
         services = json.loads(output)["services"]
+        if not isinstance(services, dict):
+            raise ValueError
         sources: set[str] = set()
         for service in CONTROLLED_SERVICES:
-            volumes = services[service]["volumes"]
-            mounts = [
-                item
-                for item in volumes
-                if isinstance(item, dict) and item.get("target") == TOKEN_CONTAINER_PATH
-            ]
-            if len(mounts) != 1:
+            environment, _, mounts = _rendered_token_contract(services, service)
+            if (
+                TOKEN_ENV in environment
+                or environment.get(TOKEN_FILE_ENV) != TOKEN_CONTAINER_PATH
+                or len(mounts) != 1
+            ):
                 raise ValueError
             mount = mounts[0]
             source = mount.get("source")
@@ -161,13 +189,27 @@ def _token_host_source(deadline: Deadline) -> str:
                 or not source
             ):
                 raise ValueError
-            candidate = source if os.path.isabs(source) else os.path.join(ROOT, source)
-            sources.add(os.path.normcase(os.path.abspath(candidate)))
+            sources.add(_normalized_host_source(source))
         if len(sources) != 1:
             raise ValueError
-        return sources.pop()
+        token_host_source = next(iter(sources))
+        for service in PROHIBITED_TOKEN_SERVICES:
+            environment, volumes, mounts = _rendered_token_contract(services, service)
+            mounted_sources = {
+                _normalized_host_source(item["source"])
+                for item in volumes
+                if isinstance(item, dict) and isinstance(item.get("source"), str) and item["source"]
+            }
+            if (
+                TOKEN_ENV in environment
+                or TOKEN_FILE_ENV in environment
+                or mounts
+                or token_host_source in mounted_sources
+            ):
+                raise ValueError
+        return token_host_source
     except (AttributeError, KeyError, TypeError, ValueError):
-        raise ControlError("token_file_invalid") from None
+        raise ControlError("token_source_conflict") from None
 
 
 def _container_id(service: str, *, deadline: Deadline) -> str | None:
@@ -364,19 +406,39 @@ def _stop(*, deadline: Deadline) -> dict[str, bool]:
     return {"stopped": True}
 
 
+def _rollback_controlled_workers() -> None:
+    cleanup_deadline = Deadline(
+        time.monotonic() + START_ROLLBACK_TIMEOUT_SECONDS,
+        "runtime_start_rollback_failed",
+    )
+    try:
+        _stop(deadline=cleanup_deadline)
+    except Exception:
+        raise ControlError("runtime_start_rollback_failed") from None
+
+
 def _start(*, deadline: Deadline) -> dict[str, Any]:
     token_host_source = _token_host_source(deadline)
     _validate_host_token_source(token_host_source, deadline)
-    _compose(
-        ["up", "--detach", "--no-deps", "--force-recreate", *CONTROLLED_SERVICES],
-        deadline=deadline,
-        error_code="runtime_start_failed",
-    )
-    while True:
-        payload = _status(deadline=deadline, strict_token=True)
-        if payload["ready"] is True:
-            return payload
-        time.sleep(min(1, deadline.remaining()))
+    started_or_recreated = False
+    try:
+        _compose(
+            ["up", "--detach", "--no-deps", "--force-recreate", *CONTROLLED_SERVICES],
+            deadline=deadline,
+            error_code="runtime_start_failed",
+        )
+        started_or_recreated = True
+        while True:
+            payload = _status(deadline=deadline, strict_token=True)
+            if payload["ready"] is True:
+                return payload
+            time.sleep(min(1, deadline.remaining()))
+    except Exception as error:
+        if started_or_recreated:
+            _rollback_controlled_workers()
+        if isinstance(error, ControlError):
+            raise
+        raise ControlError("runtime_start_failed") from None
 
 
 def _contract() -> dict[str, Any]:

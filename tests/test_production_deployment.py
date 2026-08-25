@@ -260,6 +260,9 @@ def test_container_e2e_uses_isolated_postgresql_and_synthetic_adapters() -> None
         "gateway-must-not-write",
         "heartbeat-init",
         "com.docker.compose.project",
+        "wechat-runtime-control",
+        "COMPOSE_PROJECT_NAME",
+        "runtime_start_failed",
     ):
         assert evidence in runner
 

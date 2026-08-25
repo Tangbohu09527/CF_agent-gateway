@@ -34,6 +34,27 @@ deploy/wechat-runtime-control <contract|stop|start|status>
 The JSON key order is not significant. No database address, credential, or
 Secret metadata is part of the public contract.
 
+## Execution identity
+
+`contract` does not call Docker or read the Token. Any user who can read the
+deployed repository may run it without elevated privileges.
+
+`stop`, `start`, and `status` must be run by `root` or by a trusted
+administrative identity that can access the host's rootful Docker daemon, read
+the protected host Token File, and read the production Compose file and its
+env-file. Missing any required access fails closed.
+
+On CFserver, keep `linxi` out of the `docker` group. Establish sudo credentials
+once, then use non-interactive sudo for each control operation:
+
+```console
+sudo -v
+sudo -n /opt/cf-agent-gateway/deploy/wechat-runtime-control <stop|start|status>
+```
+
+Do not add ordinary users to the `docker` group or loosen the Token File's
+established ownership or mode to make it readable.
+
 ## Token File
 
 Production uses `CF_AGENT_WECHAT_TOKEN_FILE` as its only authoritative token
