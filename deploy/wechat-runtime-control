@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ POLL_WORKER_SERVICE = "worker"
 DELIVERY_WORKER_SERVICE = "delivery-worker"
 DISPATCH_WORKER_SERVICE = "dispatch-worker"
 CONTROLLED_SERVICES = (POLL_WORKER_SERVICE, DELIVERY_WORKER_SERVICE)
+UNCONTROLLED_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration", "postgres")
 PROHIBITED_TOKEN_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration")
 TOKEN_ENV = "CF_AGENT_WECHAT_TOKEN"
 TOKEN_FILE_ENV = "CF_AGENT_WECHAT_TOKEN_FILE"
@@ -29,6 +32,7 @@ HEARTBEAT_PATHS = {
 }
 DEFAULT_TIMEOUT_SECONDS = 180.0
 START_ROLLBACK_TIMEOUT_SECONDS = 30.0
+PROCESS_TERMINATE_TIMEOUT_SECONDS = 2.0
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "docker-compose.prod.yml"
 
@@ -103,22 +107,64 @@ def _validate_host_token_source(source: str, deadline: Deadline) -> None:
 
 
 def _run(arguments: list[str], *, deadline: Deadline, error_code: str) -> str:
-    try:
-        result = subprocess.run(
-            arguments,
-            cwd=ROOT,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=deadline.remaining(),
+    popen_options: dict[str, Any] = {
+        "cwd": ROOT,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if os.name == "posix":
+        popen_options["start_new_session"] = True
+    elif os.name == "nt":
+        popen_options["creationflags"] = getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
         )
-    except subprocess.TimeoutExpired:
-        raise ControlError(deadline.failure_code) from None
+    try:
+        process = subprocess.Popen(arguments, **popen_options)
     except (OSError, subprocess.SubprocessError):
         raise ControlError(error_code) from None
-    if result.returncode != 0:
+    try:
+        stdout, _ = process.communicate(timeout=deadline.remaining())
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process)
+        raise ControlError(deadline.failure_code) from None
+    except (OSError, subprocess.SubprocessError):
+        _terminate_process_group(process)
+        raise ControlError(error_code) from None
+    if process.returncode != 0:
         raise ControlError(error_code)
-    return result.stdout
+    return stdout
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        elif os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            process.terminate()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.communicate(timeout=PROCESS_TERMINATE_TIMEOUT_SECONDS)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    with suppress(OSError, subprocess.TimeoutExpired):
+        process.communicate(timeout=PROCESS_TERMINATE_TIMEOUT_SECONDS)
 
 
 def _compose(
@@ -212,17 +258,54 @@ def _token_host_source(deadline: Deadline) -> str:
         raise ControlError("token_source_conflict") from None
 
 
-def _container_id(service: str, *, deadline: Deadline) -> str | None:
+def _container_id(
+    service: str,
+    *,
+    deadline: Deadline,
+    error_code: str = "runtime_control_unavailable",
+) -> str | None:
     output = _compose(
         ["ps", "--all", "--quiet", service],
         deadline=deadline,
+        error_code=error_code,
     )
     identifiers = output.split()
     if not identifiers:
         return None
     if len(identifiers) != 1:
-        raise ControlError("runtime_control_unavailable")
+        raise ControlError(error_code)
     return identifiers[0]
+
+
+def _container_ids(
+    services: tuple[str, ...],
+    *,
+    deadline: Deadline,
+    error_code: str,
+) -> dict[str, str | None]:
+    return {
+        service: _container_id(
+            service,
+            deadline=deadline,
+            error_code=error_code,
+        )
+        for service in services
+    }
+
+
+def _required_controlled_container_ids(*, deadline: Deadline) -> tuple[str, str]:
+    identifiers = _container_ids(
+        CONTROLLED_SERVICES,
+        deadline=deadline,
+        error_code="runtime_start_prepare_failed",
+    )
+    ordered = tuple(identifiers[service] for service in CONTROLLED_SERVICES)
+    if any(identifier is None for identifier in ordered):
+        raise ControlError("runtime_start_prepare_failed")
+    concrete = tuple(identifier for identifier in ordered if identifier is not None)
+    if len(concrete) != len(CONTROLLED_SERVICES) or len(set(concrete)) != len(concrete):
+        raise ControlError("runtime_start_prepare_failed")
+    return (concrete[0], concrete[1])
 
 
 def _inspect(container_id: str, *, deadline: Deadline) -> dict[str, Any]:
@@ -420,25 +503,51 @@ def _rollback_controlled_workers() -> None:
 def _start(*, deadline: Deadline) -> dict[str, Any]:
     token_host_source = _token_host_source(deadline)
     _validate_host_token_source(token_host_source, deadline)
-    started_or_recreated = False
+    prepare_deadline = Deadline(deadline.expires_at, "runtime_start_prepare_failed")
+    uncontrolled_before = _container_ids(
+        UNCONTROLLED_SERVICES,
+        deadline=prepare_deadline,
+        error_code="runtime_start_prepare_failed",
+    )
+    prepare_attempted = False
+    stage_error_code = "runtime_start_prepare_failed"
     try:
+        prepare_attempted = True
         _compose(
-            ["up", "--detach", "--no-deps", "--force-recreate", *CONTROLLED_SERVICES],
-            deadline=deadline,
-            error_code="runtime_start_failed",
+            ["up", "--no-start", "--no-deps", "--force-recreate", *CONTROLLED_SERVICES],
+            deadline=prepare_deadline,
+            error_code="runtime_start_prepare_failed",
         )
-        started_or_recreated = True
+        controlled_container_ids = _required_controlled_container_ids(deadline=prepare_deadline)
+        uncontrolled_after = _container_ids(
+            UNCONTROLLED_SERVICES,
+            deadline=prepare_deadline,
+            error_code="runtime_start_prepare_failed",
+        )
+        if uncontrolled_after != uncontrolled_before:
+            raise ControlError("runtime_start_prepare_failed")
+
+        stage_error_code = "runtime_start_launch_failed"
+        launch_deadline = Deadline(deadline.expires_at, stage_error_code)
+        _run(
+            ["docker", "start", *controlled_container_ids],
+            deadline=launch_deadline,
+            error_code=stage_error_code,
+        )
+
+        stage_error_code = "runtime_start_ready_timeout"
+        ready_deadline = Deadline(deadline.expires_at, stage_error_code)
         while True:
-            payload = _status(deadline=deadline, strict_token=True)
+            payload = _status(deadline=ready_deadline, strict_token=True)
             if payload["ready"] is True:
                 return payload
-            time.sleep(min(1, deadline.remaining()))
+            time.sleep(min(1, ready_deadline.remaining()))
     except Exception as error:
-        if started_or_recreated:
+        if prepare_attempted:
             _rollback_controlled_workers()
         if isinstance(error, ControlError):
             raise
-        raise ControlError("runtime_start_failed") from None
+        raise ControlError(stage_error_code) from None
 
 
 def _contract() -> dict[str, Any]:

@@ -656,7 +656,7 @@ def _assert_runtime_control_failed_release_and_recovery(
     failed = _run_runtime_control("start", failing_environment, timeout_seconds=30)
     assert failed.returncode == 1
     assert failed.stdout == ""
-    assert json.loads(failed.stderr) == {"error_code": "runtime_start_failed"}
+    assert json.loads(failed.stderr) == {"error_code": "runtime_start_ready_timeout"}
     serialized_failure = failed.stdout + failed.stderr
     for protected_value in (
         token_sentinel,

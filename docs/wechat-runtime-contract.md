@@ -136,15 +136,35 @@ Other services are not command arguments. Success prints
 
 ### start
 
-`start` runs Compose `up --detach --no-deps --force-recreate` for exactly the
-two controlled workers. `--no-deps` prevents this control action from starting
-dependencies or running the migration service. `--force-recreate` rebinds the
-Token File after atomic host-side rotation instead of retaining the prior bind
-mount inode. The control script issues no database command; once running, the
-Workers resume their normal durable processing and may write business state.
-`start` returns success only after both containers are running, Docker reports
-both healthchecks as `healthy`, both heartbeat files are fresh, and both
-container configurations satisfy the Token File contract.
+`start` first performs Token and rendered-Compose preflight. It snapshots the
+Container IDs of `gateway`, `dispatch-worker`, `migration`, and `postgres`,
+then runs bounded Compose
+`up --no-start --no-deps --force-recreate worker delivery-worker`. This prepare
+step recreates only the controlled containers without starting them or their
+dependencies. The controller requires exactly one unique Container ID for each
+controlled service and verifies that every non-controlled Container ID is
+unchanged.
+
+The controller then runs `docker start` with those two exact Container IDs and
+enters the existing readiness loop. A Compose CLI return is not readiness
+evidence. Success is proved only when Docker reports both healthchecks as
+`healthy`, both heartbeat files are fresh, and both container configurations
+satisfy the Token File contract. Once `ready` is true, `start` returns the
+existing five-field status object immediately.
+
+Prepare, launch, and readiness share the operation deadline. Subprocesses receive
+no stdin, capture output without forwarding it, and run in a separately
+terminable process group so a timed-out Compose CLI cannot remain as a hidden
+gate. A failure after prepare begins rolls back by stopping only `worker` and
+`delivery-worker`; rollback failure is reported separately. The control script
+issues no database or migration command. Once running, the Workers resume their
+normal durable processing and may write business state.
+
+This launch split still requires CFserver acceptance after deployment: repeat
+fresh QR, confirm automatic release as soon as readiness is true, recheck the P0
+database no-side-effect baseline, process one unique message through the full
+chain, and verify Docker restart and host reboot behavior. That production
+acceptance has not been completed by this repository change.
 
 ### status
 
@@ -194,6 +214,10 @@ Exit codes are:
 
 Operational failures print only a fixed JSON `error_code` to standard error.
 Docker stdout, stderr, inspect payloads, and exception text are never forwarded.
+Start-stage failures use `runtime_start_prepare_failed`,
+`runtime_start_launch_failed`, `runtime_start_ready_timeout`, or
+`runtime_start_rollback_failed`. Token preflight retains its existing stable
+Token error codes.
 
 ## Secret management
 

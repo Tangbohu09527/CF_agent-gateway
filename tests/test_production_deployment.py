@@ -16,6 +16,7 @@ DOCKERIGNORE_PATH = ROOT / ".dockerignore"
 CONTAINER_E2E_COMPOSE_PATH = ROOT / "tests" / "container" / "docker-compose.e2e.yml"
 CONTAINER_E2E_CONFIG_PATH = ROOT / "tests" / "container" / "production.yaml"
 CONTAINER_E2E_RUNNER_PATH = ROOT / "tests" / "container" / "run_compose_e2e.py"
+RUNTIME_CONTROL_PATH = ROOT / "deploy" / "wechat-runtime-control"
 SYSTEMD_DIRECTORY = ROOT / "deploy" / "systemd"
 
 WORKERS = {
@@ -262,13 +263,25 @@ def test_container_e2e_uses_isolated_postgresql_and_synthetic_adapters() -> None
         "com.docker.compose.project",
         "wechat-runtime-control",
         "COMPOSE_PROJECT_NAME",
-        "runtime_start_failed",
+        "runtime_start_ready_timeout",
     ):
         assert evidence in runner
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "container-e2e:" in workflow
     assert "python tests/container/run_compose_e2e.py" in workflow
+
+
+def test_runtime_control_uses_bounded_prepare_and_exact_container_launch() -> None:
+    runtime_control = RUNTIME_CONTROL_PATH.read_text(encoding="utf-8")
+
+    assert '["up", "--no-start", "--no-deps", "--force-recreate"' in runtime_control
+    assert '["up", "--detach", "--no-deps", "--force-recreate"' not in runtime_control
+    assert '["docker", "start", *controlled_container_ids]' in runtime_control
+    assert (
+        'UNCONTROLLED_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration", "postgres")'
+        in runtime_control
+    )
 
 
 @pytest.mark.parametrize(
