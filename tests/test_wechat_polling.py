@@ -464,7 +464,7 @@ def test_forward_window_after_checkpoint_advances_without_rewind(
     assert (stored.last_local_id, stored.regression_generation) == (13, 0)
 
 
-def test_empty_window_does_not_rewind_checkpoint(
+def test_latest_empty_window_fails_closed_without_rebasing_checkpoint(
     checkpoint_store: WechatSyncCheckpointStore,
 ) -> None:
     checkpoint_store.initialize(
@@ -478,6 +478,32 @@ def test_empty_window_does_not_rewind_checkpoint(
         FakeWechatClient(messages={CHAT_ID: []}),
         checkpoint_store,
         sink,
+    ).poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.chats_failed == 1
+    assert result.messages_seen == 0
+    assert result.failures[0].code == WechatCheckpointContinuityError.code
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (15, 0)
+
+
+def test_backfill_empty_window_does_not_rewind_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+    )
+    sink = RecordingSink()
+
+    result = WechatPollingService(
+        FakeWechatClient(messages={CHAT_ID: []}),
+        checkpoint_store,
+        sink,
+        bootstrap_mode="backfill",
     ).poll_once()
 
     stored = checkpoint(checkpoint_store)

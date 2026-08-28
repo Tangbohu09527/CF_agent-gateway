@@ -67,10 +67,11 @@ fields are missing or the checkpoint local ID is ambiguous, continuity remains
 fail-closed/degraded. An identical ambiguity warning is emitted once per poller process
 state rather than every polling interval.
 
-An empty window, API failure, incomplete response, or missing legacy anchor is not by
-itself proof of regression. The poller does not rewind or switch bootstrap mode in those
-cases. Investigate `checkpoint continuity unverified`; do not lower the checkpoint with
-SQL.
+An empty window is not proof that a stored nonzero checkpoint still belongs to the
+current session. In `LATEST`, it returns `checkpoint continuity unverified` without
+rebasing or calling the Sink. In explicit `BACKFILL`, an empty window remains a
+successful no-op. API failure, incomplete response, or a missing legacy anchor never
+causes a rewind or bootstrap-mode switch. Do not lower the checkpoint with SQL.
 
 ### Persist/checkpoint crash
 

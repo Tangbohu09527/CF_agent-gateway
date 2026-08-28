@@ -235,6 +235,28 @@ class WechatPollingService:
                 ],
             )
 
+        if (
+            self._bootstrap_mode is BootstrapMode.LATEST
+            and checkpoint is not None
+            and checkpoint.last_local_id > 0
+            and not ordered_messages
+        ):
+            return _continuity_failure_result(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+                conversation_name=conversation_name,
+                messages_seen=messages_seen,
+                messages_skipped=0,
+                messages_without_server_id=messages_without_server_id,
+                bootstrapped=False,
+                checkpoint=checkpoint.last_local_id,
+                generation=checkpoint.regression_generation,
+                remote_first_local_id=0,
+                remote_latest_local_id=0,
+                recovery_action="stop_chat_visible_window_empty",
+                warning_keys=self._continuity_warning_keys,
+            )
+
         bootstrapped = False
         if checkpoint is None:
             initial_local_id = (
