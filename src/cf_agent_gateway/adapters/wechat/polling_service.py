@@ -417,6 +417,11 @@ class WechatPollingService:
                 regression_detected = not anchor_match
 
             if regression_detected:
+                recovery_action = (
+                    "rebase_latest_visible_window"
+                    if self._bootstrap_mode is BootstrapMode.LATEST
+                    else "rewind_visible_window"
+                )
                 _log_checkpoint_event(
                     "checkpoint regression detected",
                     source_account_id=source_account_id,
@@ -427,9 +432,130 @@ class WechatPollingService:
                     old_generation=old_generation,
                     new_generation=old_generation + 1,
                     anchor_match=anchor_match,
-                    recovery_action="rewind_visible_window",
+                    recovery_action=recovery_action,
                     cas_result=None,
+                    messages_skipped=(
+                        messages_seen if self._bootstrap_mode is BootstrapMode.LATEST else None
+                    ),
                 )
+                if self._bootstrap_mode is BootstrapMode.LATEST:
+                    remote_latest_fingerprint = build_wechat_checkpoint_fingerprint(
+                        ordered_messages[-1][1]
+                    )
+                    if remote_latest_fingerprint is None:
+                        _log_checkpoint_event(
+                            "checkpoint regression failed closed",
+                            source_account_id=source_account_id,
+                            conversation_id=conversation_id,
+                            old_checkpoint=old_checkpoint,
+                            remote_first_local_id=remote_first_local_id,
+                            remote_latest_local_id=remote_latest_local_id,
+                            old_generation=old_generation,
+                            new_generation=old_generation,
+                            anchor_match=anchor_match,
+                            recovery_action="stop_chat_latest_fingerprint_unavailable",
+                            cas_result=None,
+                            messages_skipped=messages_seen,
+                        )
+                        return _continuity_failure(
+                            conversation_id=conversation_id,
+                            conversation_name=conversation_name,
+                            messages_seen=messages_seen,
+                            messages_skipped=messages_seen,
+                            messages_without_server_id=messages_without_server_id,
+                            bootstrapped=bootstrapped,
+                        )
+                    try:
+                        checkpoint, rebased = self._checkpoint_store.rebase_latest_after_regression(
+                            source_account_id=source_account_id,
+                            conversation_id=conversation_id,
+                            expected_last_local_id=old_checkpoint,
+                            expected_generation=old_generation,
+                            expected_message_fingerprint=(checkpoint.last_message_fingerprint),
+                            remote_latest_local_id=remote_latest_local_id,
+                            remote_latest_message_fingerprint=(remote_latest_fingerprint),
+                        )
+                    except Exception as error:
+                        _log_checkpoint_event(
+                            "checkpoint regression failed closed",
+                            source_account_id=source_account_id,
+                            conversation_id=conversation_id,
+                            old_checkpoint=old_checkpoint,
+                            remote_first_local_id=remote_first_local_id,
+                            remote_latest_local_id=remote_latest_local_id,
+                            old_generation=old_generation,
+                            new_generation=old_generation,
+                            anchor_match=anchor_match,
+                            recovery_action="stop_chat_latest_rebase_error",
+                            cas_result=None,
+                            messages_skipped=messages_seen,
+                        )
+                        return ChatPollResult(
+                            conversation_id=conversation_id,
+                            conversation_name=conversation_name,
+                            succeeded=False,
+                            messages_seen=messages_seen,
+                            messages_skipped_by_checkpoint=messages_seen,
+                            messages_without_server_id=messages_without_server_id,
+                            bootstrapped=bootstrapped,
+                            failures=[
+                                _failure(
+                                    PollFailureStage.CHECKPOINT,
+                                    error,
+                                    conversation_id=conversation_id,
+                                )
+                            ],
+                        )
+
+                    _log_checkpoint_event(
+                        (
+                            "checkpoint regression rebased"
+                            if rebased
+                            else "checkpoint regression rebase conflicted"
+                        ),
+                        source_account_id=source_account_id,
+                        conversation_id=conversation_id,
+                        old_checkpoint=old_checkpoint,
+                        remote_first_local_id=remote_first_local_id,
+                        remote_latest_local_id=remote_latest_local_id,
+                        old_generation=old_generation,
+                        new_generation=checkpoint.regression_generation,
+                        anchor_match=anchor_match,
+                        recovery_action=(
+                            "rebase_latest_visible_window"
+                            if rebased
+                            else "stop_chat_after_cas_loss"
+                        ),
+                        cas_result=rebased,
+                        messages_skipped=messages_seen,
+                    )
+                    if not rebased:
+                        return ChatPollResult(
+                            conversation_id=conversation_id,
+                            conversation_name=conversation_name,
+                            succeeded=False,
+                            messages_seen=messages_seen,
+                            messages_skipped_by_checkpoint=messages_seen,
+                            messages_without_server_id=messages_without_server_id,
+                            bootstrapped=bootstrapped,
+                            failures=[
+                                _failure(
+                                    PollFailureStage.CHECKPOINT,
+                                    WechatCheckpointStateConflictError(),
+                                    conversation_id=conversation_id,
+                                )
+                            ],
+                        )
+                    return ChatPollResult(
+                        conversation_id=conversation_id,
+                        conversation_name=conversation_name,
+                        succeeded=True,
+                        messages_seen=messages_seen,
+                        messages_skipped_by_checkpoint=messages_seen,
+                        messages_without_server_id=messages_without_server_id,
+                        bootstrapped=True,
+                    )
+
                 try:
                     checkpoint, rewound = self._checkpoint_store.rewind(
                         source_account_id=source_account_id,
@@ -876,23 +1002,25 @@ def _log_checkpoint_event(
     anchor_match: bool | None,
     recovery_action: str,
     cas_result: bool | None,
+    messages_skipped: int | None = None,
 ) -> None:
+    fields: dict[str, object] = {
+        "source_account_id_ref": _redacted_reference("source_account", source_account_id),
+        "conversation_id_ref": _redacted_reference("conversation", conversation_id),
+        "old_checkpoint": old_checkpoint,
+        "remote_first_local_id": remote_first_local_id,
+        "remote_latest_local_id": remote_latest_local_id,
+        "old_generation": old_generation,
+        "new_generation": new_generation,
+        "anchor_match": anchor_match,
+        "recovery_action": recovery_action,
+        "cas_result": cas_result,
+    }
+    if messages_skipped is not None:
+        fields["messages_skipped"] = messages_skipped
     logger.warning(
         message,
-        extra={
-            "fields": {
-                "source_account_id_ref": _redacted_reference("source_account", source_account_id),
-                "conversation_id_ref": _redacted_reference("conversation", conversation_id),
-                "old_checkpoint": old_checkpoint,
-                "remote_first_local_id": remote_first_local_id,
-                "remote_latest_local_id": remote_latest_local_id,
-                "old_generation": old_generation,
-                "new_generation": new_generation,
-                "anchor_match": anchor_match,
-                "recovery_action": recovery_action,
-                "cas_result": cas_result,
-            }
-        },
+        extra={"fields": fields},
     )
 
 

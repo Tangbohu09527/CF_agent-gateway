@@ -20,21 +20,36 @@ CFserver by this repository change.
 
 ## Checkpoint regression recovery
 
-### Automatic, proven reset
+### `LATEST` fail-safe rebase
 
-When the visible maximum `localId` is below the checkpoint, or the stored anchored
-`localId` has a different stored content-free fingerprint, the poller:
+`BootstrapMode.LATEST` must never replay the current visible window after a session or
+`localId` regression. When the visible maximum is below the checkpoint, or the stored
+checkpoint anchor mismatches the visible anchor, the poller:
 
 1. emits `checkpoint regression detected` with hashed account/conversation references;
-2. CAS-updates the exact old checkpoint;
-3. atomically increments `regression_generation`;
-4. rewinds to immediately before the first visible positive local ID;
-5. emits `checkpoint regression recovered` with the CAS result; and
-6. sends the visible window through normal persist-first discovery.
+2. builds a content-free fingerprint for the latest visible message;
+3. performs one CAS update fenced by account, conversation, old `last_local_id`, old
+   `regression_generation`, and old `last_message_fingerprint`;
+4. atomically increments `regression_generation` and replaces both `last_local_id` and
+   `last_message_fingerprint` with the latest visible values;
+5. emits `checkpoint regression rebased`; and
+6. treats the entire visible window as the new baseline without calling the Message Sink.
 
-Only one concurrent poller wins. The loser reloads authoritative checkpoint state. A
-stable serverId remains deduplicated across generations; a serverId-less fallback ID is
-generation-scoped.
+The rebase creates no Message, raw payload, attachment, Admission Outcome, Hermes
+dispatch/response, or delivery record. A CAS loser fails closed and cannot overwrite the
+winner. Missing/ambiguous continuity evidence, an unavailable latest fingerprint, an
+invalid checkpoint, or generation exhaustion also fails closed without advancing the
+checkpoint or calling the Sink.
+
+This is an intentional safety tradeoff: messages that first become visible during a
+maintenance, fresh-QR, or re-login window may be skipped because they cannot be assigned
+safely to the old or new session. The next message above the rebased checkpoint is
+processed normally and exactly-once persistence/idempotency rules apply again. A denied
+Admission is not a replay safety boundary because a replayed authorized historical
+message could be allowed and dispatched.
+
+`BootstrapMode.BACKFILL` retains its explicit historical replay behavior and must be
+configured deliberately. Regression never switches `LATEST` into `BACKFILL`.
 
 ### Legacy checkpoint without anchor
 
@@ -88,6 +103,12 @@ Revision `20260823_03` backfills Messages that already have a dispatch as comple
 absence of a dispatch is not proof that an old Message should now be allowed. There is no
 generic operator endpoint that reclassifies this evidence. A different disposition needs a
 separately reviewed data/recovery design.
+
+Do not DELETE runtime Admission evidence or related Message rows to fabricate a clean
+baseline. Restore an approved clean backup for production revalidation. CFserver P0
+acceptance remains pending: this repository change has not restored or modified the real
+server, and fresh-QR recovery must be re-tested there after deploying the fixed image and
+migrating the restored database to revision `20260823_04`.
 
 ## Dispatch `uncertain`
 
