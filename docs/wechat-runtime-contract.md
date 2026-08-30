@@ -136,14 +136,21 @@ Other services are not command arguments. Success prints
 
 ### start
 
-`start` first performs Token and rendered-Compose preflight. It snapshots the
-Container IDs of `gateway`, `dispatch-worker`, `migration`, and `postgres`,
-then runs bounded Compose
+`start` first performs Token and rendered-Compose preflight. It reads the
+actual service set from `docker compose config --services`. The controlled
+set remains exactly `worker` and `delivery-worker`; every other defined
+service is protected. The controller snapshots the Container IDs of those
+protected services, then runs bounded Compose
 `up --no-start --no-deps --force-recreate worker delivery-worker`. This prepare
 step recreates only the controlled containers without starting them or their
 dependencies. The controller requires exactly one unique Container ID for each
-controlled service and verifies that every non-controlled Container ID is
-unchanged.
+controlled service, verifies that the defined service set is unchanged after
+prepare, and verifies that every protected Container ID is unchanged.
+
+An external PostgreSQL container that is not a Compose service is never queried.
+If an Overlay defines a `postgres` service, it automatically belongs to the
+protected set and receives the same Container ID fencing as every other
+non-controlled service.
 
 The controller then runs `docker start` with those two exact Container IDs and
 enters the existing readiness loop. A Compose CLI return is not readiness

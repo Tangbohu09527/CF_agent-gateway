@@ -278,10 +278,10 @@ def test_runtime_control_uses_bounded_prepare_and_exact_container_launch() -> No
     assert '["up", "--no-start", "--no-deps", "--force-recreate"' in runtime_control
     assert '["up", "--detach", "--no-deps", "--force-recreate"' not in runtime_control
     assert '["docker", "start", *controlled_container_ids]' in runtime_control
-    assert (
-        'UNCONTROLLED_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration", "postgres")'
-        in runtime_control
-    )
+    assert '["config", "--services"]' in runtime_control
+    assert "protected_services = _protected_services(" in runtime_control
+    assert "if defined_after != defined_before:" in runtime_control
+    assert "UNCONTROLLED_SERVICES" not in runtime_control
 
 
 @pytest.mark.parametrize(

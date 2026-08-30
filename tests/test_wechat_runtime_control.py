@@ -49,9 +49,15 @@ class FakeDocker:
             "worker": {"running": controlled_running, "health": "healthy"},
             "delivery-worker": {"running": controlled_running, "health": "healthy"},
         }
-        self.container_ids = {service: f"container-{service}" for service in self.states} | {
-            "migration": "container-migration"
+        self.defined_services = {
+            "heartbeat-init",
+            "migration",
+            "worker",
+            "delivery-worker",
+            "dispatch-worker",
+            "gateway",
         }
+        self.container_ids = {service: f"container-{service}" for service in self.defined_services}
         self.heartbeat_ages = {"worker": 1.25, "delivery-worker": 2.5}
         mount = {
             "type": "bind",
@@ -60,8 +66,7 @@ class FakeDocker:
             "read_only": True,
         }
         self.rendered_services = {
-            service: {"environment": {}, "volumes": []}
-            for service in ("gateway", "dispatch-worker", "migration")
+            service: {"environment": {}, "volumes": []} for service in self.defined_services
         }
         for service in CONTROLLED_SERVICES:
             self.rendered_services[service] = {
@@ -77,6 +82,7 @@ class FakeDocker:
         self.start_error_after: int | None = None
         self.mutate_uncontrolled_after_prepare: str | None = None
         self.duplicate_controlled_ids = False
+        self.defined_services_after_prepare: set[str] | None = None
 
     def __call__(
         self,
@@ -104,9 +110,12 @@ class FakeDocker:
         command = arguments[6:]
         action = command[0]
         if action == "config":
+            if command[1:] == ["--services"]:
+                return "\n".join(sorted(self.defined_services)) + "\n"
             return json.dumps({"services": self.rendered_services})
         if action == "ps":
             service = command[-1]
+            assert service in self.defined_services
             if service in self.missing_containers:
                 return ""
             identifier = self.container_ids.get(service)
@@ -135,6 +144,8 @@ class FakeDocker:
             if self.mutate_uncontrolled_after_prepare is not None:
                 service = self.mutate_uncontrolled_after_prepare
                 self.container_ids[service] = f"changed-{service}"
+            if self.defined_services_after_prepare is not None:
+                self.defined_services = set(self.defined_services_after_prepare)
             if self.clock is not None:
                 self.clock.current += self.advance_after_up
             return ""
@@ -181,6 +192,11 @@ class FakeDocker:
             for service, container_id in self.container_ids.items()
             if identifier == container_id
         )
+
+    def define_service(self, service: str) -> None:
+        self.defined_services.add(service)
+        self.container_ids[service] = f"container-{service}"
+        self.rendered_services[service] = {"environment": {}, "volumes": []}
 
 
 def _secure_token_file(tmp_path: Path) -> Path:
@@ -289,17 +305,19 @@ def test_start_prepares_only_controlled_services_and_launches_exact_container_id
     assert payload["ready"] is True
     assert clock.current == 100.0
     assert "stop" not in _compose_actions(fake)
+    assert "postgres" not in _compose_ps_services(fake)
     _assert_uncontrolled_running(fake)
 
 
-def test_start_preserves_uncontrolled_container_ids(
+def test_start_preserves_all_defined_protected_container_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeDocker(_secure_token_file(tmp_path), controlled_running=False)
     protected_before = {
         service: fake.container_ids[service]
-        for service in ("gateway", "postgres", "dispatch-worker", "migration")
+        for service in fake.defined_services
+        if service not in CONTROLLED_SERVICES
     }
     main = _main(monkeypatch, fake)
 
@@ -308,6 +326,22 @@ def test_start_preserves_uncontrolled_container_ids(
     assert {
         service: fake.container_ids[service] for service in protected_before
     } == protected_before
+
+
+def test_overlay_defined_postgres_is_automatically_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeDocker(_secure_token_file(tmp_path), controlled_running=False)
+    fake.define_service("postgres")
+    postgres_before = fake.container_ids["postgres"]
+    main = _main(monkeypatch, fake)
+
+    assert main(["start", "--timeout-seconds", "2"]) == 0
+
+    assert _compose_ps_services(fake).count("postgres") == 2
+    assert fake.container_ids["postgres"] == postgres_before
+    assert fake.states["postgres"]["running"] is True
 
 
 def test_start_fails_closed_if_prepare_changes_an_uncontrolled_container_id(
@@ -326,6 +360,47 @@ def test_start_fails_closed_if_prepare_changes_an_uncontrolled_container_id(
     assert json.loads(captured.err) == {"error_code": "runtime_start_prepare_failed"}
     assert _docker_start_calls(fake) == []
     assert not any(fake.states[service]["running"] for service in CONTROLLED_SERVICES)
+    _assert_uncontrolled_running(fake)
+
+
+def test_start_fails_closed_if_defined_service_set_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = FakeDocker(_secure_token_file(tmp_path), controlled_running=False)
+    fake.defined_services_after_prepare = fake.defined_services | {"postgres"}
+    main = _main(monkeypatch, fake)
+
+    assert main(["start", "--timeout-seconds", "2"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"error_code": "runtime_start_prepare_failed"}
+    assert _docker_start_calls(fake) == []
+    assert "postgres" not in _compose_ps_services(fake)
+    assert not any(fake.states[service]["running"] for service in CONTROLLED_SERVICES)
+    _assert_uncontrolled_running(fake)
+
+
+@pytest.mark.parametrize("service", CONTROLLED_SERVICES)
+def test_start_fails_closed_when_controlled_service_is_not_defined(
+    service: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = FakeDocker(_secure_token_file(tmp_path), controlled_running=False)
+    fake.defined_services.remove(service)
+    main = _main(monkeypatch, fake)
+
+    assert main(["start", "--timeout-seconds", "2"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"error_code": "runtime_start_prepare_failed"}
+    assert "up" not in _compose_actions(fake)
+    assert _docker_start_calls(fake) == []
     _assert_uncontrolled_running(fake)
 
 
@@ -396,7 +471,7 @@ def test_start_prepare_uses_the_shared_wall_clock_budget(
     assert captured.out == ""
     assert json.loads(captured.err) == {"error_code": "runtime_start_prepare_failed"}
     actions = _compose_actions(fake)
-    assert actions.count("config") == 1
+    assert actions.count("config") == 2
     assert "up" in actions
     assert "stop" in actions
     assert _docker_start_calls(fake) == []
@@ -461,6 +536,12 @@ def _docker_start_calls(fake: FakeDocker) -> list[list[str]]:
     return [call for call in fake.calls if call[:2] == ["docker", "start"]]
 
 
+def _compose_ps_services(fake: FakeDocker) -> list[str]:
+    return [
+        call[-1] for call in fake.calls if call[:2] == ["docker", "compose"] and call[6:7] == ["ps"]
+    ]
+
+
 def _assert_uncontrolled_running(fake: FakeDocker) -> None:
     for service in ("gateway", "postgres", "dispatch-worker"):
         assert fake.states[service]["running"] is True
@@ -470,7 +551,7 @@ def _assert_uncontrolled_running(fake: FakeDocker) -> None:
         if call[:2] == ["docker", "start"]
         or (call[:2] == ["docker", "compose"] and call[6:7] in (["up"], ["stop"]))
     ]
-    for service in ("gateway", "postgres", "dispatch-worker", "migration"):
+    for service in ("heartbeat-init", "gateway", "postgres", "dispatch-worker", "migration"):
         assert all(service not in call for call in mutating_calls)
 
 
@@ -691,11 +772,22 @@ with log_path.open("a", encoding="utf-8") as log_file:
 token_source = os.path.abspath(os.environ["FAKE_DOCKER_TOKEN"])
 token_path = "/run/secrets/cf-agent-wechat-auth-token"
 controlled = {"worker", "delivery-worker"}
+defined = {
+    "heartbeat-init",
+    "migration",
+    "worker",
+    "delivery-worker",
+    "dispatch-worker",
+    "gateway",
+}
 
 if arguments[0] == "compose":
     command = arguments[5:]
     action = command[0]
     if action == "config":
+        if command[1:] == ["--services"]:
+            print("\n".join(sorted(defined)))
+            raise SystemExit
         mount = {
             "type": "bind",
             "source": token_source,
@@ -704,7 +796,7 @@ if arguments[0] == "compose":
         }
         services = {
             service: {"environment": {}, "volumes": []}
-            for service in ("gateway", "dispatch-worker", "migration")
+            for service in defined
         }
         for service in controlled:
             services[service] = {

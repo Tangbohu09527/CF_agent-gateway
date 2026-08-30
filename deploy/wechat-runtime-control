@@ -19,7 +19,6 @@ POLL_WORKER_SERVICE = "worker"
 DELIVERY_WORKER_SERVICE = "delivery-worker"
 DISPATCH_WORKER_SERVICE = "dispatch-worker"
 CONTROLLED_SERVICES = (POLL_WORKER_SERVICE, DELIVERY_WORKER_SERVICE)
-UNCONTROLLED_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration", "postgres")
 PROHIBITED_TOKEN_SERVICES = ("gateway", DISPATCH_WORKER_SERVICE, "migration")
 TOKEN_ENV = "CF_AGENT_WECHAT_TOKEN"
 TOKEN_FILE_ENV = "CF_AGENT_WECHAT_TOKEN_FILE"
@@ -277,6 +276,29 @@ def _container_id(
     return identifiers[0]
 
 
+def _defined_services(*, deadline: Deadline, error_code: str) -> tuple[str, ...]:
+    output = _compose(
+        ["config", "--services"],
+        deadline=deadline,
+        error_code=error_code,
+    )
+    services = output.split()
+    if not services or len(set(services)) != len(services):
+        raise ControlError(error_code)
+    return tuple(sorted(services))
+
+
+def _protected_services(
+    defined_services: tuple[str, ...],
+    *,
+    error_code: str,
+) -> tuple[str, ...]:
+    defined = set(defined_services)
+    if not set(CONTROLLED_SERVICES).issubset(defined):
+        raise ControlError(error_code)
+    return tuple(service for service in defined_services if service not in CONTROLLED_SERVICES)
+
+
 def _container_ids(
     services: tuple[str, ...],
     *,
@@ -504,8 +526,16 @@ def _start(*, deadline: Deadline) -> dict[str, Any]:
     token_host_source = _token_host_source(deadline)
     _validate_host_token_source(token_host_source, deadline)
     prepare_deadline = Deadline(deadline.expires_at, "runtime_start_prepare_failed")
-    uncontrolled_before = _container_ids(
-        UNCONTROLLED_SERVICES,
+    defined_before = _defined_services(
+        deadline=prepare_deadline,
+        error_code="runtime_start_prepare_failed",
+    )
+    protected_services = _protected_services(
+        defined_before,
+        error_code="runtime_start_prepare_failed",
+    )
+    protected_before = _container_ids(
+        protected_services,
         deadline=prepare_deadline,
         error_code="runtime_start_prepare_failed",
     )
@@ -518,13 +548,19 @@ def _start(*, deadline: Deadline) -> dict[str, Any]:
             deadline=prepare_deadline,
             error_code="runtime_start_prepare_failed",
         )
-        controlled_container_ids = _required_controlled_container_ids(deadline=prepare_deadline)
-        uncontrolled_after = _container_ids(
-            UNCONTROLLED_SERVICES,
+        defined_after = _defined_services(
             deadline=prepare_deadline,
             error_code="runtime_start_prepare_failed",
         )
-        if uncontrolled_after != uncontrolled_before:
+        if defined_after != defined_before:
+            raise ControlError("runtime_start_prepare_failed")
+        controlled_container_ids = _required_controlled_container_ids(deadline=prepare_deadline)
+        protected_after = _container_ids(
+            protected_services,
+            deadline=prepare_deadline,
+            error_code="runtime_start_prepare_failed",
+        )
+        if protected_after != protected_before:
             raise ControlError("runtime_start_prepare_failed")
 
         stage_error_code = "runtime_start_launch_failed"
