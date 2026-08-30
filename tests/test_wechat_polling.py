@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -53,6 +54,7 @@ from cf_agent_gateway.task.model.models import HermesDispatchRecord
 ACCOUNT_ID = "wxid_gateway"
 CHAT_ID = "wxid_alice"
 TIMESTAMP = "2026-08-01T10:15:00+08:00"
+EMPTY_WINDOW_OBSERVED_AT = datetime(2026, 8, 30, 9, 20, tzinfo=UTC)
 
 
 def raw_message(
@@ -487,6 +489,463 @@ def test_latest_empty_window_fails_closed_without_rebasing_checkpoint(
     assert sink.attempts == []
     assert stored is not None
     assert (stored.last_local_id, stored.regression_generation) == (15, 0)
+
+
+def test_latest_single_server_message_without_empty_window_evidence_is_still_skipped(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    sink = RecordingSink()
+
+    result = WechatPollingService(
+        FakeWechatClient(
+            messages={
+                CHAT_ID: [
+                    raw_message(
+                        1,
+                        server_id="single-server-id",
+                        timestamp="2026-08-30T09:20:37Z",
+                    )
+                ]
+            }
+        ),
+        checkpoint_store,
+        sink,
+    ).poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.messages_processed == 0
+    assert result.messages_skipped_by_checkpoint == 1
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (1, 1)
+
+
+def test_latest_empty_window_without_checkpoint_fingerprint_cannot_admit_live_candidate(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:37Z"),
+    ]
+    result = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.messages_processed == 0
+    assert result.messages_skipped_by_checkpoint == 1
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "conversation_id",
+    [CHAT_ID, "engineering@chatroom"],
+)
+def test_latest_empty_window_preserves_first_strictly_later_live_message_once(
+    conversation_id: str,
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=conversation_id,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15, chat_id=conversation_id)),
+    )
+    client = FakeWechatClient(
+        chats=[{"id": conversation_id}],
+        messages={conversation_id: []},
+    )
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    first_empty = service.poll_once()
+    second_empty = service.poll_once()
+    client.messages[conversation_id] = [
+        raw_message(
+            1,
+            chat_id=conversation_id,
+            server_id="live-server-1",
+            timestamp="2026-08-30T09:20:37Z",
+            isMentioned=True if conversation_id.endswith("@chatroom") else None,
+        )
+    ]
+    live = service.poll_once()
+    repeated = service.poll_once()
+
+    stored = checkpoint(
+        checkpoint_store,
+        conversation_id=conversation_id,
+    )
+    assert first_empty.chats_failed == 1
+    assert second_empty.chats_failed == 1
+    assert live.chats_succeeded == 1
+    assert live.messages_processed == 1
+    assert live.messages_new == 1
+    assert live.messages_skipped_by_checkpoint == 0
+    assert repeated.messages_processed == 0
+    assert repeated.messages_skipped_by_checkpoint == 1
+    assert source_ids(sink.handled) == ["live-server-1"]
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (1, 1)
+
+
+def test_latest_empty_window_uses_most_recent_observation_time(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    observations = iter(
+        [
+            datetime(2026, 8, 30, 9, 20, tzinfo=UTC),
+            datetime(2026, 8, 30, 9, 21, tzinfo=UTC),
+        ]
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: next(observations),
+    )
+
+    service.poll_once()
+    service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:30Z"),
+    ]
+    result = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.messages_processed == 0
+    assert result.messages_skipped_by_checkpoint == 1
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (1, 1)
+
+
+def test_latest_empty_window_marker_is_invalidated_by_normal_advance(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(15),
+        raw_message(16, timestamp="2026-08-30T09:20:10Z"),
+    ]
+    advanced = service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:37Z"),
+    ]
+    regressed = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert advanced.messages_processed == 1
+    assert regressed.messages_processed == 0
+    assert regressed.messages_skipped_by_checkpoint == 1
+    assert source_ids(sink.handled) == ["16"]
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (1, 1)
+
+
+def test_latest_empty_window_marker_is_invalidated_by_account_change(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    other_account = "wxid_other_gateway"
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    service.poll_once()
+    client.account_id = other_account
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:37Z"),
+    ]
+    other_account_bootstrap = service.poll_once()
+    client.account_id = ACCOUNT_ID
+    original_account_regression = service.poll_once()
+
+    original_checkpoint = checkpoint(checkpoint_store)
+    other_checkpoint = checkpoint(
+        checkpoint_store,
+        account_id=other_account,
+    )
+    assert other_account_bootstrap.messages_processed == 0
+    assert original_account_regression.messages_processed == 0
+    assert sink.attempts == []
+    assert original_checkpoint is not None
+    assert (original_checkpoint.last_local_id, original_checkpoint.regression_generation) == (1, 1)
+    assert other_checkpoint is not None
+    assert (other_checkpoint.last_local_id, other_checkpoint.regression_generation) == (1, 0)
+
+
+def test_latest_empty_window_skips_message_not_strictly_later_than_marker(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:00Z"),
+    ]
+    result = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.chats_succeeded == 1
+    assert result.messages_processed == 0
+    assert result.messages_skipped_by_checkpoint == 1
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (1, 1)
+
+
+def test_latest_empty_window_skips_history_prefix_and_processes_live_suffix(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:00:00Z"),
+        raw_message(2, timestamp="2026-08-30T09:19:59Z"),
+        raw_message(3, timestamp="2026-08-30T09:20:01Z"),
+        raw_message(4, timestamp="2026-08-30T09:20:02Z"),
+    ]
+    result = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.chats_succeeded == 1
+    assert result.messages_processed == 2
+    assert result.messages_new == 2
+    assert result.messages_skipped_by_checkpoint == 2
+    assert source_ids(sink.handled) == ["3", "4"]
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (4, 1)
+
+
+@pytest.mark.parametrize("failure", ["missing_timestamp", "time_order", "local_id_gap"])
+def test_latest_empty_window_time_ambiguity_fails_closed(
+    failure: str,
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+    service.poll_once()
+    if failure == "missing_timestamp":
+        ambiguous = raw_message(1)
+        ambiguous.pop("timestamp")
+        client.messages[CHAT_ID] = [ambiguous]
+    elif failure == "time_order":
+        client.messages[CHAT_ID] = [
+            raw_message(1, timestamp="2026-08-30T09:20:02Z"),
+            raw_message(2, timestamp="2026-08-30T09:19:59Z"),
+        ]
+    else:
+        client.messages[CHAT_ID] = [
+            raw_message(1, timestamp="2026-08-30T09:19:59Z"),
+            raw_message(3, timestamp="2026-08-30T09:20:02Z"),
+        ]
+
+    result = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.chats_failed == 1
+    assert result.failures[0].code == WechatCheckpointContinuityError.code
+    assert result.messages_processed == 0
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (15, 0)
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["last_local_id", "generation", "fingerprint"],
+)
+def test_latest_empty_window_marker_checkpoint_mismatch_fails_closed(
+    mismatch: str,
+    checkpoint_store: WechatSyncCheckpointStore,
+    session: Session,
+) -> None:
+    stored, _ = checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+
+    service.poll_once()
+    if mismatch == "last_local_id":
+        stored.last_local_id = 16
+    elif mismatch == "generation":
+        stored.regression_generation = 1
+    else:
+        stored.last_message_fingerprint = "f" * 64
+    session.commit()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:37Z"),
+    ]
+    result = service.poll_once()
+
+    persisted = checkpoint(checkpoint_store)
+    assert result.chats_failed == 1
+    assert result.failures[0].code == WechatCheckpointContinuityError.code
+    assert result.messages_processed == 0
+    assert sink.attempts == []
+    assert persisted is not None
+    assert persisted.last_local_id == (16 if mismatch == "last_local_id" else 15)
+    assert persisted.regression_generation == (1 if mismatch == "generation" else 0)
+    assert persisted.last_message_fingerprint == (
+        "f" * 64 if mismatch == "fingerprint" else checkpoint_fingerprint(raw_message(15))
+    )
+
+
+def test_latest_empty_window_live_suffix_retry_uses_anchored_history_baseline(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink(fail_counts={"3": 1})
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+    service.poll_once()
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:19:58Z"),
+        raw_message(2, timestamp="2026-08-30T09:19:59Z"),
+        raw_message(3, timestamp="2026-08-30T09:20:01Z"),
+    ]
+
+    failed = service.poll_once()
+    baseline = checkpoint(checkpoint_store)
+    assert baseline is not None
+    baseline_state = (
+        baseline.last_local_id,
+        baseline.regression_generation,
+        baseline.last_message_fingerprint,
+    )
+    retried = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert failed.chats_failed == 1
+    assert failed.failures[0].stage is PollFailureStage.SINK
+    assert baseline_state == (
+        2,
+        1,
+        checkpoint_fingerprint(raw_message(2, timestamp="2026-08-30T09:19:59Z")),
+    )
+    assert retried.messages_processed == 1
+    assert source_ids(sink.attempts) == ["3", "3"]
+    assert source_ids(sink.handled) == ["3"]
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (3, 1)
 
 
 def test_backfill_empty_window_does_not_rewind_checkpoint(
@@ -980,6 +1439,52 @@ def test_latest_rebase_cas_loser_fails_closed_without_processing(
     assert conflict_record.__dict__["fields"]["cas_result"] is False
     assert conflict_record.__dict__["fields"]["recovery_action"] == ("stop_chat_after_cas_loss")
     assert conflict_record.__dict__["fields"]["messages_skipped"] == 2
+
+
+def test_latest_empty_window_live_suffix_cas_loser_fails_closed(
+    checkpoint_store: WechatSyncCheckpointStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    service = WechatPollingService(
+        client,
+        checkpoint_store,
+        sink,
+        clock=lambda: EMPTY_WINDOW_OBSERVED_AT,
+    )
+    service.poll_once()
+    original_transition = checkpoint_store.begin_live_suffix_after_empty_window
+
+    def lose_transition(**kwargs: Any) -> tuple[WechatSyncCheckpoint, bool]:
+        _, winner_changed = original_transition(**kwargs)
+        assert winner_changed is True
+        return original_transition(**kwargs)
+
+    monkeypatch.setattr(
+        checkpoint_store,
+        "begin_live_suffix_after_empty_window",
+        lose_transition,
+    )
+    client.messages[CHAT_ID] = [
+        raw_message(1, timestamp="2026-08-30T09:20:37Z"),
+    ]
+
+    result = service.poll_once()
+
+    stored = checkpoint(checkpoint_store)
+    assert result.chats_failed == 1
+    assert result.failures[0].code == WechatCheckpointStateConflictError.code
+    assert result.messages_processed == 0
+    assert sink.attempts == []
+    assert stored is not None
+    assert (stored.last_local_id, stored.regression_generation) == (0, 1)
 
 
 def test_latest_regression_without_latest_fingerprint_fails_closed(

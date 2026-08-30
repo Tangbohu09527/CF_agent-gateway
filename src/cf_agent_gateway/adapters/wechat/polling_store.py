@@ -263,6 +263,53 @@ class WechatSyncCheckpointStore:
             conversation_id=conversation_id,
         )
 
+    def begin_live_suffix_after_empty_window(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        expected_last_local_id: int,
+        expected_generation: int,
+        expected_message_fingerprint: str | None,
+        first_live_local_id: int,
+        baseline_message_fingerprint: str | None,
+    ) -> tuple[WechatSyncCheckpoint, bool]:
+        expected_local_id = _validated_checkpoint_local_id(expected_last_local_id)
+        generation = _validated_checkpoint_generation(expected_generation)
+        live_local_id = _validated_checkpoint_local_id(first_live_local_id)
+        expected_fingerprint = _validated_checkpoint_fingerprint(expected_message_fingerprint)
+        baseline_fingerprint = _validated_checkpoint_fingerprint(baseline_message_fingerprint)
+        if generation == MAX_CHECKPOINT_LOCAL_ID:
+            raise WechatCheckpointGenerationError()
+        if live_local_id == 0:
+            raise WechatCheckpointValueError()
+        baseline_local_id = live_local_id - 1
+        if (baseline_local_id == 0) != (baseline_fingerprint is None):
+            raise WechatCheckpointFingerprintError()
+
+        statement = (
+            update(WechatSyncCheckpoint)
+            .where(
+                WechatSyncCheckpoint.source_account_id == source_account_id,
+                WechatSyncCheckpoint.conversation_id == conversation_id,
+                WechatSyncCheckpoint.last_local_id == expected_local_id,
+                WechatSyncCheckpoint.regression_generation == generation,
+                _fingerprint_matches(expected_fingerprint),
+            )
+            .values(
+                last_local_id=baseline_local_id,
+                regression_generation=WechatSyncCheckpoint.regression_generation + 1,
+                last_message_fingerprint=baseline_fingerprint,
+                updated_at=func.now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return self._apply_cas(
+            statement,
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+        )
+
     def _apply_cas(
         self,
         statement: object,

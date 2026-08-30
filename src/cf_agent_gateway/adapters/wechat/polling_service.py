@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from cf_agent_gateway.adapters.wechat.errors import WechatAdapterError
@@ -34,6 +36,16 @@ from cf_agent_gateway.adapters.wechat.raw_models import AgentWechatAuthStatus, R
 
 logger = logging.getLogger(__name__)
 _MAX_CONTINUITY_WARNING_KEYS = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _EmptyWindowMarker:
+    source_account_id: str
+    conversation_id: str
+    checkpoint_last_local_id: int
+    checkpoint_generation: int
+    checkpoint_fingerprint: str | None
+    observed_at: datetime
 
 
 class WechatPollingClient(Protocol):
@@ -69,10 +81,14 @@ class WechatPollingService:
         sink: NormalizedMessageSink,
         *,
         bootstrap_mode: BootstrapMode | str = BootstrapMode.LATEST,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._client = client
         self._checkpoint_store = checkpoint_store
         self._sink = sink
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._active_source_account_id: str | None = None
+        self._empty_window_markers: dict[tuple[str, str], _EmptyWindowMarker] = {}
         self._continuity_warning_keys: set[str] = set()
         try:
             self._bootstrap_mode = BootstrapMode(bootstrap_mode)
@@ -83,23 +99,30 @@ class WechatPollingService:
         try:
             auth_status = self._client.get_auth_status()
         except Exception as error:
+            self._invalidate_all_empty_window_markers()
             failure = _failure(PollFailureStage.AUTH, error)
             return PollResult(logged_in=False, failures=[failure])
 
         if auth_status.status != "logged_in":
+            self._invalidate_all_empty_window_markers()
             return PollResult(logged_in=False)
 
         source_account_id = _nonempty_string(auth_status.logged_in_user)
         if source_account_id is None:
+            self._invalidate_all_empty_window_markers()
             failure = PollFailure(
                 stage=PollFailureStage.AUTH,
                 code="wechat_auth_status_error",
             )
             return PollResult(logged_in=False, failures=[failure])
+        if self._active_source_account_id != source_account_id:
+            self._invalidate_all_empty_window_markers()
+            self._active_source_account_id = source_account_id
 
         try:
             chats = self._client.list_chats()
         except Exception as error:
+            self._invalidate_all_empty_window_markers()
             failure = _failure(PollFailureStage.LIST_CHATS, error)
             return PollResult(
                 source_account_id=source_account_id,
@@ -145,6 +168,55 @@ class WechatPollingService:
             chat_results=chat_results,
         )
 
+    def _invalidate_all_empty_window_markers(self) -> None:
+        self._empty_window_markers.clear()
+        self._active_source_account_id = None
+
+    def _empty_window_marker_key(
+        self,
+        source_account_id: str,
+        conversation_id: str,
+    ) -> tuple[str, str]:
+        return (source_account_id, conversation_id)
+
+    def _record_empty_window_marker(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        checkpoint: object,
+    ) -> bool:
+        if not _valid_checkpoint_marker_state(checkpoint):
+            return False
+        try:
+            observed_at = _aware_utc(self._clock())
+        except Exception:
+            return False
+        if observed_at is None:
+            return False
+        key = self._empty_window_marker_key(source_account_id, conversation_id)
+        marker = _EmptyWindowMarker(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            checkpoint_last_local_id=checkpoint.last_local_id,
+            checkpoint_generation=checkpoint.regression_generation,
+            checkpoint_fingerprint=checkpoint.last_message_fingerprint,
+            observed_at=observed_at,
+        )
+        self._empty_window_markers[key] = marker
+        return True
+
+    def _take_empty_window_marker(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+    ) -> _EmptyWindowMarker | None:
+        return self._empty_window_markers.pop(
+            self._empty_window_marker_key(source_account_id, conversation_id),
+            None,
+        )
+
     def _poll_chat(
         self,
         source_account_id: str,
@@ -161,6 +233,10 @@ class WechatPollingService:
             )
 
         if conversation_id in failed_conversation_ids:
+            self._take_empty_window_marker(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+            )
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -177,6 +253,10 @@ class WechatPollingService:
         try:
             raw_messages = self._client.list_messages(conversation_id)
         except Exception as error:
+            self._take_empty_window_marker(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+            )
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -197,6 +277,10 @@ class WechatPollingService:
                 conversation_id=conversation_id,
             )
         except Exception as error:
+            self._take_empty_window_marker(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+            )
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -220,6 +304,10 @@ class WechatPollingService:
                 conversation_id=conversation_id,
             )
         except Exception as error:
+            self._take_empty_window_marker(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+            )
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -241,6 +329,11 @@ class WechatPollingService:
             and checkpoint.last_local_id > 0
             and not ordered_messages
         ):
+            marker_recorded = self._record_empty_window_marker(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+                checkpoint=checkpoint,
+            )
             return _continuity_failure_result(
                 source_account_id=source_account_id,
                 conversation_id=conversation_id,
@@ -253,7 +346,35 @@ class WechatPollingService:
                 generation=checkpoint.regression_generation,
                 remote_first_local_id=0,
                 remote_latest_local_id=0,
-                recovery_action="stop_chat_visible_window_empty",
+                recovery_action=(
+                    "stop_chat_visible_window_empty"
+                    if marker_recorded
+                    else "stop_chat_empty_window_marker_unavailable"
+                ),
+                warning_keys=self._continuity_warning_keys,
+            )
+
+        empty_window_marker = self._take_empty_window_marker(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+        )
+        if empty_window_marker is not None and not _marker_matches_checkpoint(
+            empty_window_marker,
+            checkpoint,
+        ):
+            return _continuity_failure_result(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+                conversation_name=conversation_name,
+                messages_seen=messages_seen,
+                messages_skipped=messages_seen,
+                messages_without_server_id=messages_without_server_id,
+                bootstrapped=False,
+                checkpoint=empty_window_marker.checkpoint_last_local_id,
+                generation=empty_window_marker.checkpoint_generation,
+                remote_first_local_id=ordered_messages[0][0] if ordered_messages else 0,
+                remote_latest_local_id=ordered_messages[-1][0] if ordered_messages else 0,
+                recovery_action="stop_chat_empty_window_marker_mismatch",
                 warning_keys=self._continuity_warning_keys,
             )
 
@@ -439,10 +560,37 @@ class WechatPollingService:
                 regression_detected = not anchor_match
 
             if regression_detected:
+                live_suffix_start_index: int | None = None
+                if self._bootstrap_mode is BootstrapMode.LATEST and empty_window_marker is not None:
+                    try:
+                        live_suffix_start_index = _live_suffix_start_index(
+                            empty_window_marker,
+                            ordered_messages,
+                        )
+                    except ValueError:
+                        return _continuity_failure_result(
+                            source_account_id=source_account_id,
+                            conversation_id=conversation_id,
+                            conversation_name=conversation_name,
+                            messages_seen=messages_seen,
+                            messages_skipped=messages_seen,
+                            messages_without_server_id=messages_without_server_id,
+                            bootstrapped=bootstrapped,
+                            checkpoint=old_checkpoint,
+                            generation=old_generation,
+                            remote_first_local_id=remote_first_local_id,
+                            remote_latest_local_id=remote_latest_local_id,
+                            recovery_action="stop_chat_empty_window_time_unverified",
+                            warning_keys=self._continuity_warning_keys,
+                        )
                 recovery_action = (
-                    "rebase_latest_visible_window"
-                    if self._bootstrap_mode is BootstrapMode.LATEST
-                    else "rewind_visible_window"
+                    "process_live_suffix_after_empty_window"
+                    if live_suffix_start_index is not None
+                    else (
+                        "rebase_latest_visible_window"
+                        if self._bootstrap_mode is BootstrapMode.LATEST
+                        else "rewind_visible_window"
+                    )
                 )
                 _log_checkpoint_event(
                     "checkpoint regression detected",
@@ -457,67 +605,263 @@ class WechatPollingService:
                     recovery_action=recovery_action,
                     cas_result=None,
                     messages_skipped=(
-                        messages_seen if self._bootstrap_mode is BootstrapMode.LATEST else None
+                        live_suffix_start_index
+                        if live_suffix_start_index is not None
+                        else (
+                            messages_seen if self._bootstrap_mode is BootstrapMode.LATEST else None
+                        )
                     ),
                 )
                 if self._bootstrap_mode is BootstrapMode.LATEST:
-                    remote_latest_fingerprint = build_wechat_checkpoint_fingerprint(
-                        ordered_messages[-1][1]
-                    )
-                    if remote_latest_fingerprint is None:
+                    if live_suffix_start_index is not None:
+                        first_live_local_id = ordered_messages[live_suffix_start_index][0]
+                        baseline_fingerprint = (
+                            build_wechat_checkpoint_fingerprint(
+                                ordered_messages[live_suffix_start_index - 1][1]
+                            )
+                            if live_suffix_start_index > 0
+                            else None
+                        )
+                        if live_suffix_start_index > 0 and baseline_fingerprint is None:
+                            return _continuity_failure_result(
+                                source_account_id=source_account_id,
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                messages_seen=messages_seen,
+                                messages_skipped=messages_seen,
+                                messages_without_server_id=messages_without_server_id,
+                                bootstrapped=bootstrapped,
+                                checkpoint=old_checkpoint,
+                                generation=old_generation,
+                                remote_first_local_id=remote_first_local_id,
+                                remote_latest_local_id=remote_latest_local_id,
+                                recovery_action="stop_chat_live_suffix_baseline_unavailable",
+                                warning_keys=self._continuity_warning_keys,
+                            )
+                        try:
+                            checkpoint, live_suffix_started = (
+                                self._checkpoint_store.begin_live_suffix_after_empty_window(
+                                    source_account_id=source_account_id,
+                                    conversation_id=conversation_id,
+                                    expected_last_local_id=old_checkpoint,
+                                    expected_generation=old_generation,
+                                    expected_message_fingerprint=(
+                                        checkpoint.last_message_fingerprint
+                                    ),
+                                    first_live_local_id=first_live_local_id,
+                                    baseline_message_fingerprint=baseline_fingerprint,
+                                )
+                            )
+                        except Exception as error:
+                            _log_checkpoint_event(
+                                "checkpoint regression failed closed",
+                                source_account_id=source_account_id,
+                                conversation_id=conversation_id,
+                                old_checkpoint=old_checkpoint,
+                                remote_first_local_id=remote_first_local_id,
+                                remote_latest_local_id=remote_latest_local_id,
+                                old_generation=old_generation,
+                                new_generation=old_generation,
+                                anchor_match=anchor_match,
+                                recovery_action="stop_chat_live_suffix_transition_error",
+                                cas_result=None,
+                                messages_skipped=messages_seen,
+                            )
+                            return ChatPollResult(
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                succeeded=False,
+                                messages_seen=messages_seen,
+                                messages_skipped_by_checkpoint=messages_seen,
+                                messages_without_server_id=messages_without_server_id,
+                                bootstrapped=bootstrapped,
+                                failures=[
+                                    _failure(
+                                        PollFailureStage.CHECKPOINT,
+                                        error,
+                                        conversation_id=conversation_id,
+                                    )
+                                ],
+                            )
+
                         _log_checkpoint_event(
-                            "checkpoint regression failed closed",
+                            (
+                                "checkpoint regression live suffix started"
+                                if live_suffix_started
+                                else "checkpoint regression live suffix conflicted"
+                            ),
                             source_account_id=source_account_id,
                             conversation_id=conversation_id,
                             old_checkpoint=old_checkpoint,
                             remote_first_local_id=remote_first_local_id,
                             remote_latest_local_id=remote_latest_local_id,
                             old_generation=old_generation,
-                            new_generation=old_generation,
+                            new_generation=checkpoint.regression_generation,
                             anchor_match=anchor_match,
-                            recovery_action="stop_chat_latest_fingerprint_unavailable",
-                            cas_result=None,
+                            recovery_action=(
+                                "process_live_suffix_after_empty_window"
+                                if live_suffix_started
+                                else "stop_chat_after_cas_loss"
+                            ),
+                            cas_result=live_suffix_started,
+                            messages_skipped=live_suffix_start_index,
+                        )
+                        if not live_suffix_started:
+                            return ChatPollResult(
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                succeeded=False,
+                                messages_seen=messages_seen,
+                                messages_skipped_by_checkpoint=messages_seen,
+                                messages_without_server_id=messages_without_server_id,
+                                bootstrapped=bootstrapped,
+                                failures=[
+                                    _failure(
+                                        PollFailureStage.CHECKPOINT,
+                                        WechatCheckpointStateConflictError(),
+                                        conversation_id=conversation_id,
+                                    )
+                                ],
+                            )
+                        bootstrapped = True
+                    else:
+                        remote_latest_fingerprint = build_wechat_checkpoint_fingerprint(
+                            ordered_messages[-1][1]
+                        )
+                        if remote_latest_fingerprint is None:
+                            _log_checkpoint_event(
+                                "checkpoint regression failed closed",
+                                source_account_id=source_account_id,
+                                conversation_id=conversation_id,
+                                old_checkpoint=old_checkpoint,
+                                remote_first_local_id=remote_first_local_id,
+                                remote_latest_local_id=remote_latest_local_id,
+                                old_generation=old_generation,
+                                new_generation=old_generation,
+                                anchor_match=anchor_match,
+                                recovery_action="stop_chat_latest_fingerprint_unavailable",
+                                cas_result=None,
+                                messages_skipped=messages_seen,
+                            )
+                            return _continuity_failure(
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                messages_seen=messages_seen,
+                                messages_skipped=messages_seen,
+                                messages_without_server_id=messages_without_server_id,
+                                bootstrapped=bootstrapped,
+                            )
+                        try:
+                            checkpoint, rebased = (
+                                self._checkpoint_store.rebase_latest_after_regression(
+                                    source_account_id=source_account_id,
+                                    conversation_id=conversation_id,
+                                    expected_last_local_id=old_checkpoint,
+                                    expected_generation=old_generation,
+                                    expected_message_fingerprint=(
+                                        checkpoint.last_message_fingerprint
+                                    ),
+                                    remote_latest_local_id=remote_latest_local_id,
+                                    remote_latest_message_fingerprint=(remote_latest_fingerprint),
+                                )
+                            )
+                        except Exception as error:
+                            _log_checkpoint_event(
+                                "checkpoint regression failed closed",
+                                source_account_id=source_account_id,
+                                conversation_id=conversation_id,
+                                old_checkpoint=old_checkpoint,
+                                remote_first_local_id=remote_first_local_id,
+                                remote_latest_local_id=remote_latest_local_id,
+                                old_generation=old_generation,
+                                new_generation=old_generation,
+                                anchor_match=anchor_match,
+                                recovery_action="stop_chat_latest_rebase_error",
+                                cas_result=None,
+                                messages_skipped=messages_seen,
+                            )
+                            return ChatPollResult(
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                succeeded=False,
+                                messages_seen=messages_seen,
+                                messages_skipped_by_checkpoint=messages_seen,
+                                messages_without_server_id=messages_without_server_id,
+                                bootstrapped=bootstrapped,
+                                failures=[
+                                    _failure(
+                                        PollFailureStage.CHECKPOINT,
+                                        error,
+                                        conversation_id=conversation_id,
+                                    )
+                                ],
+                            )
+
+                        _log_checkpoint_event(
+                            (
+                                "checkpoint regression rebased"
+                                if rebased
+                                else "checkpoint regression rebase conflicted"
+                            ),
+                            source_account_id=source_account_id,
+                            conversation_id=conversation_id,
+                            old_checkpoint=old_checkpoint,
+                            remote_first_local_id=remote_first_local_id,
+                            remote_latest_local_id=remote_latest_local_id,
+                            old_generation=old_generation,
+                            new_generation=checkpoint.regression_generation,
+                            anchor_match=anchor_match,
+                            recovery_action=(
+                                "rebase_latest_visible_window"
+                                if rebased
+                                else "stop_chat_after_cas_loss"
+                            ),
+                            cas_result=rebased,
                             messages_skipped=messages_seen,
                         )
-                        return _continuity_failure(
+                        if not rebased:
+                            return ChatPollResult(
+                                conversation_id=conversation_id,
+                                conversation_name=conversation_name,
+                                succeeded=False,
+                                messages_seen=messages_seen,
+                                messages_skipped_by_checkpoint=messages_seen,
+                                messages_without_server_id=messages_without_server_id,
+                                bootstrapped=bootstrapped,
+                                failures=[
+                                    _failure(
+                                        PollFailureStage.CHECKPOINT,
+                                        WechatCheckpointStateConflictError(),
+                                        conversation_id=conversation_id,
+                                    )
+                                ],
+                            )
+                        return ChatPollResult(
                             conversation_id=conversation_id,
                             conversation_name=conversation_name,
+                            succeeded=True,
                             messages_seen=messages_seen,
-                            messages_skipped=messages_seen,
+                            messages_skipped_by_checkpoint=messages_seen,
                             messages_without_server_id=messages_without_server_id,
-                            bootstrapped=bootstrapped,
+                            bootstrapped=True,
                         )
+
+                else:
                     try:
-                        checkpoint, rebased = self._checkpoint_store.rebase_latest_after_regression(
+                        checkpoint, rewound = self._checkpoint_store.rewind(
                             source_account_id=source_account_id,
                             conversation_id=conversation_id,
                             expected_last_local_id=old_checkpoint,
                             expected_generation=old_generation,
-                            expected_message_fingerprint=(checkpoint.last_message_fingerprint),
-                            remote_latest_local_id=remote_latest_local_id,
-                            remote_latest_message_fingerprint=(remote_latest_fingerprint),
+                            expected_message_fingerprint=checkpoint.last_message_fingerprint,
+                            last_local_id=remote_first_local_id - 1,
                         )
                     except Exception as error:
-                        _log_checkpoint_event(
-                            "checkpoint regression failed closed",
-                            source_account_id=source_account_id,
-                            conversation_id=conversation_id,
-                            old_checkpoint=old_checkpoint,
-                            remote_first_local_id=remote_first_local_id,
-                            remote_latest_local_id=remote_latest_local_id,
-                            old_generation=old_generation,
-                            new_generation=old_generation,
-                            anchor_match=anchor_match,
-                            recovery_action="stop_chat_latest_rebase_error",
-                            cas_result=None,
-                            messages_skipped=messages_seen,
-                        )
                         return ChatPollResult(
                             conversation_id=conversation_id,
                             conversation_name=conversation_name,
                             succeeded=False,
                             messages_seen=messages_seen,
-                            messages_skipped_by_checkpoint=messages_seen,
                             messages_without_server_id=messages_without_server_id,
                             bootstrapped=bootstrapped,
                             failures=[
@@ -528,12 +872,11 @@ class WechatPollingService:
                                 )
                             ],
                         )
-
                     _log_checkpoint_event(
                         (
-                            "checkpoint regression rebased"
-                            if rebased
-                            else "checkpoint regression rebase conflicted"
+                            "checkpoint regression recovered"
+                            if rewound
+                            else "checkpoint regression recovery conflicted"
                         ),
                         source_account_id=source_account_id,
                         conversation_id=conversation_id,
@@ -544,20 +887,16 @@ class WechatPollingService:
                         new_generation=checkpoint.regression_generation,
                         anchor_match=anchor_match,
                         recovery_action=(
-                            "rebase_latest_visible_window"
-                            if rebased
-                            else "stop_chat_after_cas_loss"
+                            "rewind_visible_window" if rewound else "stop_chat_after_cas_loss"
                         ),
-                        cas_result=rebased,
-                        messages_skipped=messages_seen,
+                        cas_result=rewound,
                     )
-                    if not rebased:
+                    if not rewound:
                         return ChatPollResult(
                             conversation_id=conversation_id,
                             conversation_name=conversation_name,
                             succeeded=False,
                             messages_seen=messages_seen,
-                            messages_skipped_by_checkpoint=messages_seen,
                             messages_without_server_id=messages_without_server_id,
                             bootstrapped=bootstrapped,
                             failures=[
@@ -568,76 +907,6 @@ class WechatPollingService:
                                 )
                             ],
                         )
-                    return ChatPollResult(
-                        conversation_id=conversation_id,
-                        conversation_name=conversation_name,
-                        succeeded=True,
-                        messages_seen=messages_seen,
-                        messages_skipped_by_checkpoint=messages_seen,
-                        messages_without_server_id=messages_without_server_id,
-                        bootstrapped=True,
-                    )
-
-                try:
-                    checkpoint, rewound = self._checkpoint_store.rewind(
-                        source_account_id=source_account_id,
-                        conversation_id=conversation_id,
-                        expected_last_local_id=old_checkpoint,
-                        expected_generation=old_generation,
-                        expected_message_fingerprint=checkpoint.last_message_fingerprint,
-                        last_local_id=remote_first_local_id - 1,
-                    )
-                except Exception as error:
-                    return ChatPollResult(
-                        conversation_id=conversation_id,
-                        conversation_name=conversation_name,
-                        succeeded=False,
-                        messages_seen=messages_seen,
-                        messages_without_server_id=messages_without_server_id,
-                        bootstrapped=bootstrapped,
-                        failures=[
-                            _failure(
-                                PollFailureStage.CHECKPOINT,
-                                error,
-                                conversation_id=conversation_id,
-                            )
-                        ],
-                    )
-                _log_checkpoint_event(
-                    (
-                        "checkpoint regression recovered"
-                        if rewound
-                        else "checkpoint regression recovery conflicted"
-                    ),
-                    source_account_id=source_account_id,
-                    conversation_id=conversation_id,
-                    old_checkpoint=old_checkpoint,
-                    remote_first_local_id=remote_first_local_id,
-                    remote_latest_local_id=remote_latest_local_id,
-                    old_generation=old_generation,
-                    new_generation=checkpoint.regression_generation,
-                    anchor_match=anchor_match,
-                    recovery_action=(
-                        "rewind_visible_window" if rewound else "stop_chat_after_cas_loss"
-                    ),
-                    cas_result=rewound,
-                )
-                if not rewound:
-                    return ChatPollResult(
-                        conversation_id=conversation_id,
-                        conversation_name=conversation_name,
-                        succeeded=False,
-                        messages_seen=messages_seen,
-                        messages_without_server_id=messages_without_server_id,
-                        bootstrapped=bootstrapped,
-                        failures=[
-                            _failure(
-                                PollFailureStage.CHECKPOINT,
-                                WechatCheckpointStateConflictError(),
-                                conversation_id=conversation_id,
-                            )
-                        ],
-                    )
 
         current_local_id = checkpoint.last_local_id
         messages_processed = 0
@@ -891,6 +1160,89 @@ def _validated_ordered_messages(
             raise WechatConversationMismatchError()
         ordered_messages.append((_numeric_local_id(message), message))
     return sorted(ordered_messages, key=lambda item: item[0])
+
+
+def _aware_utc(value: object) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    try:
+        if value.tzinfo is None or value.utcoffset() is None:
+            return None
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _valid_checkpoint_marker_state(checkpoint: object) -> bool:
+    last_local_id = getattr(checkpoint, "last_local_id", None)
+    generation = getattr(checkpoint, "regression_generation", None)
+    fingerprint = getattr(checkpoint, "last_message_fingerprint", None)
+    if (
+        isinstance(last_local_id, bool)
+        or not isinstance(last_local_id, int)
+        or not 0 < last_local_id <= MAX_CHECKPOINT_LOCAL_ID
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or not 0 <= generation <= MAX_CHECKPOINT_LOCAL_ID
+    ):
+        return False
+    return (
+        isinstance(fingerprint, str)
+        and len(fingerprint) == 64
+        and all(character in "0123456789abcdef" for character in fingerprint)
+    )
+
+
+def _marker_matches_checkpoint(
+    marker: _EmptyWindowMarker,
+    checkpoint: object,
+) -> bool:
+    return _valid_checkpoint_marker_state(checkpoint) and (
+        checkpoint.last_local_id == marker.checkpoint_last_local_id
+        and checkpoint.regression_generation == marker.checkpoint_generation
+        and checkpoint.last_message_fingerprint == marker.checkpoint_fingerprint
+    )
+
+
+def _message_timestamp(message: RawWechatMessage | Mapping[str, Any]) -> datetime | None:
+    try:
+        validated = (
+            message
+            if isinstance(message, RawWechatMessage)
+            else RawWechatMessage.model_validate(message)
+        )
+    except (TypeError, ValueError):
+        return None
+    return _aware_utc(validated.timestamp)
+
+
+def _live_suffix_start_index(
+    marker: _EmptyWindowMarker,
+    ordered_messages: Sequence[tuple[int, RawWechatMessage | Mapping[str, Any]]],
+) -> int | None:
+    previous_local_id = 0
+    previous_timestamp: datetime | None = None
+    live_suffix_start: int | None = None
+    for index, (local_id, message) in enumerate(ordered_messages):
+        timestamp = _message_timestamp(message)
+        if (
+            local_id <= previous_local_id
+            or timestamp is None
+            or (previous_timestamp is not None and timestamp < previous_timestamp)
+        ):
+            raise ValueError
+        if live_suffix_start is None and timestamp > marker.observed_at:
+            live_suffix_start = index
+        previous_local_id = local_id
+        previous_timestamp = timestamp
+    if live_suffix_start is not None:
+        first_live_local_id = ordered_messages[live_suffix_start][0]
+        if live_suffix_start == 0:
+            if first_live_local_id != 1:
+                raise ValueError
+        elif ordered_messages[live_suffix_start - 1][0] + 1 != first_live_local_id:
+            raise ValueError
+    return live_suffix_start
 
 
 def _normalize_for_chat(
