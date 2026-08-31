@@ -12,6 +12,7 @@ from cf_agent_gateway.access import AccessPolicyService, RiskLevel
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatAuthStatus,
     RawWechatMessage,
+    WechatPollingLifecycleState,
     WechatSyncCheckpoint,
 )
 from cf_agent_gateway.config import (
@@ -221,6 +222,7 @@ def test_runtime_assembly_and_cleanup_order(
     expected_routing_flag = v2_routing_enabled
     checkpoint_store_marker = object()
     sink_marker = object()
+    lifecycle_state = WechatPollingLifecycleState()
 
     class TrackingEngine:
         def dispose(self) -> None:
@@ -282,11 +284,13 @@ def test_runtime_assembly_and_cleanup_order(
             sink: object,
             *,
             bootstrap_mode: str,
+            lifecycle_state: WechatPollingLifecycleState,
         ) -> None:
             assert runtime_client is client
             assert checkpoint_store is checkpoint_store_marker
             assert sink is sink_marker
             assert bootstrap_mode == "backfill"
+            assert lifecycle_state is lifecycle_state_marker
             events.append("polling_service")
 
         def poll_once(self) -> Any:
@@ -309,6 +313,7 @@ def test_runtime_assembly_and_cleanup_order(
         sink_factory,
     )
     monkeypatch.setattr(wechat_runtime, "WechatPollingService", TrackingPollingService)
+    lifecycle_state_marker = lifecycle_state
 
     settings = runtime_settings(
         "sqlite+pysqlite:///:memory:",
@@ -320,6 +325,7 @@ def test_runtime_assembly_and_cleanup_order(
                 settings,
                 client_factory=client_factory,  # type: ignore[arg-type]
                 engine_factory=engine_factory,  # type: ignore[arg-type]
+                lifecycle_state=lifecycle_state,
             )
         assert error.value.__cause__ is None
         assert error.value.__context__ is None
@@ -328,6 +334,7 @@ def test_runtime_assembly_and_cleanup_order(
             settings,
             client_factory=client_factory,  # type: ignore[arg-type]
             engine_factory=engine_factory,  # type: ignore[arg-type]
+            lifecycle_state=lifecycle_state,
         )
         assert result.logged_in is True
 

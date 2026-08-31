@@ -122,6 +122,33 @@ def test_worker_starts_polls_logs_result_and_stops(
     }
 
 
+def test_default_worker_reuses_one_polling_lifecycle_state_across_cycles(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_event = RecordingEvent()
+    lifecycle_states: list[object] = []
+
+    def poll_once(
+        candidate: Settings,
+        *,
+        lifecycle_state: object,
+    ) -> PollResult:
+        assert candidate is settings
+        lifecycle_states.append(lifecycle_state)
+        if len(lifecycle_states) == 2:
+            stop_event.set()
+        return PollResult(logged_in=True)
+
+    monkeypatch.setattr(worker, "run_wechat_poll_once", poll_once)
+
+    worker.run_worker(settings, stop_event=stop_event)
+
+    assert len(lifecycle_states) == 2
+    assert isinstance(lifecycle_states[0], worker.WechatPollingLifecycleState)
+    assert lifecycle_states[0] is lifecycle_states[1]
+
+
 def test_worker_publishes_heartbeat_for_a_successful_cycle(settings: Settings) -> None:
     stop_event = Event()
     heartbeat = RecordingHeartbeat()

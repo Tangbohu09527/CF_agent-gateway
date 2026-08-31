@@ -289,7 +289,8 @@ def test_main_sigterm_waits_for_the_in_flight_poll(
     poll_finished = Event()
     observations: list[tuple[str, bool]] = []
 
-    def blocked_poll(candidate: Settings) -> PollResult:
+    def blocked_poll(candidate: Settings, *, lifecycle_state: object) -> PollResult:
+        assert lifecycle_state is not None
         assert candidate is settings
         poll_started.set()
         release_poll.wait(timeout=2)

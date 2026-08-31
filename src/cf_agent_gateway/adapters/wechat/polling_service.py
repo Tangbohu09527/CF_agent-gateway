@@ -45,7 +45,89 @@ class _EmptyWindowMarker:
     checkpoint_last_local_id: int
     checkpoint_generation: int
     checkpoint_fingerprint: str | None
-    observed_at: datetime
+    empty_since: datetime
+    last_empty_observed_at: datetime
+    observation_count: int
+
+
+class WechatPollingLifecycleState:
+    """Process-lifetime evidence shared by finite polling service instances."""
+
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._active_source_account_id: str | None = None
+        self._empty_window_markers: dict[tuple[str, str], _EmptyWindowMarker] = {}
+
+    def invalidate_all(self) -> None:
+        self._empty_window_markers.clear()
+        self._active_source_account_id = None
+
+    def observe_account(self, source_account_id: str) -> None:
+        if self._active_source_account_id != source_account_id:
+            self.invalidate_all()
+            self._active_source_account_id = source_account_id
+
+    def invalidate_chat(self, source_account_id: str, conversation_id: str) -> None:
+        self._empty_window_markers.pop((source_account_id, conversation_id), None)
+
+    def record_empty_window(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        checkpoint: object,
+    ) -> bool:
+        if not _valid_checkpoint_marker_state(checkpoint):
+            self.invalidate_chat(source_account_id, conversation_id)
+            return False
+        try:
+            observed_at = _aware_utc(self._clock())
+        except Exception:
+            observed_at = None
+        if observed_at is None:
+            self.invalidate_chat(source_account_id, conversation_id)
+            return False
+
+        key = (source_account_id, conversation_id)
+        existing = self._empty_window_markers.get(key)
+        if existing is not None and _marker_matches_checkpoint(existing, checkpoint):
+            if observed_at < existing.last_empty_observed_at:
+                self.invalidate_chat(source_account_id, conversation_id)
+                return False
+            self._empty_window_markers[key] = _EmptyWindowMarker(
+                source_account_id=source_account_id,
+                conversation_id=conversation_id,
+                checkpoint_last_local_id=existing.checkpoint_last_local_id,
+                checkpoint_generation=existing.checkpoint_generation,
+                checkpoint_fingerprint=existing.checkpoint_fingerprint,
+                empty_since=existing.empty_since,
+                last_empty_observed_at=observed_at,
+                observation_count=existing.observation_count + 1,
+            )
+            return True
+
+        self._empty_window_markers[key] = _EmptyWindowMarker(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            checkpoint_last_local_id=checkpoint.last_local_id,
+            checkpoint_generation=checkpoint.regression_generation,
+            checkpoint_fingerprint=checkpoint.last_message_fingerprint,
+            empty_since=observed_at,
+            last_empty_observed_at=observed_at,
+            observation_count=1,
+        )
+        return True
+
+    def take_empty_window(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+    ) -> _EmptyWindowMarker | None:
+        return self._empty_window_markers.pop(
+            (source_account_id, conversation_id),
+            None,
+        )
 
 
 class WechatPollingClient(Protocol):
@@ -82,13 +164,14 @@ class WechatPollingService:
         *,
         bootstrap_mode: BootstrapMode | str = BootstrapMode.LATEST,
         clock: Callable[[], datetime] | None = None,
+        lifecycle_state: WechatPollingLifecycleState | None = None,
     ) -> None:
         self._client = client
         self._checkpoint_store = checkpoint_store
         self._sink = sink
-        self._clock = clock or (lambda: datetime.now(UTC))
-        self._active_source_account_id: str | None = None
-        self._empty_window_markers: dict[tuple[str, str], _EmptyWindowMarker] = {}
+        if lifecycle_state is not None and clock is not None:
+            raise ValueError("clock belongs to lifecycle_state when shared")
+        self._lifecycle_state = lifecycle_state or WechatPollingLifecycleState(clock=clock)
         self._continuity_warning_keys: set[str] = set()
         try:
             self._bootstrap_mode = BootstrapMode(bootstrap_mode)
@@ -99,30 +182,28 @@ class WechatPollingService:
         try:
             auth_status = self._client.get_auth_status()
         except Exception as error:
-            self._invalidate_all_empty_window_markers()
+            self._lifecycle_state.invalidate_all()
             failure = _failure(PollFailureStage.AUTH, error)
             return PollResult(logged_in=False, failures=[failure])
 
         if auth_status.status != "logged_in":
-            self._invalidate_all_empty_window_markers()
+            self._lifecycle_state.invalidate_all()
             return PollResult(logged_in=False)
 
         source_account_id = _nonempty_string(auth_status.logged_in_user)
         if source_account_id is None:
-            self._invalidate_all_empty_window_markers()
+            self._lifecycle_state.invalidate_all()
             failure = PollFailure(
                 stage=PollFailureStage.AUTH,
                 code="wechat_auth_status_error",
             )
             return PollResult(logged_in=False, failures=[failure])
-        if self._active_source_account_id != source_account_id:
-            self._invalidate_all_empty_window_markers()
-            self._active_source_account_id = source_account_id
+        self._lifecycle_state.observe_account(source_account_id)
 
         try:
             chats = self._client.list_chats()
         except Exception as error:
-            self._invalidate_all_empty_window_markers()
+            self._lifecycle_state.invalidate_all()
             failure = _failure(PollFailureStage.LIST_CHATS, error)
             return PollResult(
                 source_account_id=source_account_id,
@@ -168,55 +249,6 @@ class WechatPollingService:
             chat_results=chat_results,
         )
 
-    def _invalidate_all_empty_window_markers(self) -> None:
-        self._empty_window_markers.clear()
-        self._active_source_account_id = None
-
-    def _empty_window_marker_key(
-        self,
-        source_account_id: str,
-        conversation_id: str,
-    ) -> tuple[str, str]:
-        return (source_account_id, conversation_id)
-
-    def _record_empty_window_marker(
-        self,
-        *,
-        source_account_id: str,
-        conversation_id: str,
-        checkpoint: object,
-    ) -> bool:
-        if not _valid_checkpoint_marker_state(checkpoint):
-            return False
-        try:
-            observed_at = _aware_utc(self._clock())
-        except Exception:
-            return False
-        if observed_at is None:
-            return False
-        key = self._empty_window_marker_key(source_account_id, conversation_id)
-        marker = _EmptyWindowMarker(
-            source_account_id=source_account_id,
-            conversation_id=conversation_id,
-            checkpoint_last_local_id=checkpoint.last_local_id,
-            checkpoint_generation=checkpoint.regression_generation,
-            checkpoint_fingerprint=checkpoint.last_message_fingerprint,
-            observed_at=observed_at,
-        )
-        self._empty_window_markers[key] = marker
-        return True
-
-    def _take_empty_window_marker(
-        self,
-        *,
-        source_account_id: str,
-        conversation_id: str,
-    ) -> _EmptyWindowMarker | None:
-        return self._empty_window_markers.pop(
-            self._empty_window_marker_key(source_account_id, conversation_id),
-            None,
-        )
-
     def _poll_chat(
         self,
         source_account_id: str,
@@ -233,10 +265,7 @@ class WechatPollingService:
             )
 
         if conversation_id in failed_conversation_ids:
-            self._take_empty_window_marker(
-                source_account_id=source_account_id,
-                conversation_id=conversation_id,
-            )
+            self._lifecycle_state.invalidate_chat(source_account_id, conversation_id)
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -253,10 +282,7 @@ class WechatPollingService:
         try:
             raw_messages = self._client.list_messages(conversation_id)
         except Exception as error:
-            self._take_empty_window_marker(
-                source_account_id=source_account_id,
-                conversation_id=conversation_id,
-            )
+            self._lifecycle_state.invalidate_chat(source_account_id, conversation_id)
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -277,10 +303,7 @@ class WechatPollingService:
                 conversation_id=conversation_id,
             )
         except Exception as error:
-            self._take_empty_window_marker(
-                source_account_id=source_account_id,
-                conversation_id=conversation_id,
-            )
+            self._lifecycle_state.invalidate_chat(source_account_id, conversation_id)
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -304,10 +327,7 @@ class WechatPollingService:
                 conversation_id=conversation_id,
             )
         except Exception as error:
-            self._take_empty_window_marker(
-                source_account_id=source_account_id,
-                conversation_id=conversation_id,
-            )
+            self._lifecycle_state.invalidate_chat(source_account_id, conversation_id)
             return ChatPollResult(
                 conversation_id=conversation_id,
                 conversation_name=conversation_name,
@@ -329,7 +349,7 @@ class WechatPollingService:
             and checkpoint.last_local_id > 0
             and not ordered_messages
         ):
-            marker_recorded = self._record_empty_window_marker(
+            marker_recorded = self._lifecycle_state.record_empty_window(
                 source_account_id=source_account_id,
                 conversation_id=conversation_id,
                 checkpoint=checkpoint,
@@ -354,7 +374,7 @@ class WechatPollingService:
                 warning_keys=self._continuity_warning_keys,
             )
 
-        empty_window_marker = self._take_empty_window_marker(
+        empty_window_marker = self._lifecycle_state.take_empty_window(
             source_account_id=source_account_id,
             conversation_id=conversation_id,
         )
@@ -1231,7 +1251,7 @@ def _live_suffix_start_index(
             or (previous_timestamp is not None and timestamp < previous_timestamp)
         ):
             raise ValueError
-        if live_suffix_start is None and timestamp > marker.observed_at:
+        if live_suffix_start is None and timestamp > marker.empty_since:
             live_suffix_start = index
         previous_local_id = local_id
         previous_timestamp = timestamp

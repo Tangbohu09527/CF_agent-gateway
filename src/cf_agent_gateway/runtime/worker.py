@@ -9,7 +9,7 @@ from threading import Event
 from types import FrameType
 from typing import Literal
 
-from cf_agent_gateway.adapters.wechat import PollResult
+from cf_agent_gateway.adapters.wechat import PollResult, WechatPollingLifecycleState
 from cf_agent_gateway.config import Settings, load_settings
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.runtime.errors import (
@@ -51,7 +51,7 @@ def run_worker(
     """Run serialized WeChat polling cycles until shutdown is requested."""
 
     shutdown = stop_event if stop_event is not None else Event()
-    execute_poll = poll_once if poll_once is not None else run_wechat_poll_once
+    lifecycle_state = WechatPollingLifecycleState() if poll_once is None else None
     interval = settings.runtime.polling_interval_seconds
     cycle_sequence = 0
     final_heartbeat_state: Literal["stopped", "failed"] = "stopped"
@@ -74,7 +74,14 @@ def run_worker(
                 )
             logger.info("poll cycle started")
             try:
-                result = execute_poll(settings)
+                if poll_once is None:
+                    assert lifecycle_state is not None
+                    result = run_wechat_poll_once(
+                        settings,
+                        lifecycle_state=lifecycle_state,
+                    )
+                else:
+                    result = poll_once(settings)
             except _FATAL_POLL_ERRORS:
                 raise
             except Exception as error:

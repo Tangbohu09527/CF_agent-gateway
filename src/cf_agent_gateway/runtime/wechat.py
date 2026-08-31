@@ -12,6 +12,7 @@ from cf_agent_gateway.adapters.wechat import (
     PollResult,
     WechatMessageSender,
     WechatPollingClient,
+    WechatPollingLifecycleState,
     WechatPollingService,
     WechatSyncCheckpointStore,
 )
@@ -82,6 +83,7 @@ def run_wechat_poll_once(
     sender_factory: WechatMessageSenderFactory | None = None,
     engine_factory: Callable[[str], Engine] = create_database_engine,
     environment_reader: Callable[[str], str | None] = os.getenv,
+    lifecycle_state: WechatPollingLifecycleState | None = None,
 ) -> PollResult:
     """Archive, admit, and enqueue one finite WeChat polling cycle."""
 
@@ -125,12 +127,21 @@ def run_wechat_poll_once(
             client_initialization_failed = True
         if client_initialization_failed:
             raise WechatClientInitializationError()
-        polling_service = WechatPollingService(
-            client,
-            checkpoint_store,
-            sink,
-            bootstrap_mode=settings.wechat.bootstrap_mode,
-        )
+        if lifecycle_state is None:
+            polling_service = WechatPollingService(
+                client,
+                checkpoint_store,
+                sink,
+                bootstrap_mode=settings.wechat.bootstrap_mode,
+            )
+        else:
+            polling_service = WechatPollingService(
+                client,
+                checkpoint_store,
+                sink,
+                bootstrap_mode=settings.wechat.bootstrap_mode,
+                lifecycle_state=lifecycle_state,
+            )
         polling_failed = False
         try:
             result = polling_service.poll_once()

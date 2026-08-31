@@ -57,6 +57,7 @@ from cf_agent_gateway.adapters.wechat.polling_models import (
 from cf_agent_gateway.adapters.wechat.polling_service import (
     NormalizedMessageSink,
     WechatPollingClient,
+    WechatPollingLifecycleState,
     WechatPollingService,
 )
 from cf_agent_gateway.adapters.wechat.polling_store import (
@@ -106,6 +107,7 @@ __all__ = [
     "WechatHttpMessageSender",
     "WechatNormalizationError",
     "WechatPollingClient",
+    "WechatPollingLifecycleState",
     "WechatPollingError",
     "WechatPollingService",
     "WechatReplySummary",
