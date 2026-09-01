@@ -33,6 +33,14 @@ message. Raising the Gateway polling logger to DEBUG should be a temporary targe
 diagnostic rather than the normal production level. Root DEBUG does not restore
 `httpx`/`httpcore`/Alembic records because those named loggers remain pinned to WARNING.
 
+For `stop_chat_visible_window_empty` or another recognized continuity-only fail-closed
+state, expect one WARNING/chat INFO/cycle INFO burst on first observation or signature
+change, then no repeated WARNING/INFO while the state is identical. There is no hourly
+reminder. If warnings repeat every three seconds with an unchanged signature, confirm all
+poll cycles share one `WechatPollingLifecycleState`; a new per-cycle state defeats
+deduplication. Ordinary auth, list, parse, database, network, and unknown failures are not
+continuity-only and must continue to appear every occurrence.
+
 If the visible maximum is below the checkpoint, or a saved anchor mismatches at the same
 local ID, one poller should CAS-rewind and increment generation. An empty window does not
 prove reset. A legacy checkpoint without any verified anchor can remain degraded. Do not

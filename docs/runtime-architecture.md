@@ -95,8 +95,16 @@ cycle and can admit later messages. A legacy anchorless checkpoint can CAS-enrol
 serverId or content-free fallback anchor from one exact overlapping message, then stops that
 chat for the cycle so the following cycle confirms continuity. If the anchor message is
 absent, duplicated, or lacks the required non-content fields, the chat fails closed.
-Identical ambiguous warnings are deduplicated in the poller process; restart or a changed
-continuity state can produce a new warning.
+Continuity observations live in the process-lifetime `WechatPollingLifecycleState`, not
+the finite per-cycle service. Their signature binds account/conversation, checkpoint local
+ID/generation/fingerprint, remote bounds, recovery action, and failure code. First/change
+emits WARNING; an identical state emits no periodic reminder. Worker restart or account
+change rebuilds the observation and can warn again.
+
+The same lifecycle state owns empty-window markers, pending visible windows, history
+observations, and continuity observations behind one 1,024-Chat bound. Every successful
+`list_chats` cycle prunes all four state kinds for missing Chats. New keys evict the least
+recently touched Chat at the bound, preventing process-lifetime growth under Chat churn.
 
 Message Store uniqueness remains the final idempotency boundary; the checkpoint is an
 optimization and continuity record, not a substitute for that constraint. Polling can
@@ -139,6 +147,10 @@ INFO when first observed or when its content-free local-ID sequence/count change
 window and checkpoint-skip count on later cycles is DEBUG. Chats and cycles with new or
 duplicate messages, failures, bootstrap, self skips, or authentication activity remain
 INFO. Worker start/stop remains INFO and heartbeat failure remains ERROR.
+Known continuity-only failures are different from ordinary failures: first/signature change
+retains the continuity WARNING plus chat/cycle INFO, while an identical later result is
+DEBUG. Auth, list-chats/list-messages, parsing, database, network, and unknown failures
+remain INFO/ERROR every occurrence.
 Activity summaries expose redacted account/conversation references and
 `messages_seen`, `messages_processed`, `messages_new`, `messages_duplicate`,
 `messages_skipped_checkpoint`, `messages_skipped_self`, `messages_failed`,

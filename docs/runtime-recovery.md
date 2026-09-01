@@ -22,7 +22,7 @@ CFserver by this repository change.
 
 Production Compose retains each service's Docker `json-file` logs independently with
 defaults of 64 MiB across 10 files. The tested production-shape plus sustained-business
-model is about 70.19 MiB/day in the busiest container and retains 8.21 days after reserving
+model is about 70.42 MiB/day in the busiest container and retains 8.18 days after reserving
 10% capacity. Across all six services, the theoretical configured maximum is 3.75 GiB.
 Use `docker compose logs --since 168h <service>` before restarting or recreating a
 container, and preserve worker stop/start, checkpoint continuity/regression/CAS evidence,
@@ -35,6 +35,15 @@ requests and routine Alembic context setup remain pinned below WARNING even when
 Gateway level is DEBUG. Their absence at INFO is not evidence of an outage; use runtime
 health and heartbeats for liveness. Third-party DEBUG requires an explicit reviewed logger
 override and must be limited to a bounded diagnostic window.
+
+Persistent continuity-only fail-closed states, including
+`stop_chat_visible_window_empty`, emit their continuity WARNING and chat/cycle INFO only
+on first observation or signature change. Identical later cycles have zero repeated
+WARNING/INFO; no periodic reminder is configured. The signature includes checkpoint
+local ID/generation/fingerprint, remote bounds, recovery action, and failure code under the
+account/conversation scope. Worker restart or account change rebuilds this process-local
+state. A successful `list_chats` cycle prunes disappeared Chats, and all lifecycle state
+shares a 1,024-Chat bound.
 
 Docker logs are bounded operational evidence, not the audit authority. Dispatch recovery
 audits, Message/Admission/Checkpoint facts, delivery attempts and receipts remain in the

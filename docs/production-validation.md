@@ -124,6 +124,14 @@ ambiguous production effect just to test recovery.
   `messages_seen`, `messages_new`, `messages_duplicate`,
   `messages_skipped_checkpoint`, `messages_skipped_self`, and `messages_failed`
   counters remain exact; per-message checkpoint/self skips are DEBUG.
+- [ ] Five persistent `stop_chat_visible_window_empty` Chats, with a new finite polling
+  service each cycle and one shared lifecycle state, emit five continuity WARNINGs, at most
+  five chat INFO summaries, and at most one cycle INFO on first/change. Four unchanged
+  cycles add zero repeated WARNING/chat INFO/cycle INFO; changing one checkpoint emits
+  exactly one additional WARNING/chat INFO and one cycle INFO.
+- [ ] Removing a Chat from `list_chats` prunes its empty marker, pending window, history,
+  and continuity observation. Account change and a new Worker lifecycle reset state, and
+  temporary Chat churn cannot exceed the documented 1,024-Chat cache bound.
 - [ ] A live admission claim fails closed; an expired claim recovers from its stored
   request snapshot.
 - [ ] A crash between allowed-dispatch staging and outcome completion commits neither,
