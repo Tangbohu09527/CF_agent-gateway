@@ -99,12 +99,11 @@ def test_worker_starts_polls_logs_result_and_stops(
     assert calls == [settings]
     assert [record.getMessage() for record in records] == [
         "worker started",
-        "poll cycle started",
         "poll cycle completed",
         "worker stopped",
     ]
     assert records[0].fields == {"polling_interval_seconds": 1.25}  # type: ignore[attr-defined]
-    assert records[2].fields == {  # type: ignore[attr-defined]
+    assert records[1].fields == {  # type: ignore[attr-defined]
         "logged_in": True,
         "chats_seen": 3,
         "chats_succeeded": 2,
@@ -120,6 +119,30 @@ def test_worker_starts_polls_logs_result_and_stops(
         "bootstrapped_chats": 1,
         "failure_count": 1,
     }
+    assert [record.levelno for record in records] == [logging.INFO, logging.INFO, logging.INFO]
+
+
+def test_idle_poll_cycle_is_debug_while_worker_lifecycle_remains_info(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop_event = Event()
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        stop_event.set()
+        return PollResult(logged_in=True, chats_seen=3, chats_succeeded=3)
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
+
+    records = worker_log_records(caplog)
+    assert [(record.getMessage(), record.levelno) for record in records] == [
+        ("worker started", logging.INFO),
+        ("poll cycle started", logging.DEBUG),
+        ("poll cycle completed", logging.DEBUG),
+        ("worker stopped", logging.INFO),
+    ]
 
 
 def test_default_worker_reuses_one_polling_lifecycle_state_across_cycles(
@@ -398,7 +421,8 @@ def test_worker_retries_an_ordinary_poll_error_without_leaking_it(
     assert stop_event.wait_timeouts == [1.25, 1.25]
     assert failure_record.fields == {"error_code": "poll_cycle_failed"}  # type: ignore[attr-defined]
     assert sensitive_detail not in caplog.text
-    assert [record.getMessage() for record in records].count("poll cycle started") == 2
+    assert [record.getMessage() for record in records].count("poll cycle started") == 0
+    assert [record.getMessage() for record in records].count("poll cycle completed") == 1
     assert records[-1].getMessage() == "worker stopped"
 
 
@@ -438,7 +462,6 @@ def test_worker_propagates_permanent_poll_errors(
     assert stop_event.wait_timeouts == []
     assert [record.getMessage() for record in worker_log_records(caplog)] == [
         "worker started",
-        "poll cycle started",
         "worker stopped",
     ]
 

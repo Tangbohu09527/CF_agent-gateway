@@ -72,7 +72,7 @@ def run_worker(
                     phase="polling",
                     cycle_sequence=cycle_sequence,
                 )
-            logger.info("poll cycle started")
+            logger.debug("poll cycle started")
             try:
                 if poll_once is None:
                     assert lifecycle_state is not None
@@ -101,7 +101,9 @@ def run_worker(
                 cycle_succeeded = (
                     result.logged_in and result.chats_failed == 0 and not result.failures
                 )
-                logger.info(
+                level = logging.INFO if _poll_result_has_activity(result) else logging.DEBUG
+                logger.log(
+                    level,
                     "poll cycle completed",
                     extra={
                         "fields": {
@@ -201,6 +203,28 @@ def _safe_error_code(error: Exception) -> str:
     if isinstance(error, (HermesRuntimeError, WechatRuntimeError)):
         return error.code
     return "poll_cycle_failed"
+
+
+def _poll_result_has_activity(result: PollResult) -> bool:
+    return (
+        not result.logged_in
+        or result.chats_failed > 0
+        or bool(result.failures)
+        or result.bootstrapped_chats > 0
+        or any(
+            count > 0
+            for count in (
+                result.messages_seen,
+                result.messages_processed,
+                result.messages_new,
+                result.messages_duplicate,
+                result.messages_skipped_by_checkpoint,
+                result.messages_skipped_as_self,
+                result.messages_failed,
+                result.messages_without_server_id,
+            )
+        )
+    )
 
 
 def _log_worker_failure(error: Exception) -> None:

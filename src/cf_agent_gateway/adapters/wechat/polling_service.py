@@ -1440,7 +1440,9 @@ def _log_message_skip(
 
 
 def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
-    logger.info(
+    level = logging.INFO if _chat_result_has_activity(result) else logging.DEBUG
+    logger.log(
+        level,
         "poll chat completed",
         extra={
             "fields": {
@@ -1463,6 +1465,27 @@ def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
                 "bootstrapped": result.bootstrapped,
             }
         },
+    )
+
+
+def _chat_result_has_activity(result: ChatPollResult) -> bool:
+    return (
+        not result.succeeded
+        or bool(result.failures)
+        or result.bootstrapped
+        or any(
+            count > 0
+            for count in (
+                result.messages_seen,
+                result.messages_processed,
+                result.messages_new,
+                result.messages_duplicate,
+                result.messages_skipped_by_checkpoint,
+                result.messages_skipped_as_self,
+                result.messages_failed,
+                result.messages_without_server_id,
+            )
+        )
     )
 
 

@@ -11,6 +11,14 @@ import pytest
 
 from cf_agent_gateway.logging import JsonFormatter, configure_logging
 
+UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+QUIET_THIRD_PARTY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "alembic",
+    "alembic.runtime.migration",
+)
+
 
 def make_record(
     message: str = "gateway started",
@@ -35,7 +43,7 @@ def preserve_logging_state() -> Iterator[None]:
     root_handlers = root_logger.handlers.copy()
     root_level = root_logger.level
     named_loggers = [
-        logging.getLogger(name) for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
+        logging.getLogger(name) for name in (*UVICORN_LOGGERS, *QUIET_THIRD_PARTY_LOGGERS)
     ]
     named_state = [
         (logger, logger.handlers.copy(), logger.propagate, logger.level) for logger in named_loggers
@@ -122,6 +130,51 @@ def test_json_formatter_emits_a_structured_exception() -> None:
     assert "ValueError: controlled logging failure" in payload["exception"]["stacktrace"]
 
 
+def test_json_formatter_redacts_secrets_bodies_and_raw_identifiers() -> None:
+    sensitive_token = "token-value-that-must-not-appear"
+    sensitive_cookie = "cookie-value-that-must-not-appear"
+    sensitive_body = "private message body that must not appear"
+    sensitive_account = "wxid-private-account"
+    sensitive_chat = "wxid-private-chat"
+    try:
+        raise ValueError(f"body={sensitive_body}; Authorization=Bearer {sensitive_token}")
+    except ValueError:
+        record = make_record(
+            (
+                f"Cookie={sensitive_cookie}; content={sensitive_body}; "
+                f"account_id={sensitive_account}; chat_id={sensitive_chat}"
+            ),
+            level=logging.ERROR,
+            exc_info=sys.exc_info(),
+        )
+    record.fields = {  # type: ignore[attr-defined]
+        "authorization": f"Bearer {sensitive_token}",
+        "Cookie": sensitive_cookie,
+        "message_body": sensitive_body,
+        "source_account_id": sensitive_account,
+        "conversation_id": sensitive_chat,
+        "source_account_id_ref": "source_account:sha256:0123456789abcdef",
+        "conversation_id_ref": "conversation:sha256:fedcba9876543210",
+        "nested": {"chat_id": sensitive_chat},
+    }
+
+    payload = json.loads(JsonFormatter().format(record))
+    serialized = json.dumps(payload, sort_keys=True)
+
+    for sensitive_value in (
+        sensitive_token,
+        sensitive_cookie,
+        sensitive_body,
+        sensitive_account,
+        sensitive_chat,
+    ):
+        assert sensitive_value not in serialized
+    assert payload["source_account_id_ref"] == "source_account:sha256:0123456789abcdef"
+    assert payload["conversation_id_ref"] == "conversation:sha256:fedcba9876543210"
+    assert payload["source_account_id"] == "[REDACTED]"
+    assert payload["nested"]["chat_id"] == "[REDACTED]"
+
+
 def test_configure_logging_is_idempotent(
     preserve_logging_state: None,
     capsys: pytest.CaptureFixture[str],
@@ -137,10 +190,12 @@ def test_configure_logging_is_idempotent(
     assert root_logger.handlers[0] is not first_handler
     assert isinstance(root_logger.handlers[0].formatter, JsonFormatter)
     assert root_logger.level == logging.INFO
-    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    for logger_name in UVICORN_LOGGERS:
         configured_logger = logging.getLogger(logger_name)
         assert configured_logger.handlers == []
         assert configured_logger.propagate is True
+    for logger_name in QUIET_THIRD_PARTY_LOGGERS:
+        assert logging.getLogger(logger_name).level == logging.WARNING
 
     logging.getLogger("cf_agent_gateway.idempotency_test").info(
         "configured once",
@@ -151,3 +206,24 @@ def test_configure_logging_is_idempotent(
     assert captured.out == ""
     assert len(lines) == 1
     assert json.loads(lines[0])["attempt"] == 2
+
+
+def test_configure_logging_suppresses_third_party_info_but_keeps_warnings(
+    preserve_logging_state: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del preserve_logging_state
+    configure_logging("DEBUG")
+
+    for logger_name in QUIET_THIRD_PARTY_LOGGERS:
+        library_logger = logging.getLogger(logger_name)
+        library_logger.info("routine library request")
+        library_logger.warning("library warning retained")
+
+    captured = capsys.readouterr()
+    payloads = [json.loads(line) for line in captured.err.splitlines()]
+
+    assert captured.out == ""
+    assert [payload["logger"] for payload in payloads] == list(QUIET_THIRD_PARTY_LOGGERS)
+    assert {payload["message"] for payload in payloads} == {"library warning retained"}
+    assert {payload["level"] for payload in payloads} == {"WARNING"}
