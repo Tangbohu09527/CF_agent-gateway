@@ -4,6 +4,7 @@ from threading import TIMEOUT_MAX
 import pytest
 
 from cf_agent_gateway.config import (
+    APISettings,
     ArtifactSettings,
     HermesSettings,
     RuntimeSettings,
@@ -21,6 +22,31 @@ def test_artifact_settings_defaults() -> None:
 def test_artifact_settings_rejects_empty_storage_root() -> None:
     with pytest.raises(ValueError, match="artifact.storage_root"):
         ArtifactSettings(storage_root="  ")
+
+
+def test_api_settings_are_fail_closed_and_bounded_by_default() -> None:
+    settings = APISettings()
+
+    assert settings.token_env == "CF_GATEWAY_API_TOKEN"
+    assert settings.admin_token_env == "CF_AGENT_GATEWAY_ADMIN_TOKEN"
+    assert settings.max_request_body_bytes == 1_048_576
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("token_env", ""),
+        ("token_env", "TOKEN=value"),
+        ("admin_token_env", "ADMIN TOKEN"),
+        ("max_request_body_bytes", 0),
+        ("max_request_body_bytes", 64 * 1024 * 1024 + 1),
+    ],
+)
+def test_api_settings_reject_invalid_security_bounds(field: str, value: object) -> None:
+    values = {field: value}
+
+    with pytest.raises(ValueError):
+        APISettings(**values)  # type: ignore[arg-type]
 
 
 def test_runtime_settings_defaults() -> None:

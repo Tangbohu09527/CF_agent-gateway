@@ -150,7 +150,13 @@ class MessageStore:
         return self._session.scalar(statement)
 
     def list_for_conversation(
-        self, *, source: str, source_account_id: str, conversation_id: str
+        self,
+        *,
+        source: str,
+        source_account_id: str,
+        conversation_id: str,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Message]:
         statement = (
             select(Message)
@@ -162,6 +168,10 @@ class MessageStore:
             .options(selectinload(Message.attachments))
             .order_by(Message.timestamp, Message.id)
         )
+        if offset:
+            statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
         return list(self._session.scalars(statement))
 
     def _get_by_event_id(self, event_id: str) -> Message | None:

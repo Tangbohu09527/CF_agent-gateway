@@ -147,6 +147,21 @@ def test_enqueue_is_idempotent_and_preserves_existing_state(session: Session) ->
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
 
+def test_enqueue_reuses_legacy_noncanonical_key_bound_to_message(session: Session) -> None:
+    admission = create_allowed_admission(session)
+    store = HermesDispatchRecordStore(session)
+    existing, _ = store.enqueue(admission)
+    existing.idempotency_key = "legacy-import-dispatch-key"
+    session.commit()
+
+    duplicate, created = store.enqueue(admission)
+
+    assert created is False
+    assert duplicate.id == existing.id
+    assert duplicate.idempotency_key == "legacy-import-dispatch-key"
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
+
+
 def test_enqueue_rejects_same_key_for_a_different_target(session: Session) -> None:
     admission = create_allowed_admission(session)
     store = HermesDispatchRecordStore(session)

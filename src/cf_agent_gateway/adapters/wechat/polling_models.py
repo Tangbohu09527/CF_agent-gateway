@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from cf_agent_gateway.database import Base
 
 MAX_CHECKPOINT_LOCAL_ID = 2**63 - 1
+CHECKPOINT_FINGERPRINT_LENGTH = 64
 
 
 class BootstrapMode(StrEnum):
@@ -29,6 +30,11 @@ class PollFailureStage(StrEnum):
     CHECKPOINT = "checkpoint"
 
 
+class MessageSinkDisposition(StrEnum):
+    CREATED = "created"
+    DUPLICATE = "duplicate"
+
+
 class PollFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -46,7 +52,12 @@ class ChatPollResult(BaseModel):
     succeeded: bool
     messages_seen: int = 0
     messages_processed: int = 0
+    messages_new: int = 0
+    messages_duplicate: int = 0
+    messages_failed: int = 0
     messages_skipped_by_checkpoint: int = 0
+    messages_skipped_as_self: int = 0
+    messages_without_server_id: int = 0
     bootstrapped: bool = False
     failures: list[PollFailure] = Field(default_factory=list)
 
@@ -61,7 +72,12 @@ class PollResult(BaseModel):
     chats_failed: int = 0
     messages_seen: int = 0
     messages_processed: int = 0
+    messages_new: int = 0
+    messages_duplicate: int = 0
+    messages_failed: int = 0
     messages_skipped_by_checkpoint: int = 0
+    messages_skipped_as_self: int = 0
+    messages_without_server_id: int = 0
     bootstrapped_chats: int = 0
     failures: list[PollFailure] = Field(default_factory=list)
     chat_results: list[ChatPollResult] = Field(default_factory=list)
@@ -79,12 +95,29 @@ class WechatSyncCheckpoint(Base):
             "last_local_id >= 0",
             name="ck_wechat_sync_checkpoint_nonnegative_local_id",
         ),
+        CheckConstraint(
+            "regression_generation >= 0",
+            name="ck_wechat_sync_checkpoint_nonnegative_generation",
+        ),
+        CheckConstraint(
+            "last_message_fingerprint IS NULL OR length(last_message_fingerprint) = 64",
+            name="ck_wechat_sync_checkpoint_fingerprint_length",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_account_id: Mapped[str] = mapped_column(String(255))
     conversation_id: Mapped[str] = mapped_column(String(255))
     last_local_id: Mapped[int] = mapped_column(BigInteger)
+    regression_generation: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default="0",
+    )
+    last_message_fingerprint: Mapped[str | None] = mapped_column(
+        String(CHECKPOINT_FINGERPRINT_LENGTH),
+        nullable=True,
+    )
     initialized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

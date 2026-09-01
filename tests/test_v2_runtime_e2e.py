@@ -676,6 +676,10 @@ def test_duplicate_source_message_is_archived_dispatched_and_delivered_once(
 
     assert first_result.messages_processed == 1
     assert duplicate_result.messages_processed == 1
+    assert first_result.messages_new == 1
+    assert first_result.messages_duplicate == 0
+    assert duplicate_result.messages_new == 0
+    assert duplicate_result.messages_duplicate == 1
     assert first_result.failures == duplicate_result.failures == []
     assert len(harness.hermes.calls) == 1
     assert harness.sender_factory.send_calls == [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Protocol
 
 from sqlalchemy import Engine
@@ -11,6 +12,7 @@ from cf_agent_gateway.adapters.wechat import (
     PollResult,
     WechatMessageSender,
     WechatPollingClient,
+    WechatPollingLifecycleState,
     WechatPollingService,
     WechatSyncCheckpointStore,
 )
@@ -29,12 +31,13 @@ from cf_agent_gateway.runtime.errors import (
     WechatClientInitializationError,
     WechatPollingExecutionError,
     WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
 )
+from cf_agent_gateway.runtime.poll_gate import acquire_wechat_poll_gate
 from cf_agent_gateway.runtime.startup import (
     check_database_migrations,
     database_startup_check_enabled,
 )
+from cf_agent_gateway.runtime.wechat_token import resolve_wechat_token
 
 
 class ClosableWechatPollingClient(WechatPollingClient, Protocol):
@@ -80,6 +83,7 @@ def run_wechat_poll_once(
     sender_factory: WechatMessageSenderFactory | None = None,
     engine_factory: Callable[[str], Engine] = create_database_engine,
     environment_reader: Callable[[str], str | None] = os.getenv,
+    lifecycle_state: WechatPollingLifecycleState | None = None,
 ) -> PollResult:
     """Archive, admit, and enqueue one finite WeChat polling cycle."""
 
@@ -90,19 +94,22 @@ def run_wechat_poll_once(
     if not settings.wechat.enabled:
         raise WechatRuntimeDisabledError()
 
-    token = environment_reader(settings.wechat.token_env)
-    if token is None or not token.strip():
-        raise WechatTokenEnvironmentError(settings.wechat.token_env)
+    token = resolve_wechat_token(
+        settings.wechat.token_env,
+        environment_reader=environment_reader,
+    )
 
     engine: Engine | None = None
     checkpoint_session = None
     client: ClosableWechatPollingClient | None = None
+    runtime_stack = ExitStack()
     try:
         engine = engine_factory(settings.database.url)
         if database_startup_check_enabled():
             check_database_migrations(engine)
         else:
             initialize_database(engine)
+        runtime_stack.enter_context(acquire_wechat_poll_gate(engine))
         session_factory = create_database_session_factory(engine)
         checkpoint_session = session_factory()
         checkpoint_store = WechatSyncCheckpointStore(checkpoint_session)
@@ -120,12 +127,21 @@ def run_wechat_poll_once(
             client_initialization_failed = True
         if client_initialization_failed:
             raise WechatClientInitializationError()
-        polling_service = WechatPollingService(
-            client,
-            checkpoint_store,
-            sink,
-            bootstrap_mode=settings.wechat.bootstrap_mode,
-        )
+        if lifecycle_state is None:
+            polling_service = WechatPollingService(
+                client,
+                checkpoint_store,
+                sink,
+                bootstrap_mode=settings.wechat.bootstrap_mode,
+            )
+        else:
+            polling_service = WechatPollingService(
+                client,
+                checkpoint_store,
+                sink,
+                bootstrap_mode=settings.wechat.bootstrap_mode,
+                lifecycle_state=lifecycle_state,
+            )
         polling_failed = False
         try:
             result = polling_service.poll_once()
@@ -143,5 +159,8 @@ def run_wechat_poll_once(
                 if checkpoint_session is not None:
                     checkpoint_session.close()
             finally:
-                if engine is not None:
-                    engine.dispose()
+                try:
+                    runtime_stack.close()
+                finally:
+                    if engine is not None:
+                        engine.dispose()

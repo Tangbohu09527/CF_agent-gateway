@@ -5,6 +5,7 @@ import os
 import signal
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from threading import Event
 from types import FrameType
 from typing import Protocol
@@ -22,6 +23,7 @@ from cf_agent_gateway.database import (
 from cf_agent_gateway.hermes import (
     HERMES_CONTEXT_TOOL_NAMES,
     HermesChatClient,
+    HermesChatResult,
     HermesClient,
     HermesDispatchService,
 )
@@ -64,27 +66,75 @@ class HermesClientFactory(Protocol):
     ) -> ClosableHermesChatClient: ...
 
 
+class _OperationObservedHermesClient:
+    def __init__(
+        self,
+        client: HermesChatClient,
+        observer: Callable[[bool], None],
+    ) -> None:
+        self._client = client
+        self._observer = observer
+
+    def chat(
+        self,
+        content: str,
+        *,
+        hermes_thread_id: str | None = None,
+        profile_reference: str | None = None,
+        profile_revision: int | None = None,
+        thread_id: str | None = None,
+        session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> HermesChatResult:
+        try:
+            result = self._client.chat(
+                content,
+                hermes_thread_id=hermes_thread_id,
+                profile_reference=profile_reference,
+                profile_revision=profile_revision,
+                thread_id=thread_id,
+                session_metadata=session_metadata,
+                idempotency_key=idempotency_key,
+            )
+        except Exception:
+            self._notify(False)
+            raise
+        self._notify(True)
+        return result
+
+    def _notify(self, succeeded: bool) -> None:
+        with suppress(Exception):
+            self._observer(succeeded)
+
+
 def build_dispatch_worker(
     settings: Settings,
     *,
     session_factory: sessionmaker[Session],
     hermes_client: HermesChatClient,
     sender_factory: WechatMessageSenderFactory | None,
+    operation_observer: Callable[[bool], None] | None = None,
 ) -> HermesDispatchWorker:
     """Build the public worker core around injected runtime dependencies."""
 
     del sender_factory
+    observed_client: HermesChatClient = (
+        _OperationObservedHermesClient(hermes_client, operation_observer)
+        if operation_observer is not None
+        else hermes_client
+    )
     return HermesDispatchWorker(
         session_factory,
         lambda session: HermesDispatchService(
             session,
-            hermes_client,
+            observed_client,
             context_access_policy=EnabledContextAccessPolicy(),
             available_tools=HERMES_CONTEXT_TOOL_NAMES,
         ),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,
         response_processor_factory=ResponsePersistenceProcessor,
+        reconcile_persisted_responses=True,
     )
 
 
@@ -112,6 +162,12 @@ def run_dispatch_worker(
     engine: Engine | None = None
     hermes_client: ClosableHermesChatClient | None = None
     try:
+        engine = engine_factory(settings.database.url)
+        if database_startup_check_enabled():
+            check_database_migrations(engine)
+        else:
+            initialize_database(engine)
+
         client_initialization_failed = False
         try:
             hermes_client = hermes_client_factory(
@@ -124,17 +180,16 @@ def run_dispatch_worker(
         if client_initialization_failed:
             raise HermesClientInitializationError()
 
-        engine = engine_factory(settings.database.url)
-        if database_startup_check_enabled():
-            check_database_migrations(engine)
-        else:
-            initialize_database(engine)
         session_factory = create_database_session_factory(engine)
         worker = build_dispatch_worker(
             settings,
             session_factory=session_factory,
             hermes_client=hermes_client,
             sender_factory=sender_factory,
+            operation_observer=_hermes_operation_observer(
+                heartbeat,
+                concurrency=settings.worker.concurrency,
+            ),
         )
         logger.info(
             "dispatch worker started",
@@ -227,12 +282,33 @@ def _run_resident_worker(
     try:
         with resident_heartbeat(
             heartbeat,
+            stop_event=stop_event,
             phase="dispatching",
             concurrency=concurrency,
         ):
             worker.run(stop_event=stop_event, concurrency=concurrency)
     finally:
         logger.info("dispatch worker stopped")
+
+
+def _hermes_operation_observer(
+    heartbeat: HeartbeatPublisher | None,
+    *,
+    concurrency: int,
+) -> Callable[[bool], None] | None:
+    if heartbeat is None:
+        return None
+
+    def publish(succeeded: bool) -> None:
+        heartbeat.update(
+            "running",
+            phase="dispatching",
+            concurrency=concurrency,
+            last_operation_succeeded=succeeded,
+            last_operation_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
+
+    return publish
 
 
 def _log_heartbeat_failure() -> None:

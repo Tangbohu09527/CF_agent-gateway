@@ -9,11 +9,17 @@ from contextlib import contextmanager
 from threading import TIMEOUT_MAX, Event
 from types import FrameType
 
+from sqlalchemy.exc import DBAPIError
+
 from cf_agent_gateway.config import Settings, load_settings
 from cf_agent_gateway.delivery import DeliveryBatchResult
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.runtime.delivery import run_wechat_delivery_once
-from cf_agent_gateway.runtime.errors import WechatRuntimeDisabledError, WechatRuntimeError
+from cf_agent_gateway.runtime.errors import (
+    WechatRuntimeDisabledError,
+    WechatRuntimeError,
+    WechatTokenContractError,
+)
 from cf_agent_gateway.runtime.heartbeat import (
     HeartbeatPublisher,
     create_worker_heartbeat_from_environment,
@@ -48,15 +54,30 @@ def run_delivery_worker(
         raise ValueError("idle_poll_seconds must be a finite positive number")
 
     shutdown = stop_event if stop_event is not None else Event()
-    execute_delivery = deliver_once if deliver_once is not None else run_wechat_delivery_once
+    execute_delivery = (
+        deliver_once
+        if deliver_once is not None
+        else lambda candidate: run_wechat_delivery_once(candidate, max_deliveries=1)
+    )
     try:
-        with resident_heartbeat(heartbeat, phase="delivery"):
+        with resident_heartbeat(heartbeat, stop_event=shutdown, phase="delivery"):
             logger.info(
                 "delivery worker started",
                 extra={"fields": {"idle_poll_seconds": idle_poll_seconds}},
             )
             while not shutdown.is_set():
-                result = execute_delivery(settings)
+                try:
+                    result = execute_delivery(settings)
+                except (WechatRuntimeDisabledError, WechatTokenContractError):
+                    raise
+                except DBAPIError:
+                    logger.error(
+                        "delivery cycle failed",
+                        extra={"fields": {"error_code": "delivery_runtime_unavailable"}},
+                    )
+                    if shutdown.wait(idle_poll_seconds):
+                        break
+                    continue
                 if result.processed:
                     logger.info(
                         "delivery batch processed",
@@ -69,6 +90,7 @@ def run_delivery_worker(
                             }
                         },
                     )
+                    continue
                 if shutdown.wait(idle_poll_seconds):
                     break
     finally:

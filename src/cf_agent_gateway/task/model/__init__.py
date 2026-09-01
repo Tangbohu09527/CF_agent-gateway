@@ -6,7 +6,12 @@ from cf_agent_gateway.task.model.errors import (
     HermesDispatchStateConflictError,
     HermesDispatchTargetConflictError,
 )
-from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispatchStatus
+from cf_agent_gateway.task.model.models import (
+    HermesDispatchRecord,
+    HermesDispatchRecoveryAction,
+    HermesDispatchRecoveryAudit,
+    HermesDispatchStatus,
+)
 from cf_agent_gateway.task.model.store import (
     DEFAULT_LEASE_SECONDS,
     DEFAULT_RETRY_LIMIT,
@@ -21,6 +26,8 @@ __all__ = [
     "HERMES_DISPATCH_IDEMPOTENCY_NAMESPACE",
     "HermesDispatchAdmissionError",
     "HermesDispatchRecord",
+    "HermesDispatchRecoveryAction",
+    "HermesDispatchRecoveryAudit",
     "HermesDispatchRecordError",
     "HermesDispatchRecordStore",
     "HermesDispatchStateConflictError",

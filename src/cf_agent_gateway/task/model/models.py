@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -27,6 +29,12 @@ class HermesDispatchStatus(StrEnum):
     FAILED = "failed"
     UNCERTAIN = "uncertain"
     DEAD = "dead"
+
+
+class HermesDispatchRecoveryAction(StrEnum):
+    RETRY_APPROVED = "retry_approved"
+    MARK_DEAD = "mark_dead"
+    CONFIRM_SUCCESS = "confirm_success"
 
 
 def _enum_values(enum_type: type[StrEnum]) -> list[str]:
@@ -68,6 +76,29 @@ class HermesDispatchRecord(Base):
         CheckConstraint(
             "claim_token IS NULL OR length(trim(claim_token)) > 0",
             name="ck_hermes_dispatch_nonempty_claim_token",
+        ),
+        CheckConstraint(
+            "manual_retry_approved = false OR status = 'failed'",
+            name="ck_hermes_dispatch_manual_retry_status",
+        ),
+        CheckConstraint(
+            "reconciliation_failure_count >= 0",
+            name="ck_hermes_dispatch_reconciliation_failure_count",
+        ),
+        CheckConstraint(
+            "(reconciliation_failure_count = 0 "
+            "AND reconciliation_next_attempt_at IS NULL "
+            "AND reconciliation_quarantined_at IS NULL "
+            "AND reconciliation_last_error_code IS NULL) OR "
+            "(reconciliation_failure_count BETWEEN 1 AND 4 "
+            "AND reconciliation_next_attempt_at IS NOT NULL "
+            "AND reconciliation_quarantined_at IS NULL "
+            "AND reconciliation_last_error_code IS NOT NULL) OR "
+            "(reconciliation_failure_count >= 5 "
+            "AND reconciliation_next_attempt_at IS NULL "
+            "AND reconciliation_quarantined_at IS NOT NULL "
+            "AND reconciliation_last_error_code IS NOT NULL)",
+            name="ck_hermes_dispatch_reconciliation_state",
         ),
         CheckConstraint(
             "(status = 'queued' AND claim_token IS NULL "
@@ -121,6 +152,13 @@ class HermesDispatchRecord(Base):
             "status",
         ),
         Index(
+            "ix_hermes_dispatch_reconciliation",
+            "status",
+            "reconciliation_quarantined_at",
+            "reconciliation_next_attempt_at",
+            "id",
+        ),
+        Index(
             "uq_hermes_dispatch_running_thread",
             "ai_thread_id",
             unique=True,
@@ -153,6 +191,11 @@ class HermesDispatchRecord(Base):
         server_default=HermesDispatchStatus.QUEUED.value,
     )
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    manual_retry_approved: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+    )
     claim_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -160,7 +203,110 @@ class HermesDispatchRecord(Base):
         DateTime(timezone=True), nullable=True
     )
     last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reconciliation_failure_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+    )
+    reconciliation_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    reconciliation_quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    reconciliation_last_error_code: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class HermesDispatchRecoveryAudit(Base):
+    __tablename__ = "hermes_dispatch_recovery_audits"
+    __table_args__ = (
+        UniqueConstraint(
+            "dispatch_record_id",
+            "action",
+            "reference",
+            name="uq_dispatch_recovery_reference",
+        ),
+        CheckConstraint(
+            "action IN ('retry_approved', 'mark_dead', 'confirm_success')",
+            name="ck_dispatch_recovery_action",
+        ),
+        CheckConstraint(
+            "before_status IN ('queued', 'running', 'success', 'failed', 'uncertain', 'dead')",
+            name="ck_dispatch_recovery_before_status",
+        ),
+        CheckConstraint(
+            "after_status IN ('queued', 'running', 'success', 'failed', 'uncertain', 'dead')",
+            name="ck_dispatch_recovery_after_status",
+        ),
+        CheckConstraint(
+            "(action = 'retry_approved' AND before_status = 'uncertain' "
+            "AND after_status = 'failed' AND evidence_dispatch_response_id IS NULL) OR "
+            "(action = 'mark_dead' AND before_status = 'uncertain' "
+            "AND after_status = 'dead' AND evidence_dispatch_response_id IS NULL) OR "
+            "(action = 'confirm_success' AND before_status = 'uncertain' "
+            "AND after_status = 'success' AND evidence_dispatch_response_id IS NOT NULL)",
+            name="ck_dispatch_recovery_action_transition",
+        ),
+        CheckConstraint("length(trim(operator)) > 0", name="ck_dispatch_recovery_operator"),
+        CheckConstraint("length(trim(reference)) > 0", name="ck_dispatch_recovery_reference"),
+        CheckConstraint("length(trim(reason)) > 0", name="ck_dispatch_recovery_reason"),
+        Index(
+            "ix_dispatch_recovery_record_created",
+            "dispatch_record_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dispatch_record_id: Mapped[int] = mapped_column(
+        ForeignKey("hermes_dispatch_records.id", ondelete="RESTRICT")
+    )
+    action: Mapped[HermesDispatchRecoveryAction] = mapped_column(
+        Enum(
+            HermesDispatchRecoveryAction,
+            values_callable=_enum_values,
+            native_enum=False,
+            create_constraint=False,
+            validate_strings=True,
+            name="hermes_dispatch_recovery_action",
+        )
+    )
+    operator: Mapped[str] = mapped_column(String(128))
+    reference: Mapped[str] = mapped_column(String(255))
+    reason: Mapped[str] = mapped_column(String(1024))
+    before_status: Mapped[HermesDispatchStatus] = mapped_column(
+        Enum(
+            HermesDispatchStatus,
+            values_callable=_enum_values,
+            native_enum=False,
+            create_constraint=False,
+            validate_strings=True,
+            name="hermes_dispatch_recovery_before_status",
+        )
+    )
+    after_status: Mapped[HermesDispatchStatus] = mapped_column(
+        Enum(
+            HermesDispatchStatus,
+            values_callable=_enum_values,
+            native_enum=False,
+            create_constraint=False,
+            validate_strings=True,
+            name="hermes_dispatch_recovery_after_status",
+        )
+    )
+    before_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_dispatch_response_id: Mapped[int | None] = mapped_column(
+        ForeignKey("hermes_dispatch_responses.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

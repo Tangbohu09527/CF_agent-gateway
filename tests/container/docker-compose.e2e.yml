@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: e2e_database_value
+      TZ: UTC
+    tmpfs:
+      - /var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=256m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U gateway -d gateway
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: "no"
+
+  synthetic-wechat:
+    build:
+      context: .
+      dockerfile: tests/container/Dockerfile.synthetic-wechat
+    image: cf-agent-gateway-synthetic-wechat:e2e
+    init: true
+    user: "10002:10002"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:6174/health', timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: "no"
+
+  heartbeat-init:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+
+  migration:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    depends_on:
+      synthetic-wechat:
+        condition: service_healthy
+
+  dispatch-worker:
+    depends_on:
+      synthetic-wechat:
+        condition: service_healthy
+
+  delivery-worker:
+    depends_on:
+      synthetic-wechat:
+        condition: service_healthy

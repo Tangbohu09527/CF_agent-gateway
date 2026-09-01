@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from cf_agent_gateway.config import Settings
 from cf_agent_gateway.delivery import DeliveryBatchResult
@@ -89,6 +90,29 @@ def test_delivery_worker_marks_heartbeat_failed_when_drain_raises() -> None:
     assert isinstance(heartbeat.events[2], tuple)
     assert heartbeat.events[2][0] == "wait"
     assert heartbeat.events[-1] == ("stop", "failed")
+
+
+def test_delivery_worker_retries_transient_database_errors() -> None:
+    stop_event = Event()
+    calls = 0
+
+    def flaky_delivery(settings: Settings) -> DeliveryBatchResult:
+        nonlocal calls
+        del settings
+        calls += 1
+        if calls == 1:
+            raise OperationalError("SELECT 1", {}, RuntimeError("connection lost"))
+        stop_event.set()
+        return DeliveryBatchResult(deliveries=())
+
+    delivery_worker.run_delivery_worker(
+        Settings(),
+        stop_event=stop_event,
+        deliver_once=flaky_delivery,
+        idle_poll_seconds=0.001,
+    )
+
+    assert calls == 2
 
 
 def test_delivery_worker_does_not_drain_after_shutdown() -> None:

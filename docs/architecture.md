@@ -21,6 +21,8 @@ Employee WeChat
 
 `agent-wechat` and Hermes remain external components. Polling, Hermes execution, and
 response delivery are separate Gateway processes coordinated through durable database records.
+For the production-hardening view, recovery contracts and PR #3 lineage, see
+[runtime-architecture.md](runtime-architecture.md).
 
 ## Request flow and status
 
@@ -29,7 +31,8 @@ The implemented runtime path is:
 ```text
 WeChat polling
   -> Message Archive
-  -> identity/access admission
+  -> authoritative Message admission outcome
+  -> identity/access admission when outcome is pending or absent
   -> V1-compatible or V2 profile/thread routing
   -> queued Hermes dispatch record
 
@@ -51,33 +54,48 @@ The stages are:
    A first `latest` poll checkpoints visible history; `backfill` processes history by
    ascending `localId`. Raw `isSelf=true` messages bypass normalization, Message Archive,
    admission, and dispatch enqueue while their checkpoint still advances.
+   Because `localId` can reset after a session/QR rebuild, the checkpoint also carries a
+   regression generation and content-free continuity anchor. The anchor prefers
+   `serverId`; when it is absent it digests scoped local ID, sender ID, raw type, UTC
+   timestamp, and self flag without message content. A proven regression performs one CAS
+   rewind; an empty window or ambiguous legacy checkpoint does not.
 2. The adapter normalizes each remaining message. A per-message session commits Message
    Archive facts before identity and access admission. Event and physical source-message
    uniqueness make redelivery storage-idempotent.
-3. Authorized messages create or reuse a Workspace and resolve an AIThread. With
+3. `message_admission_outcomes` provides one durable authority for each Message.
+   Completed denied or legacy-unresolved outcomes replay without policy/routing
+   reevaluation. Pending outcomes have a fenced lease and retain the request snapshot used
+   for stale recovery.
+4. Authorized messages create or reuse a Workspace and resolve an AIThread. With
    `runtime.v2_routing_enabled`, routing snapshots the selected Agent Profile revision and
    thread policy; the compatibility path retains the existing source binding behavior.
-4. Admission commits one `hermes_dispatch_records` row per message with a stable
-   idempotency key. Polling stops here: it never creates a Hermes client or outbound
-   sender and never calls Hermes.
-5. `HermesDispatchWorker.claim_once()` selects an eligible thread head ordered by
+5. A new allowed admission outcome and one `hermes_dispatch_records` row with a stable
+   idempotency key commit in the same transaction. Completed allowed replay reuses its
+   stored identity/Workspace/AIThread target and repairs only a missing idempotent dispatch.
+   Polling stops here: it never creates a Hermes client or outbound sender and never calls
+   Hermes.
+6. `HermesDispatchWorker.claim_once()` selects an eligible thread head ordered by
    `(created_at, id)`. The database update rechecks eligibility, FIFO position, thread
    idleness, retry budget, and claim token as one compare-and-swap operation. A partial
    unique index independently enforces at most one `running` record per `ai_thread_id`.
-6. A claim has a renewable lease. The heartbeat remains active through the external call
+7. A claim has a renewable lease. The heartbeat remains active through the external call
    and final persistence transaction. An expired `running` record is reclaimable with a
    new token while attempts remain; every renewal and terminal write is fenced by the
    current token.
-7. `HermesDispatchService.dispatch_record()` reads the archived message without inserting
+8. `HermesDispatchService.dispatch_record()` reads the archived message without inserting
    or updating Message Archive. It validates Workspace, AIThread, profile snapshot, and
    source binding, then preserves the profile reference/revision, Gateway thread id,
    Hermes session id, and dispatch `Idempotency-Key` in the Hermes call.
-8. Definite pre-response failures become retryable `failed` records until the configured
+9. Definite pre-response failures become retryable `failed` records until the configured
    budget is exhausted, then become `dead`. Timeouts, transport ambiguity, invalid
    responses after a possible call, and post-call thread-binding conflicts become
    `uncertain`. `uncertain` blocks later records on that thread; `success` and `dead`
    release the next head.
-9. A successful `ResponseEnvelope` is inserted into `hermes_dispatch_responses` in the
+   Recovery is an authenticated Admin action: an operator may approve retry after proving
+   non-execution, terminate as dead, or confirm success only from matching persisted
+   response evidence. Each action is CAS-protected and writes a database-immutable audit
+   row; no operator-supplied assistant content is accepted.
+10. A successful `ResponseEnvelope` is inserted into `hermes_dispatch_responses` in the
    same claim-token-fenced transaction that changes the dispatch from `running` to
    `success`. Only after commit does the account-scoped response processor persist
    ordered response parts and enqueue the WeChat delivery target.
@@ -92,6 +110,12 @@ sends response parts in order, and records each attempt and provider receipt. Re
 failures are scheduled with bounded backoff; permanent or ambiguous outcomes become
 terminal delivery states without changing the successful dispatch. Artifact fetching,
 Memory, RAG, and Skill authorization remain outside this runtime.
+
+The response/outbox reconciliation scan also runs in the dispatch worker but never calls
+Hermes. It runs at most once per five seconds, persists exponential retry time after a
+candidate failure, and quarantines the fifth failure. Cursor order allows later valid
+candidates to proceed. A successful replay clears reconciliation failure state and uses
+the existing unique Response/Delivery boundaries.
 
 ## Target thread isolation and V1 deviation
 
@@ -174,9 +198,11 @@ Legacy injected Hermes-client and sender factory parameters remain accepted as n
 compatibility arguments; polling does not read Hermes credentials or initialize them.
 
 Before a raw self-originated message can reach the sink, `WechatPollingService` filters
-it and advances the conversation checkpoint. `runtime.worker` serially invokes the
-finite polling runtime, waits for `runtime.polling_interval_seconds`, and maps `SIGINT`
-and `SIGTERM` to a shared stop event. Poll cycles never overlap.
+it and advances the conversation checkpoint. Per-message checkpoint/self skips are DEBUG;
+each chat produces one redacted aggregate INFO summary. `runtime.worker` serially invokes
+the finite polling runtime, records one aggregate cycle completion, waits for
+`runtime.polling_interval_seconds`, and maps `SIGINT` and `SIGTERM` to a shared stop
+event. Poll cycles never overlap.
 
 ## Dispatch worker boundary
 
@@ -233,6 +259,13 @@ either rule resolves to the existing physical message without overwriting it. Th
 account component prevents identical conversation and source-message IDs belonging to
 different bot accounts from conflicting.
 
+`message_admission_outcomes.message_id` is a unique restrictive foreign key to Messages.
+Pending runtime rows preserve request facts, claim/lease state, attempts, and stable failure
+code. Completed rows preserve the allow/deny/unresolved decision, reason, authorization and
+policy evidence, and all required routing targets. Database checks reject completed allowed
+rows without identity/Workspace/AIThread targets and completed denied/unresolved rows that
+request a task.
+
 Each message can persist `conversation_type`, structured `is_mentioned`, `is_self`, sender
 kind, raw channel type, and available channel-local identifiers from its adapter envelope.
 The archive adds `direction`, `occurred_at`, and first-received `received_at` while retaining
@@ -254,4 +287,7 @@ already-versioned databases upgrade during startup; unversioned non-empty databa
 rejected. The current V1 startup also rejects sender-scoped thread-binding constraints
 because the implemented binding is conversation-scoped. That behavior is the known
 deviation described above, not a change to the target sender-isolated group design. The
-service never automatically deletes `gateway.db`.
+current packaged head is `20260823_04`. It includes conservative legacy admission
+backfill, persistent reconciliation scheduling, database-level recovery-audit immutability,
+and transition/state checks for PostgreSQL and SQLite. The service never automatically
+deletes `gateway.db`.

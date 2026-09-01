@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from cf_agent_gateway.access import AccessPolicyService, ReasonCode, RequestFacts, RiskLevel
 from cf_agent_gateway.adapters.wechat import (
+    MessageSinkDisposition,
     NormalizedWechatMessage,
     WechatConversationType,
     WechatMessageType,
@@ -616,7 +617,8 @@ def test_resolver_and_identity_map_cannot_override_persisted_source_facts(
     assert outcome.admission.reason is AdmissionReason.ACCESS_DENIED
     assert outcome.admission.authorization is not None
     assert outcome.admission.authorization.reason_code is ReasonCode.BOT_NOT_MENTIONED
-    assert resolver.rejected_fields == {"is_mentioned"}
+    # Completed denials are authoritative; replay must not invoke a new resolver.
+    assert resolver.rejected_fields == set()
     assert_resource_counts(session, messages=1, workspaces=0, threads=0)
     session.commit()
     session.expire_all()
@@ -831,6 +833,7 @@ def test_sink_handle_returns_none_and_process_returns_outcome(session: Session) 
     message = normalized_message()
 
     assert sink.handle(message) is None
+    assert sink.handle_with_disposition(message) is MessageSinkDisposition.DUPLICATE
     outcome = sink.process(message)
 
     assert isinstance(outcome, MessageIngestionOutcome)

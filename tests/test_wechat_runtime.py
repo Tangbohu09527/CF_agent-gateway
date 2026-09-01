@@ -12,6 +12,7 @@ from cf_agent_gateway.access import AccessPolicyService, RiskLevel
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatAuthStatus,
     RawWechatMessage,
+    WechatPollingLifecycleState,
     WechatSyncCheckpoint,
 )
 from cf_agent_gateway.config import (
@@ -37,6 +38,7 @@ from cf_agent_gateway.runtime import (
     run_wechat_poll_once,
 )
 from cf_agent_gateway.runtime import wechat as wechat_runtime
+from cf_agent_gateway.runtime.wechat_token import TOKEN_FILE_ENV
 from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.workspace.models import AIThread, EmployeeWorkspace
 
@@ -151,7 +153,7 @@ def test_missing_token_environment_fails_closed_before_resource_creation() -> No
         )
 
     assert error.value.environment_variable == TOKEN_ENV
-    assert TOKEN_ENV in str(error.value)
+    assert str(error.value) == "token_missing"
     assert TOKEN not in str(error.value)
     assert engine_calls == 0
 
@@ -186,7 +188,7 @@ def test_polling_does_not_require_or_initialize_hermes(tmp_path: Path) -> None:
     )
 
     assert result.logged_in is True
-    assert environment_reads == [TOKEN_ENV]
+    assert environment_reads == [TOKEN_ENV, TOKEN_FILE_ENV]
     assert client.close_calls == 1
 
 
@@ -201,7 +203,7 @@ def test_client_initialization_error_does_not_expose_token() -> None:
         run_wechat_poll_once(
             runtime_settings("sqlite+pysqlite:///:memory:"),
             client_factory=failing_client_factory,
-            environment_reader=lambda name: sensitive_token,
+            environment_reader=lambda name: sensitive_token if name == TOKEN_ENV else None,
         )
 
     assert sensitive_token not in str(error.value)
@@ -220,6 +222,7 @@ def test_runtime_assembly_and_cleanup_order(
     expected_routing_flag = v2_routing_enabled
     checkpoint_store_marker = object()
     sink_marker = object()
+    lifecycle_state = WechatPollingLifecycleState()
 
     class TrackingEngine:
         def dispose(self) -> None:
@@ -281,11 +284,13 @@ def test_runtime_assembly_and_cleanup_order(
             sink: object,
             *,
             bootstrap_mode: str,
+            lifecycle_state: WechatPollingLifecycleState,
         ) -> None:
             assert runtime_client is client
             assert checkpoint_store is checkpoint_store_marker
             assert sink is sink_marker
             assert bootstrap_mode == "backfill"
+            assert lifecycle_state is lifecycle_state_marker
             events.append("polling_service")
 
         def poll_once(self) -> Any:
@@ -308,6 +313,7 @@ def test_runtime_assembly_and_cleanup_order(
         sink_factory,
     )
     monkeypatch.setattr(wechat_runtime, "WechatPollingService", TrackingPollingService)
+    lifecycle_state_marker = lifecycle_state
 
     settings = runtime_settings(
         "sqlite+pysqlite:///:memory:",
@@ -319,6 +325,7 @@ def test_runtime_assembly_and_cleanup_order(
                 settings,
                 client_factory=client_factory,  # type: ignore[arg-type]
                 engine_factory=engine_factory,  # type: ignore[arg-type]
+                lifecycle_state=lifecycle_state,
             )
         assert error.value.__cause__ is None
         assert error.value.__context__ is None
@@ -327,6 +334,7 @@ def test_runtime_assembly_and_cleanup_order(
             settings,
             client_factory=client_factory,  # type: ignore[arg-type]
             engine_factory=engine_factory,  # type: ignore[arg-type]
+            lifecycle_state=lifecycle_state,
         )
         assert result.logged_in is True
 
@@ -469,7 +477,7 @@ def test_runtime_archives_admits_and_enqueues_without_inline_hermes(tmp_path: Pa
     assert result.messages_processed == 1
     assert result.chats_failed == 0
     assert result.failures == []
-    assert environment_reads == [TOKEN_ENV]
+    assert environment_reads == [TOKEN_ENV, TOKEN_FILE_ENV]
     assert wechat_client.auth_calls == 1
     assert wechat_client.close_calls == 1
 
@@ -596,7 +604,7 @@ def test_latest_bootstrap_then_processes_only_new_messages(tmp_path: Path) -> No
     first = run_wechat_poll_once(
         settings,
         client_factory=RecordingClientFactory(first_client),
-        environment_reader=lambda name: TOKEN,
+        environment_reader=lambda name: TOKEN if name == TOKEN_ENV else None,
     )
 
     assert first.bootstrapped_chats == 1
@@ -607,7 +615,7 @@ def test_latest_bootstrap_then_processes_only_new_messages(tmp_path: Path) -> No
     second = run_wechat_poll_once(
         settings,
         client_factory=RecordingClientFactory(second_client),
-        environment_reader=lambda name: TOKEN,
+        environment_reader=lambda name: TOKEN if name == TOKEN_ENV else None,
     )
 
     assert second.bootstrapped_chats == 0

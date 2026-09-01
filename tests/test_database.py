@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from cf_agent_gateway import database, migration
 from cf_agent_gateway.database import (
@@ -24,6 +25,29 @@ def test_postgresql_engine_configuration() -> None:
     try:
         assert engine.dialect.name == "postgresql"
         assert engine.driver == "psycopg"
+    finally:
+        engine.dispose()
+
+
+def test_database_engine_hides_bound_parameters_in_errors() -> None:
+    sensitive_content = "PRIVATE-MESSAGE-BODY"
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE TABLE redaction_test (value TEXT UNIQUE)"))
+            connection.execute(
+                text("INSERT INTO redaction_test (value) VALUES (:value)"),
+                {"value": sensitive_content},
+            )
+
+        with pytest.raises(IntegrityError) as caught, engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO redaction_test (value) VALUES (:value)"),
+                {"value": sensitive_content},
+            )
+
+        assert sensitive_content not in str(caught.value)
+        assert "SQL parameters hidden" in str(caught.value)
     finally:
         engine.dispose()
 
@@ -72,7 +96,7 @@ def test_check_database_migrations_rejects_missing_thread_binding_constraints() 
                 text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
             )
             connection.execute(
-                text("INSERT INTO alembic_version (version_num) VALUES ('20260810_01')")
+                text("INSERT INTO alembic_version (version_num) VALUES ('20260823_04')")
             )
             connection.execute(
                 text(

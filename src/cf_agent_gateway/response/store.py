@@ -81,13 +81,25 @@ class ResponseStore:
 
         existing = self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            delivery = self._delivery_for(existing.response_id, target)
-            self._require_compatible(
+            self._require_compatible_response(
                 existing,
-                delivery,
                 outcome=outcome,
                 envelope=envelope,
                 content_sha256=content_sha256,
+            )
+            delivery = self._find_delivery(existing.response_id, target)
+            if delivery is None:
+                return self._create_missing_delivery(
+                    existing,
+                    outcome=outcome,
+                    envelope=envelope,
+                    content_sha256=content_sha256,
+                    target=target,
+                    target_key=target_key,
+                    delivery_key=delivery_key,
+                )
+            self._require_compatible_delivery(
+                delivery,
                 target=target,
                 target_key=target_key,
             )
@@ -108,15 +120,12 @@ class ResponseStore:
             _part_record(envelope.response_id, ordinal, part)
             for ordinal, part in enumerate(envelope.parts)
         ]
-        delivery = DeliveryOutboxRecord(
-            idempotency_key=delivery_key,
+        delivery = self._new_delivery(
             response_id=envelope.response_id,
-            channel=target.channel,
-            account_id=target.account_id,
-            conversation_id=target.conversation_id,
+            delivery_key=delivery_key,
+            target=target,
             target_key=target_key,
-            status=DeliveryStatus.QUEUED,
-            available_at=now,
+            now=now,
         )
         response.status = ResponseStatus.GENERATED
         response.generated_at = now
@@ -129,13 +138,25 @@ class ResponseStore:
             self._session.rollback()
             existing = self.get_by_idempotency_key(idempotency_key)
             if existing is not None:
-                delivery = self._delivery_for(existing.response_id, target)
-                self._require_compatible(
+                self._require_compatible_response(
                     existing,
-                    delivery,
                     outcome=outcome,
                     envelope=envelope,
                     content_sha256=content_sha256,
+                )
+                delivery = self._find_delivery(existing.response_id, target)
+                if delivery is None:
+                    return self._create_missing_delivery(
+                        existing,
+                        outcome=outcome,
+                        envelope=envelope,
+                        content_sha256=content_sha256,
+                        target=target,
+                        target_key=target_key,
+                        delivery_key=delivery_key,
+                    )
+                self._require_compatible_delivery(
+                    delivery,
                     target=target,
                     target_key=target_key,
                 )
@@ -149,6 +170,21 @@ class ResponseStore:
             self.get_delivery_required(delivery.id),
             True,
         )
+
+    def verify_generated(self, outcome: HermesDispatchOutcome) -> ResponseRecord | None:
+        """Validate a normalized response without creating delivery state."""
+
+        envelope = _response_envelope(outcome)
+        existing = self.get_by_idempotency_key(build_response_idempotency_key(outcome.message_id))
+        if existing is None:
+            return None
+        self._require_compatible_response(
+            existing,
+            outcome=outcome,
+            envelope=envelope,
+            content_sha256=_content_sha256(envelope),
+        )
+        return existing
 
     def save(
         self,
@@ -192,35 +228,25 @@ class ResponseStore:
         self._session.refresh(delivery)
         return delivery
 
-    def _delivery_for(
+    def _find_delivery(
         self,
         response_id: str,
         target: DeliveryTarget,
-    ) -> DeliveryOutboxRecord:
+    ) -> DeliveryOutboxRecord | None:
         statement = select(DeliveryOutboxRecord).where(
             DeliveryOutboxRecord.response_id == response_id,
             DeliveryOutboxRecord.channel == target.channel,
             DeliveryOutboxRecord.target_key == _target_key(target),
         )
-        delivery = self._session.scalar(statement)
-        if delivery is None:
-            raise ResponseConflictError(
-                idempotency_key=build_response_idempotency_key(
-                    self.get_required(response_id).message_id
-                )
-            )
-        return delivery
+        return self._session.scalar(statement)
 
     @staticmethod
-    def _require_compatible(
+    def _require_compatible_response(
         response: ResponseRecord,
-        delivery: DeliveryOutboxRecord,
         *,
         outcome: HermesDispatchOutcome,
         envelope: ResponseEnvelope,
         content_sha256: str,
-        target: DeliveryTarget,
-        target_key: str,
     ) -> None:
         stored_parts = tuple(
             (
@@ -246,12 +272,105 @@ class ResponseStore:
             or response.content_sha256 != content_sha256
             or response.part_count != len(envelope.parts)
             or stored_parts != expected_parts
-            or delivery.channel != target.channel
+        ):
+            raise ResponseConflictError(idempotency_key=response.idempotency_key)
+
+    @staticmethod
+    def _require_compatible_delivery(
+        delivery: DeliveryOutboxRecord,
+        *,
+        target: DeliveryTarget,
+        target_key: str,
+    ) -> None:
+        if (
+            delivery.channel != target.channel
             or delivery.account_id != target.account_id
             or delivery.conversation_id != target.conversation_id
             or delivery.target_key != target_key
         ):
-            raise ResponseConflictError(idempotency_key=response.idempotency_key)
+            raise ResponseConflictError(idempotency_key=delivery.idempotency_key)
+
+    def _create_missing_delivery(
+        self,
+        response: ResponseRecord,
+        *,
+        outcome: HermesDispatchOutcome,
+        envelope: ResponseEnvelope,
+        content_sha256: str,
+        target: DeliveryTarget,
+        target_key: str,
+        delivery_key: str,
+    ) -> tuple[ResponseRecord, DeliveryOutboxRecord, bool]:
+        unexpected_delivery = self._session.scalar(
+            select(DeliveryOutboxRecord).where(
+                DeliveryOutboxRecord.response_id == response.response_id
+            )
+        )
+        if unexpected_delivery is not None:
+            self._require_compatible_delivery(
+                unexpected_delivery,
+                target=target,
+                target_key=target_key,
+            )
+            return response, unexpected_delivery, False
+        delivery = self._new_delivery(
+            response_id=response.response_id,
+            delivery_key=delivery_key,
+            target=target,
+            target_key=target_key,
+            now=datetime.now(UTC),
+        )
+        self._session.add(delivery)
+        try:
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self.get_by_idempotency_key(response.idempotency_key)
+            if existing is None:
+                raise
+            self._require_compatible_response(
+                existing,
+                outcome=outcome,
+                envelope=envelope,
+                content_sha256=content_sha256,
+            )
+            concurrent_delivery = self._find_delivery(existing.response_id, target)
+            if concurrent_delivery is None:
+                raise
+            self._require_compatible_delivery(
+                concurrent_delivery,
+                target=target,
+                target_key=target_key,
+            )
+            return existing, concurrent_delivery, False
+        except Exception:
+            self._session.rollback()
+            raise
+        return (
+            self.get_required(response.response_id),
+            self.get_delivery_required(delivery.id),
+            True,
+        )
+
+    @staticmethod
+    def _new_delivery(
+        *,
+        response_id: str,
+        delivery_key: str,
+        target: DeliveryTarget,
+        target_key: str,
+        now: datetime,
+    ) -> DeliveryOutboxRecord:
+        return DeliveryOutboxRecord(
+            idempotency_key=delivery_key,
+            response_id=response_id,
+            channel=target.channel,
+            account_id=target.account_id,
+            conversation_id=target.conversation_id,
+            target_key=target_key,
+            status=DeliveryStatus.QUEUED,
+            available_at=now,
+        )
 
 
 def _response_envelope(outcome: HermesDispatchOutcome) -> ResponseEnvelope:

@@ -4,6 +4,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -218,3 +219,92 @@ def test_publisher_renews_only_while_the_worker_main_loop_waits(tmp_path: Path) 
         clock=lambda: current_time[0],
     )
     assert payload["updated_at"] == "2026-08-07T09:30:20Z"
+
+
+class SequencedHeartbeat:
+    def __init__(self, outcomes: list[Exception | None]) -> None:
+        self._outcomes = iter(outcomes)
+        self.states: list[str] = []
+
+    def write(self, state: str, *, details: object = None) -> None:
+        del details
+        self.states.append(state)
+        outcome = next(self._outcomes, OSError("controlled heartbeat write failure"))
+        if outcome is not None:
+            raise outcome
+
+
+def test_publisher_initial_write_failure_is_fail_closed_and_redacted() -> None:
+    sensitive_path = "/run/private/credential-heartbeat.json"
+    reports: list[str] = []
+    publisher = HeartbeatPublisher(
+        SequencedHeartbeat([OSError(sensitive_path)]),  # type: ignore[arg-type]
+        error_handler=lambda: reports.append("reported"),
+    )
+
+    with pytest.raises(HeartbeatError, match="initial worker heartbeat publish failed") as raised:
+        publisher.start()
+
+    assert sensitive_path not in str(raised.value)
+    assert reports == ["reported"]
+
+
+def test_publisher_success_resets_the_consecutive_failure_budget() -> None:
+    reports: list[str] = []
+    publisher = HeartbeatPublisher(
+        SequencedHeartbeat(
+            [
+                None,
+                OSError("first sequence"),
+                None,
+                OSError("second sequence"),
+            ]
+        ),  # type: ignore[arg-type]
+        interval_seconds=1,
+        error_handler=lambda: reports.append("reported"),
+        max_consecutive_failures=2,
+    )
+    stop_event = Event()
+    stop_event.set()
+
+    publisher.start()
+    publisher.update("running", phase="first-failure")
+    publisher.update("running", phase="recovered")
+    publisher.update("running", phase="second-failure")
+
+    assert publisher.wait(stop_event, 1) is True
+    assert reports == ["reported", "reported"]
+
+
+def test_resident_heartbeat_requests_shutdown_after_bounded_write_failures() -> None:
+    publisher = HeartbeatPublisher(
+        SequencedHeartbeat(
+            [
+                None,
+                OSError("running update failed"),
+                OSError("periodic update failed"),
+            ]
+        ),  # type: ignore[arg-type]
+        interval_seconds=0.01,
+        max_consecutive_failures=2,
+    )
+    shutdown = Event()
+
+    with (
+        pytest.raises(HeartbeatError, match="write failure limit reached"),
+        heartbeat.resident_heartbeat(
+            publisher,
+            stop_event=shutdown,
+            phase="test",
+        ),
+    ):
+        assert shutdown.wait(timeout=1)
+
+
+@pytest.mark.parametrize("failure_limit", [True, False, 0, -1, 1.5, "3"])
+def test_publisher_rejects_invalid_failure_limits(failure_limit: object) -> None:
+    with pytest.raises(ValueError, match="max_consecutive_failures"):
+        HeartbeatPublisher(  # type: ignore[arg-type]
+            SequencedHeartbeat([None]),
+            max_consecutive_failures=failure_limit,  # type: ignore[arg-type]
+        )

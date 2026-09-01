@@ -1,0 +1,41 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+database:
+  # The Compose E2E runner overrides this with its isolated PostgreSQL 16 service.
+  url: postgresql+psycopg://gateway:invalid@postgres:5432/gateway
+
+logging:
+  level: INFO
+
+api:
+  token_env: CF_GATEWAY_API_TOKEN
+  admin_token_env: CF_AGENT_GATEWAY_ADMIN_TOKEN
+  max_request_body_bytes: 65536
+
+artifact:
+  storage_root: /var/lib/cf-agent-gateway/artifacts
+
+runtime:
+  polling_interval_seconds: 1
+  v2_routing_enabled: true
+
+worker:
+  enabled: true
+  concurrency: 1
+  lease_seconds: 10
+  retry_limit: 1
+
+wechat:
+  enabled: true
+  base_url: http://synthetic-wechat:6174
+  bootstrap_mode: latest
+  token_env: CF_AGENT_WECHAT_TOKEN
+
+hermes:
+  enabled: true
+  # No dispatch is seeded, so the E2E never calls this synthetic endpoint.
+  base_url: http://synthetic-wechat:6174
+  api_key_env: HERMES_API_KEY
+  model: container-e2e

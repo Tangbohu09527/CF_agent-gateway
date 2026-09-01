@@ -24,6 +24,7 @@ from cf_agent_gateway.adapters.wechat.normalized_models import (
     WechatSenderType,
 )
 from cf_agent_gateway.adapters.wechat.normalizer import (
+    build_wechat_checkpoint_fingerprint,
     build_wechat_event_id,
     normalize_wechat_message,
 )
@@ -32,16 +33,22 @@ from cf_agent_gateway.adapters.wechat.outbound_http import WechatHttpMessageSend
 from cf_agent_gateway.adapters.wechat.polling_errors import (
     InvalidBootstrapModeError,
     WechatChatIdentityError,
+    WechatCheckpointContinuityError,
+    WechatCheckpointFingerprintError,
+    WechatCheckpointGenerationError,
     WechatCheckpointNotFoundError,
+    WechatCheckpointStateConflictError,
     WechatCheckpointValueError,
     WechatConversationMismatchError,
     WechatLocalIdError,
     WechatPollingError,
 )
 from cf_agent_gateway.adapters.wechat.polling_models import (
+    CHECKPOINT_FINGERPRINT_LENGTH,
     MAX_CHECKPOINT_LOCAL_ID,
     BootstrapMode,
     ChatPollResult,
+    MessageSinkDisposition,
     PollFailure,
     PollFailureStage,
     PollResult,
@@ -50,6 +57,7 @@ from cf_agent_gateway.adapters.wechat.polling_models import (
 from cf_agent_gateway.adapters.wechat.polling_service import (
     NormalizedMessageSink,
     WechatPollingClient,
+    WechatPollingLifecycleState,
     WechatPollingService,
 )
 from cf_agent_gateway.adapters.wechat.polling_store import (
@@ -67,7 +75,9 @@ __all__ = [
     "AgentWechatClient",
     "AgentWechatMedia",
     "BootstrapMode",
+    "CHECKPOINT_FINGERPRINT_LENGTH",
     "ChatPollResult",
+    "MessageSinkDisposition",
     "InvalidBootstrapModeError",
     "NormalizedWechatMessage",
     "NormalizedMessageSink",
@@ -81,7 +91,11 @@ __all__ = [
     "WechatConversationType",
     "WechatConversationMismatchError",
     "WechatChatIdentityError",
+    "WechatCheckpointContinuityError",
+    "WechatCheckpointFingerprintError",
+    "WechatCheckpointGenerationError",
     "WechatCheckpointNotFoundError",
+    "WechatCheckpointStateConflictError",
     "WechatCheckpointValueError",
     "WechatCheckpointStore",
     "WechatLocalIdError",
@@ -93,6 +107,7 @@ __all__ = [
     "WechatHttpMessageSender",
     "WechatNormalizationError",
     "WechatPollingClient",
+    "WechatPollingLifecycleState",
     "WechatPollingError",
     "WechatPollingService",
     "WechatReplySummary",
@@ -104,6 +119,7 @@ __all__ = [
     "WechatSyncCheckpointStore",
     "IMAGE_MIME_TYPES",
     "MAX_MEDIA_BYTES",
+    "build_wechat_checkpoint_fingerprint",
     "build_wechat_event_id",
     "normalize_wechat_message",
     "wechat_message_to_event",

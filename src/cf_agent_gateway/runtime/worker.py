@@ -9,7 +9,7 @@ from threading import Event
 from types import FrameType
 from typing import Literal
 
-from cf_agent_gateway.adapters.wechat import PollResult
+from cf_agent_gateway.adapters.wechat import PollResult, WechatPollingLifecycleState
 from cf_agent_gateway.config import Settings, load_settings
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.runtime.errors import (
@@ -17,7 +17,7 @@ from cf_agent_gateway.runtime.errors import (
     HermesRuntimeError,
     WechatRuntimeDisabledError,
     WechatRuntimeError,
-    WechatTokenEnvironmentError,
+    WechatTokenContractError,
 )
 from cf_agent_gateway.runtime.heartbeat import (
     HeartbeatPublisher,
@@ -37,7 +37,7 @@ PollOnce = Callable[[Settings], PollResult]
 _FATAL_POLL_ERRORS = (
     HermesAPIKeyEnvironmentError,
     WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
+    WechatTokenContractError,
 )
 
 
@@ -51,7 +51,7 @@ def run_worker(
     """Run serialized WeChat polling cycles until shutdown is requested."""
 
     shutdown = stop_event if stop_event is not None else Event()
-    execute_poll = poll_once if poll_once is not None else run_wechat_poll_once
+    lifecycle_state = WechatPollingLifecycleState() if poll_once is None else None
     interval = settings.runtime.polling_interval_seconds
     cycle_sequence = 0
     final_heartbeat_state: Literal["stopped", "failed"] = "stopped"
@@ -74,7 +74,14 @@ def run_worker(
                 )
             logger.info("poll cycle started")
             try:
-                result = execute_poll(settings)
+                if poll_once is None:
+                    assert lifecycle_state is not None
+                    result = run_wechat_poll_once(
+                        settings,
+                        lifecycle_state=lifecycle_state,
+                    )
+                else:
+                    result = poll_once(settings)
             except _FATAL_POLL_ERRORS:
                 raise
             except Exception as error:
@@ -88,17 +95,30 @@ def run_worker(
                         phase="waiting",
                         cycle_sequence=cycle_sequence,
                         last_cycle_succeeded=False,
+                        wechat_auth="unknown",
                     )
             else:
+                cycle_succeeded = (
+                    result.logged_in and result.chats_failed == 0 and not result.failures
+                )
                 logger.info(
-                    "messages processed",
+                    "poll cycle completed",
                     extra={
                         "fields": {
                             "logged_in": result.logged_in,
                             "chats_seen": result.chats_seen,
+                            "chats_succeeded": result.chats_succeeded,
                             "chats_failed": result.chats_failed,
                             "messages_seen": result.messages_seen,
                             "messages_processed": result.messages_processed,
+                            "messages_new": result.messages_new,
+                            "messages_duplicate": result.messages_duplicate,
+                            "messages_skipped_checkpoint": (result.messages_skipped_by_checkpoint),
+                            "messages_skipped_self": result.messages_skipped_as_self,
+                            "messages_failed": result.messages_failed,
+                            "messages_without_server_id": result.messages_without_server_id,
+                            "bootstrapped_chats": result.bootstrapped_chats,
+                            "failure_count": len(result.failures),
                         }
                     },
                 )
@@ -107,7 +127,8 @@ def run_worker(
                         "running",
                         phase="waiting",
                         cycle_sequence=cycle_sequence,
-                        last_cycle_succeeded=True,
+                        last_cycle_succeeded=cycle_succeeded,
+                        wechat_auth="logged_in" if result.logged_in else "logged_out",
                     )
 
             if heartbeat is None:

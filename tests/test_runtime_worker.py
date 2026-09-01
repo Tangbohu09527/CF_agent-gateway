@@ -8,7 +8,7 @@ from threading import Event, Thread
 
 import pytest
 
-from cf_agent_gateway.adapters.wechat import PollResult
+from cf_agent_gateway.adapters.wechat import PollFailure, PollFailureStage, PollResult
 from cf_agent_gateway.config import RuntimeSettings, Settings
 from cf_agent_gateway.runtime import worker
 from cf_agent_gateway.runtime.errors import (
@@ -73,9 +73,23 @@ def test_worker_starts_polls_logs_result_and_stops(
         return PollResult(
             logged_in=True,
             chats_seen=3,
+            chats_succeeded=2,
             chats_failed=1,
             messages_seen=5,
             messages_processed=2,
+            messages_new=1,
+            messages_duplicate=1,
+            messages_failed=1,
+            messages_skipped_by_checkpoint=1,
+            messages_skipped_as_self=1,
+            messages_without_server_id=2,
+            bootstrapped_chats=1,
+            failures=[
+                PollFailure(
+                    stage=PollFailureStage.POLL_CHAT,
+                    code="wechat_poll_chat_error",
+                )
+            ],
         )
 
     with caplog.at_level(logging.INFO, logger=worker.logger.name):
@@ -86,17 +100,53 @@ def test_worker_starts_polls_logs_result_and_stops(
     assert [record.getMessage() for record in records] == [
         "worker started",
         "poll cycle started",
-        "messages processed",
+        "poll cycle completed",
         "worker stopped",
     ]
     assert records[0].fields == {"polling_interval_seconds": 1.25}  # type: ignore[attr-defined]
     assert records[2].fields == {  # type: ignore[attr-defined]
         "logged_in": True,
         "chats_seen": 3,
+        "chats_succeeded": 2,
         "chats_failed": 1,
         "messages_seen": 5,
         "messages_processed": 2,
+        "messages_new": 1,
+        "messages_duplicate": 1,
+        "messages_skipped_checkpoint": 1,
+        "messages_skipped_self": 1,
+        "messages_failed": 1,
+        "messages_without_server_id": 2,
+        "bootstrapped_chats": 1,
+        "failure_count": 1,
     }
+
+
+def test_default_worker_reuses_one_polling_lifecycle_state_across_cycles(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_event = RecordingEvent()
+    lifecycle_states: list[object] = []
+
+    def poll_once(
+        candidate: Settings,
+        *,
+        lifecycle_state: object,
+    ) -> PollResult:
+        assert candidate is settings
+        lifecycle_states.append(lifecycle_state)
+        if len(lifecycle_states) == 2:
+            stop_event.set()
+        return PollResult(logged_in=True)
+
+    monkeypatch.setattr(worker, "run_wechat_poll_once", poll_once)
+
+    worker.run_worker(settings, stop_event=stop_event)
+
+    assert len(lifecycle_states) == 2
+    assert isinstance(lifecycle_states[0], worker.WechatPollingLifecycleState)
+    assert lifecycle_states[0] is lifecycle_states[1]
 
 
 def test_worker_publishes_heartbeat_for_a_successful_cycle(settings: Settings) -> None:
@@ -126,10 +176,73 @@ def test_worker_publishes_heartbeat_for_a_successful_cycle(settings: Settings) -
                 "phase": "waiting",
                 "cycle_sequence": 1,
                 "last_cycle_succeeded": True,
+                "wechat_auth": "logged_in",
             },
         ),
         ("stop", "stopped"),
     ]
+
+
+def test_worker_does_not_poll_when_initial_heartbeat_publish_fails(
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("blocked", encoding="utf-8")
+    heartbeat_publisher = HeartbeatPublisher(
+        FileHeartbeat(blocked_parent / "worker.json"),
+        interval_seconds=0.01,
+    )
+    poll_called = False
+
+    def forbidden_poll(candidate: Settings) -> PollResult:
+        nonlocal poll_called
+        del candidate
+        poll_called = True
+        raise AssertionError("poll must not run without a durable heartbeat")
+
+    with pytest.raises(HeartbeatError, match="initial worker heartbeat publish failed"):
+        worker.run_worker(
+            settings,
+            stop_event=Event(),
+            poll_once=forbidden_poll,
+            heartbeat=heartbeat_publisher,
+        )
+
+    assert poll_called is False
+
+
+def test_worker_marks_returned_poll_failures_unhealthy(settings: Settings) -> None:
+    stop_event = Event()
+    heartbeat = RecordingHeartbeat()
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        stop_event.set()
+        return PollResult(
+            logged_in=True,
+            chats_seen=1,
+            chats_failed=1,
+            failures=[
+                PollFailure(
+                    stage=PollFailureStage.LIST_MESSAGES,
+                    code="wechat_timeout",
+                    conversation_id="conversation-1",
+                )
+            ],
+        )
+
+    worker.run_worker(
+        settings,
+        stop_event=stop_event,
+        poll_once=poll_once,
+        heartbeat=heartbeat,  # type: ignore[arg-type]
+    )
+
+    waiting = heartbeat.events[-2]
+    assert isinstance(waiting, tuple)
+    assert waiting[2]["last_cycle_succeeded"] is False
+    assert waiting[2]["wechat_auth"] == "logged_in"
 
 
 def test_worker_does_not_poll_when_stop_is_already_set(

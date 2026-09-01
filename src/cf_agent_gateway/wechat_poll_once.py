@@ -7,11 +7,8 @@ from typing import Any, TextIO
 
 from cf_agent_gateway.adapters.wechat import PollResult
 from cf_agent_gateway.config import load_settings
-from cf_agent_gateway.runtime import (
-    WechatRuntimeDisabledError,
-    WechatTokenEnvironmentError,
-    run_wechat_poll_once,
-)
+from cf_agent_gateway.runtime import WechatRuntimeDisabledError, run_wechat_poll_once
+from cf_agent_gateway.runtime.errors import WechatTokenContractError
 
 DEFAULT_CONFIG_PATH = "config/config.yaml"
 
@@ -25,7 +22,14 @@ def poll_result_summary(result: PollResult) -> dict[str, Any]:
         "chats_failed": result.chats_failed,
         "messages_seen": result.messages_seen,
         "messages_processed": result.messages_processed,
+        "messages_new": result.messages_new,
+        "messages_duplicate": result.messages_duplicate,
+        "messages_failed": result.messages_failed,
         "messages_skipped_by_checkpoint": result.messages_skipped_by_checkpoint,
+        "messages_skipped_as_self": result.messages_skipped_as_self,
+        "messages_skipped_checkpoint": result.messages_skipped_by_checkpoint,
+        "messages_skipped_self": result.messages_skipped_as_self,
+        "messages_without_server_id": result.messages_without_server_id,
         "bootstrapped_chats": result.bootstrapped_chats,
         "failure_codes": [failure.code for failure in result.failures],
     }
@@ -47,14 +51,8 @@ def main() -> int:
     except WechatRuntimeDisabledError as error:
         _write_json({"error_code": error.code}, file=sys.stderr)
         return 2
-    except WechatTokenEnvironmentError as error:
-        _write_json(
-            {
-                "error_code": error.code,
-                "environment_variable": error.environment_variable,
-            },
-            file=sys.stderr,
-        )
+    except WechatTokenContractError as error:
+        _write_json({"error_code": error.code}, file=sys.stderr)
         return 1
     except Exception:
         _write_json({"error_code": "wechat_poll_once_failed"}, file=sys.stderr)
