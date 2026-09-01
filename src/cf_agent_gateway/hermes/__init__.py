@@ -1,6 +1,11 @@
 """Hermes HTTP client boundary."""
 
-from cf_agent_gateway.hermes.client import DEFAULT_TIMEOUT, HERMES_SESSION_HEADER, HermesClient
+from cf_agent_gateway.hermes.client import (
+    DEFAULT_TIMEOUT,
+    HERMES_IDEMPOTENCY_HEADER,
+    HERMES_SESSION_HEADER,
+    HermesClient,
+)
 from cf_agent_gateway.hermes.errors import (
     HermesAPIError,
     HermesAPIKeyError,
@@ -13,6 +18,8 @@ from cf_agent_gateway.hermes.errors import (
     HermesTransportError,
 )
 from cf_agent_gateway.hermes.models import (
+    HERMES_CONTEXT_TOOL_NAMES,
+    ArtifactRefPart,
     HermesAssistantMessage,
     HermesChatCompletionChoice,
     HermesChatCompletionRequest,
@@ -21,36 +28,56 @@ from cf_agent_gateway.hermes.models import (
     HermesDispatchOutcome,
     HermesResponseDeliveryOutcome,
     HermesUserMessage,
+    ResponseEnvelope,
+    ResponsePart,
+    TextPart,
 )
+from cf_agent_gateway.hermes.outbox import HermesDispatchOutboxExecutor
 from cf_agent_gateway.hermes.response import (
     HermesResponseHandler,
     HermesResponseProcessor,
     HermesResponseRelay,
 )
+from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
+from cf_agent_gateway.hermes.result_store import HermesDispatchResponseStore
 from cf_agent_gateway.hermes.service import (
     HermesChatClient,
     HermesDispatcher,
     HermesDispatchService,
 )
+from cf_agent_gateway.hermes.worker import (
+    DispatchClaim,
+    DispatchProcessResult,
+    HermesDispatchWorker,
+)
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "HERMES_CONTEXT_TOOL_NAMES",
+    "HERMES_IDEMPOTENCY_HEADER",
     "HERMES_SESSION_HEADER",
+    "ArtifactRefPart",
+    "DispatchClaim",
+    "DispatchProcessResult",
     "HermesAPIError",
     "HermesAPIKeyError",
     "HermesAssistantMessage",
-    "HermesChatResult",
     "HermesChatClient",
     "HermesChatCompletionChoice",
     "HermesChatCompletionRequest",
     "HermesChatCompletionResponse",
+    "HermesChatResult",
     "HermesClient",
     "HermesConfigurationError",
     "HermesDeliveryError",
     "HermesDispatchError",
     "HermesDispatcher",
     "HermesDispatchOutcome",
+    "HermesDispatchOutboxExecutor",
+    "HermesDispatchResponse",
+    "HermesDispatchResponseStore",
     "HermesDispatchService",
+    "HermesDispatchWorker",
     "HermesError",
     "HermesResponseDeliveryOutcome",
     "HermesResponseError",
@@ -60,4 +87,7 @@ __all__ = [
     "HermesTimeoutError",
     "HermesTransportError",
     "HermesUserMessage",
+    "ResponseEnvelope",
+    "ResponsePart",
+    "TextPart",
 ]

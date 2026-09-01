@@ -18,10 +18,13 @@ from cf_agent_gateway.hermes.models import (
     HermesChatCompletionResponse,
     HermesChatResult,
     HermesUserMessage,
+    ResponseEnvelope,
 )
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=15.0, pool=5.0)
 HERMES_SESSION_HEADER = "X-Hermes-Session-Id"
+HERMES_IDEMPOTENCY_HEADER = "Idempotency-Key"
+MAX_IDEMPOTENCY_KEY_LENGTH = 255
 MAX_HERMES_THREAD_ID_LENGTH = 255
 
 
@@ -62,7 +65,17 @@ class HermesClient:
     def close(self) -> None:
         self._client.close()
 
-    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult:
+    def chat(
+        self,
+        content: str,
+        *,
+        hermes_thread_id: str | None = None,
+        profile_reference: str | None = None,
+        profile_revision: int | None = None,
+        thread_id: str | None = None,
+        session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> HermesChatResult:
         """Send one user message, creating or continuing a Hermes thread."""
 
         if not isinstance(content, str) or not content:
@@ -70,29 +83,53 @@ class HermesClient:
         if hermes_thread_id is not None:
             hermes_thread_id = _hermes_thread_id(hermes_thread_id)
 
+        if idempotency_key is not None:
+            idempotency_key = _idempotency_key(idempotency_key)
+
         operation = "chat_completion"
         request = HermesChatCompletionRequest(
             model=self._model,
             messages=[HermesUserMessage(content=content)],
+            profile_reference=profile_reference,
+            profile_revision=profile_revision,
+            thread_id=thread_id,
+            session_metadata=session_metadata,
         )
-        request_headers = (
-            {HERMES_SESSION_HEADER: hermes_thread_id} if hermes_thread_id is not None else None
-        )
+        request_headers = {}
+        if hermes_thread_id is not None:
+            request_headers[HERMES_SESSION_HEADER] = hermes_thread_id
+        if idempotency_key is not None:
+            request_headers[HERMES_IDEMPOTENCY_HEADER] = idempotency_key
         response = self._request(
             "POST",
             "v1/chat/completions",
             operation=operation,
-            json=request.model_dump(mode="json"),
-            headers=request_headers,
+            json=request.model_dump(mode="json", exclude_none=True),
+            headers=request_headers or None,
         )
         try:
             payload = response.json()
-            completion = HermesChatCompletionResponse.model_validate(payload)
             effective_thread_id = _hermes_thread_id(response.headers.get(HERMES_SESSION_HEADER))
         except (ValueError, ValidationError):
             raise HermesResponseError(operation=operation) from None
-        return HermesChatResult(
-            assistant_content=completion.choices[0].message.content,
+        is_v2_response = isinstance(payload, dict) and (
+            "response_id" in payload or "parts" in payload
+        )
+        if not is_v2_response:
+            try:
+                completion = HermesChatCompletionResponse.model_validate(payload)
+            except ValidationError:
+                raise HermesResponseError(operation=operation) from None
+            return HermesChatResult(
+                assistant_content=completion.choices[0].message.content,
+                hermes_thread_id=effective_thread_id,
+            )
+        try:
+            envelope = ResponseEnvelope.model_validate(payload)
+        except ValidationError:
+            raise HermesResponseError(operation=operation) from None
+        return HermesChatResult.from_response(
+            envelope,
             hermes_thread_id=effective_thread_id,
         )
 
@@ -151,6 +188,15 @@ def _api_key(value: object) -> str:
     if any(not 0x21 <= ord(character) <= 0x7E for character in api_key):
         raise HermesAPIKeyError()
     return api_key
+
+
+def _idempotency_key(value: object) -> str:
+    key = _required_string(value, "idempotency_key")
+    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH or any(
+        not 0x21 <= ord(character) <= 0x7E for character in key
+    ):
+        raise ValueError("idempotency_key is invalid")
+    return key
 
 
 def _hermes_thread_id(value: object) -> str:

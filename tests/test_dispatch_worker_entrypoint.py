@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from threading import Event
+from typing import Any
+
+import pytest
+
+from cf_agent_gateway.config import (
+    DatabaseSettings,
+    HermesSettings,
+    Settings,
+    WorkerSettings,
+)
+from cf_agent_gateway.hermes import HermesChatResult
+from cf_agent_gateway.runtime import dispatch_worker
+from cf_agent_gateway.runtime.errors import (
+    DispatchWorkerDisabledError,
+    HermesAPIKeyEnvironmentError,
+    HermesClientInitializationError,
+    HermesRuntimeDisabledError,
+)
+
+
+def enabled_settings() -> Settings:
+    return Settings(
+        database=DatabaseSettings(url="sqlite+pysqlite:///:memory:"),
+        hermes=HermesSettings(
+            enabled=True,
+            base_url="https://hermes.test",
+            model="hermes-worker-test",
+        ),
+        worker=WorkerSettings(
+            enabled=True,
+            concurrency=3,
+            lease_seconds=12,
+            retry_limit=2,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "error_type"),
+    [
+        (Settings(), DispatchWorkerDisabledError),
+        (Settings(worker=WorkerSettings(enabled=True)), HermesRuntimeDisabledError),
+    ],
+)
+def test_runtime_enablement_fails_before_reading_credentials(
+    settings: Settings,
+    error_type: type[Exception],
+) -> None:
+    def forbidden_environment_read(name: str) -> str | None:
+        raise AssertionError(f"environment must not be read: {name}")
+
+    with pytest.raises(error_type):
+        dispatch_worker.run_dispatch_worker(
+            settings,
+            stop_event=Event(),
+            environment_reader=forbidden_environment_read,
+        )
+
+
+def test_runtime_requires_hermes_api_key_before_creating_resources() -> None:
+    engine_calls = 0
+
+    def forbidden_engine(url: str) -> Any:
+        nonlocal engine_calls
+        engine_calls += 1
+        raise AssertionError(f"engine must not be created: {url}")
+
+    with pytest.raises(HermesAPIKeyEnvironmentError) as caught:
+        dispatch_worker.run_dispatch_worker(
+            enabled_settings(),
+            stop_event=Event(),
+            engine_factory=forbidden_engine,  # type: ignore[arg-type]
+            environment_reader=lambda name: None,
+        )
+
+    assert caught.value.environment_variable == "HERMES_API_KEY"
+    assert engine_calls == 0
+
+
+def test_runtime_sanitizes_hermes_client_initialization_failure() -> None:
+    secret = "secret-hermes-api-key"
+
+    def failing_client_factory(*, base_url: str, api_key: str, model: str) -> Any:
+        del base_url, model
+        raise RuntimeError(f"client rejected {api_key}")
+
+    with pytest.raises(HermesClientInitializationError) as caught:
+        dispatch_worker.run_dispatch_worker(
+            enabled_settings(),
+            stop_event=Event(),
+            hermes_client_factory=failing_client_factory,
+            environment_reader=lambda name: secret,
+        )
+
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_runtime_builds_and_runs_worker_with_configured_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = enabled_settings()
+    stop_event = Event()
+    events: list[object] = []
+    session_factory_marker = object()
+    sender_factory_marker = object()
+
+    class TrackingClient:
+        def close(self) -> None:
+            events.append("client.close")
+
+    class TrackingEngine:
+        def dispose(self) -> None:
+            events.append("engine.dispose")
+
+    class TrackingWorker:
+        def run(
+            self,
+            *,
+            stop_event: Event,
+            concurrency: int,
+        ) -> None:
+            events.append(("run", stop_event, concurrency))
+
+    client = TrackingClient()
+    engine = TrackingEngine()
+
+    def client_factory(*, base_url: str, api_key: str, model: str) -> TrackingClient:
+        events.append(("client", base_url, api_key, model))
+        return client
+
+    def engine_factory(url: str) -> TrackingEngine:
+        events.append(("engine", url))
+        return engine
+
+    def initialize_database(candidate: object) -> None:
+        assert candidate is engine
+        events.append("initialize_database")
+
+    def create_session_factory(candidate: object) -> object:
+        assert candidate is engine
+        events.append("session_factory")
+        return session_factory_marker
+
+    def build_worker(
+        candidate: Settings,
+        *,
+        session_factory: object,
+        hermes_client: object,
+        sender_factory: object,
+        operation_observer: object,
+    ) -> TrackingWorker:
+        assert candidate is settings
+        assert session_factory is session_factory_marker
+        assert hermes_client is client
+        assert sender_factory is sender_factory_marker
+        assert operation_observer is None
+        events.append(
+            (
+                "build",
+                candidate.worker.lease_seconds,
+                candidate.worker.retry_limit,
+            )
+        )
+        return TrackingWorker()
+
+    monkeypatch.setattr(dispatch_worker, "initialize_database", initialize_database)
+    monkeypatch.setattr(
+        dispatch_worker,
+        "create_database_session_factory",
+        create_session_factory,
+    )
+    monkeypatch.setattr(dispatch_worker, "build_dispatch_worker", build_worker)
+
+    dispatch_worker.run_dispatch_worker(
+        settings,
+        stop_event=stop_event,
+        hermes_client_factory=client_factory,
+        sender_factory=sender_factory_marker,  # type: ignore[arg-type]
+        engine_factory=engine_factory,  # type: ignore[arg-type]
+        environment_reader=lambda name: "worker-api-key",
+    )
+
+    assert events == [
+        ("engine", "sqlite+pysqlite:///:memory:"),
+        "initialize_database",
+        ("client", "https://hermes.test", "worker-api-key", "hermes-worker-test"),
+        "session_factory",
+        ("build", 12.0, 2),
+        ("run", stop_event, 3),
+        "client.close",
+        "engine.dispose",
+    ]
+
+
+def test_python_module_entrypoint_exits_two_when_worker_is_disabled(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("worker:\n  enabled: false\n", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["CF_GATEWAY_CONFIG"] = str(config_path)
+    source_path = str(Path(__file__).resolve().parents[1] / "src")
+    existing_python_path = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        os.pathsep.join((source_path, existing_python_path))
+        if existing_python_path
+        else source_path
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "cf_agent_gateway.runtime.dispatch_worker"],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert "RuntimeWarning" not in completed.stderr
+    payloads = [json.loads(line) for line in completed.stderr.splitlines()]
+    assert payloads[-1]["message"] == "dispatch worker failed"
+    assert payloads[-1]["error_code"] == "dispatch_worker_disabled"
+
+
+class RecordingDispatchHeartbeat:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+        self.wait_started = Event()
+
+    def start(self) -> None:
+        self.events.append("start")
+
+    def update(self, state: str, **details: object) -> None:
+        self.events.append(("update", state, details))
+
+    def wait(self, stop_event: Event, timeout_seconds: float) -> bool:
+        self.events.append(("wait", timeout_seconds))
+        self.wait_started.set()
+        return stop_event.wait(timeout=1)
+
+    def stop(self, state: str = "stopped") -> None:
+        self.events.append(("stop", state))
+
+
+def test_dispatch_worker_reports_observed_hermes_operation_to_heartbeat() -> None:
+    heartbeat = RecordingDispatchHeartbeat()
+    observer = dispatch_worker._hermes_operation_observer(
+        heartbeat,  # type: ignore[arg-type]
+        concurrency=3,
+    )
+
+    assert observer is not None
+    observer(True)
+
+    event = heartbeat.events[-1]
+    assert isinstance(event, tuple)
+    assert event[0:2] == ("update", "running")
+    details = event[2]
+    assert isinstance(details, dict)
+    assert details["phase"] == "dispatching"
+    assert details["concurrency"] == 3
+    assert details["last_operation_succeeded"] is True
+    assert str(details["last_operation_at"]).endswith("Z")
+
+
+def test_hermes_operation_observer_wraps_only_the_client_call() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+    observed: list[bool] = []
+
+    class SuccessfulClient:
+        def chat(self, content: str, **kwargs: object) -> HermesChatResult:
+            calls.append((content, kwargs))
+            return HermesChatResult(
+                assistant_content="answer",
+                hermes_thread_id="hermes-thread-next",
+            )
+
+    client = dispatch_worker._OperationObservedHermesClient(
+        SuccessfulClient(),  # type: ignore[arg-type]
+        observed.append,
+    )
+
+    result = client.chat(
+        "question",
+        hermes_thread_id="hermes-thread-current",
+        idempotency_key="dispatch-key",
+    )
+
+    assert result.assistant_content == "answer"
+    assert observed == [True]
+    assert calls == [
+        (
+            "question",
+            {
+                "hermes_thread_id": "hermes-thread-current",
+                "profile_reference": None,
+                "profile_revision": None,
+                "thread_id": None,
+                "session_metadata": None,
+                "idempotency_key": "dispatch-key",
+            },
+        )
+    ]
+
+
+def test_hermes_operation_observer_reports_client_failure_and_preserves_it() -> None:
+    observed: list[bool] = []
+
+    class FailingClient:
+        def chat(self, content: str, **kwargs: object) -> HermesChatResult:
+            del content, kwargs
+            raise RuntimeError("controlled upstream failure")
+
+    client = dispatch_worker._OperationObservedHermesClient(
+        FailingClient(),  # type: ignore[arg-type]
+        observed.append,
+    )
+
+    with pytest.raises(RuntimeError, match="controlled upstream failure"):
+        client.chat("question")
+
+    assert observed == [False]
+
+
+def test_hermes_operation_observer_failure_does_not_break_client_result() -> None:
+    class SuccessfulClient:
+        def chat(self, content: str, **kwargs: object) -> HermesChatResult:
+            del content, kwargs
+            return HermesChatResult(
+                assistant_content="answer",
+                hermes_thread_id="hermes-thread",
+            )
+
+    def failing_observer(succeeded: bool) -> None:
+        del succeeded
+        raise RuntimeError("heartbeat unavailable")
+
+    client = dispatch_worker._OperationObservedHermesClient(
+        SuccessfulClient(),  # type: ignore[arg-type]
+        failing_observer,
+    )
+
+    assert client.chat("question").assistant_content == "answer"
+
+
+def test_dispatch_worker_publishes_heartbeat_while_core_loop_runs() -> None:
+    stop_event = Event()
+    heartbeat = RecordingDispatchHeartbeat()
+    calls: list[tuple[Event, int]] = []
+
+    class TrackingWorker:
+        def run(self, *, stop_event: Event, concurrency: int) -> None:
+            assert heartbeat.wait_started.wait(timeout=1)
+            calls.append((stop_event, concurrency))
+
+    dispatch_worker._run_resident_worker(
+        TrackingWorker(),  # type: ignore[arg-type]
+        stop_event=stop_event,
+        concurrency=3,
+        heartbeat=heartbeat,  # type: ignore[arg-type]
+    )
+
+    assert calls == [(stop_event, 3)]
+    assert heartbeat.events[0:2] == [
+        "start",
+        ("update", "running", {"phase": "dispatching", "concurrency": 3}),
+    ]
+    wait_event = heartbeat.events[2]
+    assert isinstance(wait_event, tuple)
+    assert wait_event[0] == "wait"
+    assert isinstance(wait_event[1], float)
+    assert wait_event[1] > 0
+    assert heartbeat.events[-1] == ("stop", "stopped")
+
+
+def test_dispatch_worker_marks_heartbeat_failed_when_core_loop_raises() -> None:
+    heartbeat = RecordingDispatchHeartbeat()
+
+    class FailingWorker:
+        def run(self, *, stop_event: Event, concurrency: int) -> None:
+            del stop_event, concurrency
+            assert heartbeat.wait_started.wait(timeout=1)
+            raise RuntimeError("dispatch loop failed")
+
+    with pytest.raises(RuntimeError, match="dispatch loop failed"):
+        dispatch_worker._run_resident_worker(
+            FailingWorker(),  # type: ignore[arg-type]
+            stop_event=Event(),
+            concurrency=2,
+            heartbeat=heartbeat,  # type: ignore[arg-type]
+        )
+
+    assert heartbeat.events[-1] == ("stop", "failed")
+
+
+def test_dispatch_worker_without_heartbeat_keeps_existing_core_contract() -> None:
+    stop_event = Event()
+    calls: list[tuple[Event, int]] = []
+
+    class TrackingWorker:
+        def run(self, *, stop_event: Event, concurrency: int) -> None:
+            calls.append((stop_event, concurrency))
+
+    dispatch_worker._run_resident_worker(
+        TrackingWorker(),  # type: ignore[arg-type]
+        stop_event=stop_event,
+        concurrency=4,
+        heartbeat=None,
+    )
+
+    assert calls == [(stop_event, 4)]

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
+from cf_agent_gateway.agent_profile import AgentProfile, AgentProfileStatus
 from cf_agent_gateway.hermes.errors import HermesDispatchError
-from cf_agent_gateway.hermes.models import HermesChatResult, HermesDispatchOutcome
+from cf_agent_gateway.hermes.models import (
+    HERMES_CONTEXT_TOOL_NAMES,
+    HermesChatResult,
+    HermesDispatchOutcome,
+)
+from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.message.store import MessageStore
+from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.workspace.models import (
     AIThread,
     EmployeeWorkspace,
@@ -16,12 +23,26 @@ from cf_agent_gateway.workspace.models import (
     WorkspaceStatus,
 )
 from cf_agent_gateway.workspace.store import WorkspaceStore
+from cf_agent_gateway.workspace.thread_keys import build_v2_thread_key
 
 HERMES_THREAD_NAMESPACE = "v1:cf-agent-gateway"
 
+if TYPE_CHECKING:
+    from cf_agent_gateway.context.policy import ContextAccessPolicy
+
 
 class HermesChatClient(Protocol):
-    def chat(self, content: str, *, hermes_thread_id: str | None = None) -> HermesChatResult: ...
+    def chat(
+        self,
+        content: str,
+        *,
+        hermes_thread_id: str | None = None,
+        profile_reference: str | None = None,
+        profile_revision: int | None = None,
+        thread_id: str | None = None,
+        session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> HermesChatResult: ...
 
 
 class HermesDispatcher(Protocol):
@@ -38,6 +59,8 @@ class HermesDispatchService:
         *,
         message_store: MessageStore | None = None,
         workspace_store: WorkspaceStore | None = None,
+        context_access_policy: ContextAccessPolicy | None = None,
+        available_tools: tuple[str, ...] = (),
     ) -> None:
         self._session = session
         self._client = client
@@ -45,8 +68,34 @@ class HermesDispatchService:
         self._workspace_store = (
             workspace_store if workspace_store is not None else WorkspaceStore(session)
         )
+        self._context_access_policy = context_access_policy
+        self._available_tools = _context_tool_names(available_tools)
 
     def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
+        return self._dispatch(admission, idempotency_key=None)
+
+    def dispatch_record(self, record: HermesDispatchRecord) -> HermesDispatchOutcome:
+        """Execute a claimed durable record without mutating the Message Archive."""
+
+        if record.status is not HermesDispatchStatus.RUNNING or record.claim_token is None:
+            raise HermesDispatchError(reason="dispatch_record_not_claimed")
+        admission = AdmissionOutcome(
+            message_id=record.message_id,
+            admitted=True,
+            should_create_task=True,
+            reason=AdmissionReason.ALLOWED,
+            enterprise_identity_id=record.enterprise_identity_id,
+            workspace_id=record.workspace_id,
+            ai_thread_id=record.ai_thread_id,
+        )
+        return self._dispatch(admission, idempotency_key=record.idempotency_key)
+
+    def _dispatch(
+        self,
+        admission: AdmissionOutcome,
+        *,
+        idempotency_key: str | None,
+    ) -> HermesDispatchOutcome:
         workspace_id, ai_thread_id = self._allowed_target(admission)
 
         message = self._message_store.get(admission.message_id)
@@ -71,16 +120,7 @@ class HermesDispatchService:
         if workspace.enterprise_identity_id != admission.enterprise_identity_id:
             raise HermesDispatchError(reason="workspace_identity_mismatch")
 
-        source_binding = self._workspace_store.get_source_binding(
-            platform=message.source,
-            account_id=message.source_account_id,
-            physical_conversation_id=message.conversation_id,
-            sender_id=message.sender_id,
-        )
-        if source_binding is None:
-            raise HermesDispatchError(reason="source_binding_not_found")
-        if source_binding.ai_thread_id != ai_thread_id:
-            raise HermesDispatchError(reason="message_thread_mismatch")
+        profile = self._resolve_dispatch_profile(thread, message, admission)
         if not message.content:
             raise HermesDispatchError(reason="empty_message_content")
 
@@ -99,10 +139,37 @@ class HermesDispatchService:
         requested_hermes_thread_id = _hermes_thread_id_for_dispatch(thread)
 
         try:
-            result = self._client.chat(
-                message.content,
-                hermes_thread_id=requested_hermes_thread_id,
-            )
+            if profile is None:
+                if idempotency_key is None:
+                    result = self._client.chat(
+                        message.content,
+                        hermes_thread_id=requested_hermes_thread_id,
+                    )
+                else:
+                    result = self._client.chat(
+                        message.content,
+                        hermes_thread_id=requested_hermes_thread_id,
+                        idempotency_key=idempotency_key,
+                    )
+            elif idempotency_key is None:
+                result = self._client.chat(
+                    message.content,
+                    hermes_thread_id=requested_hermes_thread_id,
+                    profile_reference=profile.external_profile_ref,
+                    profile_revision=profile.revision,
+                    thread_id=thread.id,
+                    session_metadata=self._session_metadata(message, thread, admission),
+                )
+            else:
+                result = self._client.chat(
+                    message.content,
+                    hermes_thread_id=requested_hermes_thread_id,
+                    profile_reference=profile.external_profile_ref,
+                    profile_revision=profile.revision,
+                    thread_id=thread.id,
+                    session_metadata=self._session_metadata(message, thread, admission),
+                    idempotency_key=idempotency_key,
+                )
             hermes_thread_advanced = self._workspace_store.advance_hermes_thread(
                 thread,
                 expected_hermes_thread_id=requested_hermes_thread_id,
@@ -120,7 +187,99 @@ class HermesDispatchService:
             workspace_id=workspace.id,
             ai_thread_id=thread.id,
             assistant_content=result.assistant_content,
+            response=result.response,
         )
+
+    def _resolve_dispatch_profile(
+        self,
+        thread: AIThread,
+        message: Message,
+        admission: AdmissionOutcome,
+    ) -> AgentProfile | None:
+        if thread.agent_profile_id is None and thread.thread_policy is None:
+            source_binding = self._workspace_store.get_source_binding(
+                platform=message.source,
+                account_id=message.source_account_id,
+                physical_conversation_id=message.conversation_id,
+                sender_id=message.sender_id,
+            )
+            if source_binding is None:
+                raise HermesDispatchError(reason="source_binding_not_found")
+            if source_binding.ai_thread_id != thread.id:
+                raise HermesDispatchError(reason="message_thread_mismatch")
+            return None
+
+        if thread.agent_profile_id is None or thread.thread_policy is None:
+            raise HermesDispatchError(reason="v2_route_snapshot_invalid")
+        profile = self._session.get(AgentProfile, thread.agent_profile_id)
+        if profile is None:
+            raise HermesDispatchError(reason="agent_profile_not_found")
+        self._session.refresh(profile)
+        if profile.status is not AgentProfileStatus.ACTIVE:
+            raise HermesDispatchError(reason="agent_profile_unavailable")
+        if admission.enterprise_identity_id is None:
+            raise HermesDispatchError(reason="enterprise_identity_missing")
+
+        expected_thread_key = build_v2_thread_key(
+            platform=message.source,
+            account_id=message.source_account_id,
+            physical_conversation_id=message.conversation_id,
+            conversation_type=message.conversation_type,
+            sender_identity_id=admission.enterprise_identity_id,
+            agent_profile_id=profile.id,
+            agent_profile_revision=profile.revision,
+            thread_policy=thread.thread_policy,
+        )
+        if expected_thread_key != thread.thread_key:
+            raise HermesDispatchError(reason="message_thread_mismatch")
+        return profile
+
+    def _session_metadata(
+        self,
+        message: Message,
+        thread: AIThread,
+        admission: AdmissionOutcome,
+    ) -> dict[str, object]:
+        if admission.enterprise_identity_id is None or thread.thread_policy is None:
+            raise HermesDispatchError(reason="v2_route_snapshot_invalid")
+        context_available = self._context_available(
+            thread_id=thread.id,
+            enterprise_identity_id=admission.enterprise_identity_id,
+        )
+        return {
+            "message_id": message.id,
+            "source": message.source,
+            "channel": message.source,
+            "source_account_id": message.source_account_id,
+            "conversation_id": message.conversation_id,
+            "conversation_type": message.conversation_type,
+            "enterprise_identity_id": admission.enterprise_identity_id,
+            "sender_identity_id": admission.enterprise_identity_id,
+            "sender_id": message.sender_id,
+            "thread_id": thread.id,
+            "thread_policy": thread.thread_policy.value,
+            "context_available": context_available,
+            "available_tools": list(self._available_tools) if context_available else [],
+        }
+
+    def _context_available(
+        self,
+        *,
+        enterprise_identity_id: str,
+        thread_id: str,
+    ) -> bool:
+        if self._context_access_policy is None:
+            return False
+        try:
+            return (
+                self._context_access_policy.allows(
+                    enterprise_identity_id=enterprise_identity_id,
+                    thread_id=thread_id,
+                )
+                is True
+            )
+        except Exception:
+            return False
 
     @staticmethod
     def _allowed_target(admission: AdmissionOutcome) -> tuple[str, str]:
@@ -141,3 +300,16 @@ def _hermes_thread_id_for_dispatch(thread: AIThread) -> str:
 
 def _initial_hermes_thread_id(thread: AIThread) -> str:
     return f"{HERMES_THREAD_NAMESPACE}:{thread.id}"
+
+
+def _context_tool_names(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError("available_tools must be a tuple")
+    if any(not isinstance(name, str) or not name.strip() for name in value):
+        raise ValueError("available_tools must contain non-empty strings")
+    normalized = tuple(name.strip() for name in value)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("available_tools must not contain duplicates")
+    if any(name not in HERMES_CONTEXT_TOOL_NAMES for name in normalized):
+        raise ValueError("available_tools contains an unsupported context tool")
+    return normalized

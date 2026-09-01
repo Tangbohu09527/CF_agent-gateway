@@ -7,13 +7,17 @@ import httpx
 import pytest
 
 from cf_agent_gateway.hermes import (
+    HERMES_IDEMPOTENCY_HEADER,
     HERMES_SESSION_HEADER,
+    ArtifactRefPart,
     HermesAPIError,
     HermesAPIKeyError,
     HermesChatResult,
     HermesClient,
     HermesResponseError,
     HermesTimeoutError,
+    ResponseEnvelope,
+    TextPart,
 )
 
 BASE_URL = "https://hermes.test"
@@ -70,6 +74,126 @@ def test_chat_posts_expected_request_and_returns_assistant_content() -> None:
         assistant_content="Hello from Hermes",
         hermes_thread_id=HERMES_THREAD_ID,
     )
+
+
+def test_chat_carries_v2_profile_thread_and_session_metadata() -> None:
+    session_metadata = {
+        "source": "wechat",
+        "source_account_id": "bot-001",
+        "conversation_id": "private-001",
+        "enterprise_identity_id": "identity-001",
+        "message_id": 42,
+        "available_tools": ["context.read", "context.search"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers[HERMES_SESSION_HEADER] == HERMES_THREAD_ID
+        assert request.headers[HERMES_IDEMPOTENCY_HEADER] == "dispatch-message-42"
+        assert json.loads(request.content) == {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": USER_CONTENT}],
+            "profile_reference": "profiles/employee-assistant",
+            "profile_revision": 3,
+            "thread_id": "gateway-thread-001",
+            "session_metadata": session_metadata,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Profile-aware response",
+                        }
+                    }
+                ],
+            },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
+
+    with hermes_client(handler) as client:
+        result = client.chat(
+            USER_CONTENT,
+            hermes_thread_id=HERMES_THREAD_ID,
+            profile_reference="profiles/employee-assistant",
+            profile_revision=3,
+            thread_id="gateway-thread-001",
+            session_metadata=session_metadata,
+            idempotency_key="dispatch-message-42",
+        )
+
+    assert result.assistant_content == "Profile-aware response"
+    assert result.hermes_thread_id == HERMES_THREAD_ID
+
+
+def test_chat_parses_v2_response_envelope_without_local_paths() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "response_id": "response-001",
+                "parts": [
+                    {"type": "text", "text": "Report attached."},
+                    {"type": "artifact_ref", "artifact_id": "artifact-001"},
+                ],
+            },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
+
+    with hermes_client(handler) as client:
+        result = client.chat(USER_CONTENT)
+
+    envelope = ResponseEnvelope(
+        response_id="response-001",
+        parts=(
+            TextPart(text="Report attached."),
+            ArtifactRefPart(artifact_id="artifact-001"),
+        ),
+    )
+    assert result == HermesChatResult(
+        assistant_content="Report attached.",
+        hermes_thread_id=HERMES_THREAD_ID,
+        response=envelope,
+    )
+
+
+def test_chat_accepts_artifact_only_v2_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "response_id": "response-001",
+                "parts": [{"type": "artifact_ref", "artifact_id": "artifact-001"}],
+            },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
+
+    with hermes_client(handler) as client:
+        result = client.chat(USER_CONTENT)
+
+    assert result.assistant_content == ""
+    assert result.response is not None
+    assert result.response.artifact_ids == ("artifact-001",)
+
+
+def test_chat_does_not_fallback_to_legacy_when_v2_markers_are_invalid() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "response_id": "response-001",
+                "parts": [{"type": "artifact_ref", "path": "C:/private/report.pdf"}],
+                "choices": [{"message": {"role": "assistant", "content": "legacy fallback"}}],
+            },
+            headers={HERMES_SESSION_HEADER: HERMES_THREAD_ID},
+        )
+
+    with hermes_client(handler) as client, pytest.raises(HermesResponseError):
+        client.chat(USER_CONTENT)
 
 
 def test_chat_sends_existing_hermes_thread_id() -> None:

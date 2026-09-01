@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import TIMEOUT_MAX
@@ -12,6 +13,21 @@ import yaml
 _POLLING_INTERVAL_ERROR = (
     "runtime.polling_interval_seconds must be within the supported positive timeout range"
 )
+
+WORKER_CONCURRENCY_ENV = "CF_GATEWAY_WORKER_CONCURRENCY"
+WORKER_LEASE_SECONDS_ENV = "CF_GATEWAY_WORKER_LEASE_SECONDS"
+WORKER_RETRY_LIMIT_ENV = "CF_GATEWAY_WORKER_RETRY_LIMIT"
+
+
+def _environment_variable_name(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must name an environment variable")
+    normalized = value.strip()
+    if "=" in normalized or any(
+        ord(character) < 0x21 or ord(character) > 0x7E for character in normalized
+    ):
+        raise ValueError(f"{field_name} must name an environment variable")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,10 +47,52 @@ class LoggingSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeSettings:
-    polling_interval_seconds: float = 3.0
+class APISettings:
+    token_env: str = "CF_GATEWAY_API_TOKEN"
+    admin_token_env: str = "CF_AGENT_GATEWAY_ADMIN_TOKEN"
+    max_request_body_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "token_env",
+            _environment_variable_name(self.token_env, "api.token_env"),
+        )
+        object.__setattr__(
+            self,
+            "admin_token_env",
+            _environment_variable_name(self.admin_token_env, "api.admin_token_env"),
+        )
+        if (
+            isinstance(self.max_request_body_bytes, bool)
+            or not isinstance(self.max_request_body_bytes, int)
+            or not 1 <= self.max_request_body_bytes <= 64 * 1024 * 1024
+        ):
+            raise ValueError("api.max_request_body_bytes must be between 1 and 67108864")
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactSettings:
+    storage_root: str = "./data/artifacts"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.storage_root, str) or not self.storage_root.strip():
+            raise ValueError("artifact.storage_root must not be empty")
+        storage_root = self.storage_root.strip()
+        if "\x00" in storage_root:
+            raise ValueError("artifact.storage_root contains invalid characters")
+        object.__setattr__(self, "storage_root", storage_root)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSettings:
+    polling_interval_seconds: float = 3.0
+    v2_routing_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.v2_routing_enabled, bool):
+            raise ValueError("runtime.v2_routing_enabled must be a boolean")
+
         interval = self.polling_interval_seconds
         if isinstance(interval, bool) or not isinstance(interval, (int, float)):
             raise ValueError(_POLLING_INTERVAL_ERROR)
@@ -150,12 +208,45 @@ class HermesSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerSettings:
+    enabled: bool = False
+    concurrency: int = 4
+    lease_seconds: float = 60.0
+    retry_limit: int = 3
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("worker.enabled must be a boolean")
+        if (
+            isinstance(self.concurrency, bool)
+            or not isinstance(self.concurrency, int)
+            or self.concurrency <= 0
+        ):
+            raise ValueError("worker.concurrency must be a positive integer")
+        if isinstance(self.lease_seconds, bool) or not isinstance(self.lease_seconds, (int, float)):
+            raise ValueError("worker.lease_seconds must be a finite positive number")
+        lease_seconds = float(self.lease_seconds)
+        if not math.isfinite(lease_seconds) or lease_seconds <= 0 or lease_seconds > TIMEOUT_MAX:
+            raise ValueError("worker.lease_seconds must be a finite positive number")
+        if (
+            isinstance(self.retry_limit, bool)
+            or not isinstance(self.retry_limit, int)
+            or self.retry_limit < 0
+        ):
+            raise ValueError("worker.retry_limit must be a non-negative integer")
+        object.__setattr__(self, "lease_seconds", lease_seconds)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
+    api: APISettings = APISettings()
+    artifact: ArtifactSettings = ArtifactSettings()
     wechat: WechatSettings = WechatSettings()
     hermes: HermesSettings = HermesSettings()
+    worker: WorkerSettings = WorkerSettings()
     runtime: RuntimeSettings = RuntimeSettings()
 
 
@@ -174,17 +265,23 @@ def load_settings(path: str | Path) -> Settings:
     server = _mapping(raw, "server")
     database = _mapping(raw, "database")
     logging = _mapping(raw, "logging")
+    api = _mapping(raw, "api")
+    artifact = _mapping(raw, "artifact")
     runtime = _mapping(raw, "runtime")
     wechat = _mapping(raw, "wechat")
     hermes = _mapping(raw, "hermes")
+    worker = _mapping(raw, "worker")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
 
     host = str(server.get("host", "0.0.0.0")).strip()
     port = int(server.get("port", 8080))
-    database_url = str(database.get("url", "sqlite:///./data/gateway.db")).strip()
-    log_level = str(logging.get("level", "INFO")).upper()
+    database_url = os.getenv(
+        "CF_AGENT_GATEWAY_DATABASE_URL",
+        str(database.get("url", "sqlite:///./data/gateway.db")),
+    ).strip()
+    log_level = os.getenv("CF_GATEWAY_LOG_LEVEL", str(logging.get("level", "INFO"))).strip().upper()
 
     if not host:
         raise ValueError("server.host is required")
@@ -199,8 +296,20 @@ def load_settings(path: str | Path) -> Settings:
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
+        api=APISettings(
+            token_env=api.get("token_env", "CF_GATEWAY_API_TOKEN"),
+            admin_token_env=api.get(
+                "admin_token_env",
+                "CF_AGENT_GATEWAY_ADMIN_TOKEN",
+            ),
+            max_request_body_bytes=api.get("max_request_body_bytes", 1_048_576),
+        ),
+        artifact=ArtifactSettings(
+            storage_root=artifact.get("storage_root", "./data/artifacts"),
+        ),
         runtime=RuntimeSettings(
             polling_interval_seconds=runtime.get("polling_interval_seconds", 3.0),
+            v2_routing_enabled=runtime.get("v2_routing_enabled", False),
         ),
         wechat=WechatSettings(
             enabled=wechat.get("enabled", False),
@@ -214,6 +323,21 @@ def load_settings(path: str | Path) -> Settings:
             api_key_env=hermes.get("api_key_env", "HERMES_API_KEY"),
             model=hermes.get("model", "hermes-agent"),
         ),
+        worker=WorkerSettings(
+            enabled=worker.get("enabled", False),
+            concurrency=_environment_integer(
+                WORKER_CONCURRENCY_ENV,
+                worker.get("concurrency", 4),
+            ),
+            lease_seconds=_environment_float(
+                WORKER_LEASE_SECONDS_ENV,
+                worker.get("lease_seconds", 60.0),
+            ),
+            retry_limit=_environment_integer(
+                WORKER_RETRY_LIMIT_ENV,
+                worker.get("retry_limit", 3),
+            ),
+        ),
     )
 
 
@@ -222,3 +346,23 @@ def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be a YAML mapping")
     return value
+
+
+def _environment_integer(name: str, default: Any) -> Any:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be an integer") from None
+
+
+def _environment_float(name: str, default: Any) -> Any:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a number") from None

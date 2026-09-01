@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import UTC
 from typing import Any
 from xml.etree import ElementTree
 
@@ -20,6 +21,9 @@ from cf_agent_gateway.adapters.wechat.raw_models import RawWechatMessage
 
 EVENT_ID_VERSION = 1
 LOCAL_MESSAGE_ID_VERSION = 1
+GENERATION_LOCAL_MESSAGE_ID_VERSION = 2
+CHECKPOINT_FINGERPRINT_VERSION = 1
+FALLBACK_CHECKPOINT_FINGERPRINT_VERSION = 1
 WECHAT_SOURCE = "wechat"
 
 
@@ -28,6 +32,7 @@ def normalize_wechat_message(
     *,
     source_account_id: str,
     conversation_name: str | None = None,
+    regression_generation: int = 0,
 ) -> NormalizedWechatMessage:
     message = _raw_message(raw)
     account_id = _required(source_account_id, "source_account_id")
@@ -44,6 +49,7 @@ def normalize_wechat_message(
         local_id=source_local_id,
         account_id=account_id,
         chat_id=chat_id,
+        regression_generation=_validated_generation(regression_generation),
     )
     conversation_type = (
         WechatConversationType.GROUP
@@ -79,6 +85,46 @@ def normalize_wechat_message(
         is_mentioned=is_mentioned,
         is_self=message.is_self is True,
         reply=reply,
+        raw_payload=message.raw_payload,
+    )
+
+
+def build_wechat_checkpoint_fingerprint(
+    raw: RawWechatMessage | Mapping[str, Any],
+) -> str | None:
+    """Build a content-free continuity anchor, preferring stable server identity."""
+
+    message = _raw_message(raw)
+    server_id = _usable_id(message.server_id)
+    if server_id is not None:
+        return _digest(
+            {
+                "identity": "server",
+                "server_id": server_id,
+                "version": CHECKPOINT_FINGERPRINT_VERSION,
+            }
+        )
+
+    local_id = _usable_id(message.local_id)
+    chat_id = _optional_string(message.chat_id)
+    if local_id is None or chat_id is None:
+        return None
+    timestamp = (
+        message.timestamp.replace(tzinfo=UTC)
+        if message.timestamp.tzinfo is None
+        else message.timestamp.astimezone(UTC)
+    )
+    return _digest(
+        {
+            "chat_id": chat_id,
+            "identity": "fallback",
+            "is_self": message.is_self is True,
+            "local_id": local_id,
+            "message_type": message.type,
+            "sender_id": _optional_string(message.sender),
+            "timestamp": timestamp.isoformat(),
+            "version": FALLBACK_CHECKPOINT_FINGERPRINT_VERSION,
+        }
     )
 
 
@@ -108,6 +154,7 @@ def _source_message_id(
     local_id: str | int | None,
     account_id: str,
     chat_id: str,
+    regression_generation: int,
 ) -> tuple[str, bool]:
     stable_id = _usable_id(server_id)
     if stable_id is not None:
@@ -116,14 +163,19 @@ def _source_message_id(
     fallback_local_id = _usable_id(local_id)
     if fallback_local_id is None:
         raise WechatNormalizationError("raw WeChat message requires a usable serverId or localId")
-    fields = {
+    fields: dict[str, object] = {
         "account_id": account_id,
         "chat_id": chat_id,
         "local_id": fallback_local_id,
         "platform": WECHAT_SOURCE,
         "version": LOCAL_MESSAGE_ID_VERSION,
     }
-    return f"local:v{LOCAL_MESSAGE_ID_VERSION}:{_digest(fields)}", True
+    version = LOCAL_MESSAGE_ID_VERSION
+    if regression_generation > 0:
+        version = GENERATION_LOCAL_MESSAGE_ID_VERSION
+        fields["generation"] = regression_generation
+        fields["version"] = version
+    return f"local:v{version}:{_digest(fields)}", True
 
 
 def _message_type(
@@ -192,6 +244,12 @@ def _usable_id(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized if normalized and normalized != "0" else None
+
+
+def _validated_generation(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1:
+        raise WechatNormalizationError("regression_generation must be a non-negative BigInteger")
+    return value
 
 
 def _required(value: str | None, field_name: str) -> str:

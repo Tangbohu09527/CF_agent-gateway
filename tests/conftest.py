@@ -8,7 +8,12 @@ from cf_agent_gateway.gateway.app import create_app
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     settings = Settings(database=DatabaseSettings(url="sqlite+pysqlite:///:memory:"))
-    with TestClient(create_app(settings)) as test_client:
+    token = "test-gateway-api-token"
+    monkeypatch.setenv(settings.api.token_env, token)
+    with TestClient(
+        create_app(settings),
+        headers={"Authorization": f"Bearer {token}"},
+    ) as test_client:
         yield test_client

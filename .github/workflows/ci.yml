@@ -1,0 +1,252 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Validate UTF-8 and local Markdown links
+        shell: python
+        run: |
+          from __future__ import annotations
+
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+
+          root = Path.cwd().resolve()
+          listed = subprocess.check_output(
+              ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+          )
+          paths = [Path(item.decode("utf-8")) for item in listed.split(b"\0") if item]
+          binary_suffixes = {
+              ".7z", ".db", ".docx", ".gif", ".gz", ".ico", ".jpeg", ".jpg",
+              ".pdf", ".png", ".pptx", ".pyc", ".sqlite", ".tar", ".webp",
+              ".woff", ".woff2", ".xlsx", ".zip",
+          }
+          failures: list[str] = []
+          markdown: dict[Path, str] = {}
+
+          for relative_path in paths:
+              path = root / relative_path
+              if not path.is_file() or path.suffix.casefold() in binary_suffixes:
+                  continue
+              data = path.read_bytes()
+              if b"\0" in data:
+                  continue
+              try:
+                  text = data.decode("utf-8")
+              except UnicodeDecodeError as error:
+                  failures.append(f"{relative_path}: not UTF-8 ({error})")
+                  continue
+              if path.suffix.casefold() == ".md":
+                  markdown[relative_path] = text
+
+          inline_link = re.compile(r"!?\[[^\]]*\]\((<[^>]+>|[^)\s]+)")
+          reference_link = re.compile(r"^\s*\[[^\]]+\]:\s*(<[^>]+>|\S+)", re.MULTILINE)
+
+          for relative_path, text in markdown.items():
+              targets = [match.group(1) for match in inline_link.finditer(text)]
+              targets.extend(match.group(1) for match in reference_link.finditer(text))
+              for raw_target in targets:
+                  target = raw_target.removeprefix("<").removesuffix(">")
+                  parsed = urlsplit(target)
+                  if parsed.scheme or target.startswith(("#", "//")):
+                      continue
+                  local_target = unquote(parsed.path)
+                  if not local_target:
+                      continue
+                  if local_target.startswith("/"):
+                      resolved = root / local_target.lstrip("/")
+                  else:
+                      resolved = (root / relative_path.parent / local_target).resolve()
+                  try:
+                      resolved.relative_to(root)
+                  except ValueError:
+                      failures.append(f"{relative_path}: link leaves repository: {target}")
+                      continue
+                  if not resolved.exists():
+                      failures.append(f"{relative_path}: missing link target: {target}")
+
+          if failures:
+              print("\n".join(failures), file=sys.stderr)
+              raise SystemExit(1)
+          print(f"validated {len(paths)} text candidates and {len(markdown)} Markdown files")
+
+      - name: Check whitespace errors
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --check
+          if [ -n "${BASE_SHA}" ]; then
+            git diff --check "${BASE_SHA}...HEAD"
+          else
+            git show --check --format= HEAD
+          fi
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  test:
+    name: Python, migrations, and V2 runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cf_agent_gateway_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cf_agent_gateway_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run full test suite
+        run: python -m pytest -q --basetemp="${RUNNER_TEMP}/pytest-full"
+
+      - name: Run migration fixtures explicitly
+        run: >-
+          python -m pytest -q
+          tests/test_migration.py
+          tests/test_migrations.py
+          tests/test_dispatch_recovery_migration.py
+          --basetemp="${RUNNER_TEMP}/pytest-migrations"
+
+      - name: Run populated PostgreSQL migration fixture
+        env:
+          CF_GATEWAY_RUN_POSTGRESQL_MIGRATION_TEST: "1"
+          CF_GATEWAY_TEST_POSTGRESQL_URL: >-
+            postgresql+psycopg://postgres:postgres@127.0.0.1:5432/cf_agent_gateway_ci
+        run: >-
+          python -m pytest -q
+          tests/test_postgresql_migration.py
+          --basetemp="${RUNNER_TEMP}/pytest-postgresql-migration"
+
+      - name: Run V2 end-to-end suite explicitly
+        run: >-
+          python -m pytest -q
+          tests/test_v2_runtime_e2e.py
+          --basetemp="${RUNNER_TEMP}/pytest-v2-e2e"
+
+      - name: Upgrade PostgreSQL through Alembic
+        env:
+          CF_AGENT_GATEWAY_DATABASE_URL: >-
+            postgresql+psycopg://postgres:postgres@127.0.0.1:5432/cf_agent_gateway_ci
+        run: python -m alembic upgrade head
+
+      - name: Verify PostgreSQL revision and schema head
+        env:
+          CF_AGENT_GATEWAY_DATABASE_URL: >-
+            postgresql+psycopg://postgres:postgres@127.0.0.1:5432/cf_agent_gateway_ci
+        run: |
+          python -m alembic current --verbose
+          python -m alembic check
+          python - <<'PY'
+          import os
+
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          from cf_agent_gateway.database import (
+              check_database_migrations,
+              create_database_engine,
+          )
+
+          heads = ScriptDirectory.from_config(Config("alembic.ini")).get_heads()
+          if len(heads) != 1:
+              raise SystemExit(f"expected one Alembic head, found {heads!r}")
+
+          engine = create_database_engine(os.environ["CF_AGENT_GATEWAY_DATABASE_URL"])
+          try:
+              check_database_migrations(engine)
+          finally:
+              engine.dispose()
+          print(f"PostgreSQL schema is at the single packaged Alembic head: {heads[0]}")
+          PY
+
+      - name: Confirm tests left the checkout clean
+        run: |
+          git diff --check
+          git status --short
+          test -z "$(git status --porcelain)"
+
+  container-e2e:
+    name: Production Compose real-container E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Docker runtime
+        run: |
+          docker version
+          docker compose version
+
+      - name: Build and validate the isolated V2 production stack
+        run: python tests/container/run_compose_e2e.py

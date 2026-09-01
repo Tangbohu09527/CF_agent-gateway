@@ -10,11 +10,13 @@ from sqlalchemy.orm import Session
 from cf_agent_gateway.workspace.errors import (
     HermesThreadConflictError,
     ThreadConflictError,
+    ThreadRoutingConflictError,
     ThreadSourceBindingConflictError,
 )
 from cf_agent_gateway.workspace.models import (
     AIThread,
     EmployeeWorkspace,
+    ThreadPolicy,
     ThreadSourceBinding,
     ThreadType,
     WorkspaceStatus,
@@ -75,6 +77,48 @@ class WorkspaceStore:
                 return self._compatible_thread_or_raise(existing, thread_type), False
             raise
         return thread, True
+
+    def bind_v2_route_snapshot(
+        self,
+        thread: AIThread,
+        *,
+        agent_profile_id: str,
+        thread_policy: ThreadPolicy | str,
+    ) -> AIThread:
+        normalized_policy = ThreadPolicy(thread_policy)
+        expected_thread_type = (
+            ThreadType.PRIVATE
+            if normalized_policy is ThreadPolicy.PRIVATE_SENDER
+            else ThreadType.GROUP
+        )
+        if thread.thread_type is not expected_thread_type:
+            raise ValueError(
+                f"{normalized_policy.value} requires a {expected_thread_type.value} thread"
+            )
+        statement = (
+            update(AIThread)
+            .where(
+                AIThread.id == thread.id,
+                AIThread.agent_profile_id.is_(None),
+                AIThread.thread_policy.is_(None),
+            )
+            .values(
+                agent_profile_id=agent_profile_id,
+                thread_policy=normalized_policy,
+            )
+        )
+        try:
+            self._session.execute(statement)
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+        self._session.refresh(thread)
+        return self._compatible_v2_route_or_raise(
+            thread,
+            agent_profile_id=agent_profile_id,
+            thread_policy=normalized_policy,
+        )
 
     def get_thread(self, ai_thread_id: str) -> AIThread | None:
         return self._session.get(AIThread, ai_thread_id)
@@ -275,6 +319,21 @@ class WorkspaceStore:
     def touch_thread(self, thread: AIThread) -> AIThread:
         thread.last_active_at = datetime.now(UTC)
         self._session.commit()
+        return thread
+
+    @staticmethod
+    def _compatible_v2_route_or_raise(
+        thread: AIThread,
+        *,
+        agent_profile_id: str,
+        thread_policy: ThreadPolicy,
+    ) -> AIThread:
+        if thread.agent_profile_id != agent_profile_id or thread.thread_policy is not thread_policy:
+            raise ThreadRoutingConflictError(
+                ai_thread_id=thread.id,
+                agent_profile_id=agent_profile_id,
+                thread_policy=thread_policy.value,
+            )
         return thread
 
     @staticmethod

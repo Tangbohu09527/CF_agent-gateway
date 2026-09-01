@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictInt, StrictStr, model_validator
+from pydantic_core import to_jsonable_python
 
 
 class RawWechatModel(BaseModel):
@@ -32,6 +35,7 @@ class AgentWechatMedia(BaseModel):
 
 
 class RawWechatMessage(RawWechatModel):
+    raw_payload: dict[str, JsonValue] = Field(exclude=True, repr=False)
     local_id: StrictInt | StrictStr | None = Field(default=None, alias="localId")
     server_id: StrictInt | StrictStr | None = Field(default=None, alias="serverId")
     chat_id: str = Field(alias="chatId", min_length=1)
@@ -49,3 +53,12 @@ class RawWechatMessage(RawWechatModel):
     # The upstream reply schema is not yet stable. Preserve the supplied JSON value at
     # this declared boundary and only summarize verified message-like keys downstream.
     reply: Any = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_raw_payload(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        candidate = dict(value)
+        candidate["raw_payload"] = to_jsonable_python(deepcopy(dict(value)))
+        return candidate

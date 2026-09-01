@@ -59,6 +59,22 @@ class ThreadConflictError(WorkspaceError):
         super().__init__("thread key is already assigned to an incompatible thread")
 
 
+class ThreadRoutingConflictError(WorkspaceError):
+    code = "thread_routing_conflict"
+
+    def __init__(
+        self,
+        *,
+        ai_thread_id: str,
+        agent_profile_id: str,
+        thread_policy: str,
+    ) -> None:
+        self.ai_thread_id = ai_thread_id
+        self.agent_profile_id = agent_profile_id
+        self.thread_policy = thread_policy
+        super().__init__("AI thread is already assigned to a different V2 route")
+
+
 class HermesThreadConflictError(WorkspaceError):
     code = "hermes_thread_conflict"
 

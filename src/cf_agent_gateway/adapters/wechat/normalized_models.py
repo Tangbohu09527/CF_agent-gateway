@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 
 class WechatConversationType(StrEnum):
@@ -62,3 +62,4 @@ class NormalizedWechatMessage(BaseModel):
     is_mentioned: bool | None
     is_self: bool
     reply: WechatReplySummary | None = None
+    raw_payload: dict[str, JsonValue] | None = None

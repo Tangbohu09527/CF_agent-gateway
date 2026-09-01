@@ -146,9 +146,11 @@ does not constitute automated production deployment of the resident Worker.
 
 ## Known delivery boundary
 
-Message Store idempotency and checkpointing make inbound storage retries safe. Hermes
-dispatch and outbound response delivery do not yet use a durable outbox or an upstream
-idempotency key. An ambiguous external result can therefore require operational review and
+Message Store idempotency and checkpointing make inbound storage retries safe. At the time
+of this validation, Hermes dispatch and outbound response delivery did not use a durable
+outbox or an upstream idempotency key. The later dispatch-record foundation is not part of
+this Staging evidence, and it still does not provide an upstream idempotency guarantee or a
+delivery worker. An ambiguous external result therefore requires operational review and
 must not be represented as production-grade exactly-once delivery.
 
 See [architecture.md](architecture.md) for runtime and persistence boundaries and

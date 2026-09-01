@@ -8,8 +8,18 @@ database:
 logging:
   level: "INFO"
 
+artifact:
+  storage_root: "./data/artifacts"
+
 runtime:
   polling_interval_seconds: 3
+  v2_routing_enabled: false
+
+worker:
+  enabled: false
+  concurrency: 4
+  lease_seconds: 60
+  retry_limit: 3
 
 wechat:
   enabled: false

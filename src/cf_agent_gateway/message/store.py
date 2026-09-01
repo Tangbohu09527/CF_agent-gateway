@@ -5,7 +5,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from cf_agent_gateway.message.errors import ConversationTypeConflictError
-from cf_agent_gateway.message.models import Attachment, Conversation, Message
+from cf_agent_gateway.message.models import (
+    Attachment,
+    Conversation,
+    Message,
+    MessageRawPayload,
+)
 from cf_agent_gateway.message.schemas import MessageEvent
 
 
@@ -95,6 +100,9 @@ class MessageStore:
             raw_type=event.raw_type,
             content=event.content,
             timestamp=event.timestamp,
+            occurred_at=event.occurred_at,
+            received_at=event.received_at,
+            direction=event.direction.value,
             source_local_id=event.source_local_id,
             source_server_id=event.source_server_id,
             source_message_id_is_fallback=event.source_message_id_is_fallback,
@@ -115,6 +123,11 @@ class MessageStore:
                 )
                 for metadata in event.attachments
             ],
+            raw_payload=(
+                MessageRawPayload(payload=event.raw_payload)
+                if event.raw_payload is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -137,7 +150,13 @@ class MessageStore:
         return self._session.scalar(statement)
 
     def list_for_conversation(
-        self, *, source: str, source_account_id: str, conversation_id: str
+        self,
+        *,
+        source: str,
+        source_account_id: str,
+        conversation_id: str,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Message]:
         statement = (
             select(Message)
@@ -149,6 +168,10 @@ class MessageStore:
             .options(selectinload(Message.attachments))
             .order_by(Message.timestamp, Message.id)
         )
+        if offset:
+            statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
         return list(self._session.scalars(statement))
 
     def _get_by_event_id(self, event_id: str) -> Message | None:

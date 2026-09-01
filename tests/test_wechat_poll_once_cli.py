@@ -39,9 +39,14 @@ def test_cli_prints_only_the_safe_poll_summary(
         logged_in=True,
         chats_seen=1,
         chats_succeeded=1,
-        messages_seen=3,
+        messages_seen=4,
         messages_processed=1,
+        messages_new=1,
+        messages_duplicate=0,
+        messages_failed=0,
         messages_skipped_by_checkpoint=2,
+        messages_skipped_as_self=1,
+        messages_without_server_id=2,
         chat_results=[
             ChatPollResult(
                 conversation_id="wxid_sensitive",
@@ -64,9 +69,16 @@ def test_cli_prints_only_the_safe_poll_summary(
         "chats_succeeded": 1,
         "failure_codes": [],
         "logged_in": True,
+        "messages_duplicate": 0,
+        "messages_failed": 0,
+        "messages_new": 1,
         "messages_processed": 1,
-        "messages_seen": 3,
+        "messages_seen": 4,
         "messages_skipped_by_checkpoint": 2,
+        "messages_skipped_as_self": 1,
+        "messages_skipped_checkpoint": 2,
+        "messages_skipped_self": 1,
+        "messages_without_server_id": 2,
         "source_account_id": "wxid_gateway",
     }
     serialized = captured.out + captured.err
@@ -147,8 +159,9 @@ def test_cli_runtime_boundary_exit_codes(
     assert wechat_poll_once.main() == expected_exit_code
     captured = capsys.readouterr()
     assert captured.out == ""
-    payload = json.loads(captured.err)
-    assert payload["error_code"] == error.code  # type: ignore[attr-defined]
+    assert json.loads(captured.err) == {
+        "error_code": error.code,  # type: ignore[attr-defined]
+    }
 
 
 def test_python_module_entrypoint_exits_two_when_runtime_is_disabled(tmp_path: Path) -> None:

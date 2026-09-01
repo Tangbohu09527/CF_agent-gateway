@@ -10,6 +10,7 @@ import pytest
 
 from cf_agent_gateway.adapters.wechat import (
     AgentWechatClient,
+    RawWechatMessage,
     WechatAPIError,
     WechatConversationType,
     WechatMessageType,
@@ -17,6 +18,7 @@ from cf_agent_gateway.adapters.wechat import (
     WechatResponseError,
     WechatSenderType,
     WechatTimeoutError,
+    build_wechat_checkpoint_fingerprint,
     normalize_wechat_message,
 )
 
@@ -127,11 +129,16 @@ def test_invalid_bearer_token_is_rejected_without_leaking_value(invalid_token: s
 
 
 def test_list_chats_and_messages_parse_supported_payloads() -> None:
+    payload = raw_message(
+        unknown={"items": [1, True, None, "value"]},
+        raw_payload="upstream field with a reserved-looking name",
+    )
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/chats":
             return httpx.Response(200, json={"data": {"chats": [{"chatId": "wxid_alice"}]}})
         assert request.url.path == "/api/messages/wxid_alice"
-        return httpx.Response(200, json={"messages": [raw_message()]})
+        return httpx.Response(200, json={"messages": [payload]})
 
     with wechat_client(handler) as client:
         chats = client.list_chats()
@@ -139,6 +146,16 @@ def test_list_chats_and_messages_parse_supported_payloads() -> None:
 
     assert chats == [{"chatId": "wxid_alice"}]
     assert messages[0].server_id == 9001
+    assert messages[0].raw_payload == payload
+
+
+def test_raw_message_keeps_programmatic_datetime_compatibility() -> None:
+    timestamp = datetime.fromisoformat("2026-08-01T10:15:00+08:00")
+
+    message = RawWechatMessage.model_validate(raw_message(timestamp=timestamp))
+
+    assert message.timestamp == timestamp
+    assert message.raw_payload["timestamp"] == "2026-08-01T10:15:00+08:00"
 
 
 def test_get_media_decodes_verified_txt_response_and_preserves_metadata() -> None:
@@ -424,6 +441,22 @@ def test_server_id_is_the_stable_source_message_id() -> None:
     assert second.event_id == first.event_id
 
 
+def test_server_id_identity_is_stable_across_checkpoint_generations() -> None:
+    first = normalize_wechat_message(
+        raw_message(),
+        source_account_id="wxid_bot",
+        regression_generation=0,
+    )
+    recovered = normalize_wechat_message(
+        raw_message(localId=1),
+        source_account_id="wxid_bot",
+        regression_generation=7,
+    )
+
+    assert recovered.source_message_id == first.source_message_id
+    assert recovered.event_id == first.event_id
+
+
 def test_missing_server_id_uses_scoped_local_id_fallback() -> None:
     first = normalize_wechat_message(raw_message(serverId=None), source_account_id="wxid_bot")
     same = normalize_wechat_message(raw_message(serverId=None), source_account_id="wxid_bot")
@@ -441,6 +474,100 @@ def test_missing_server_id_uses_scoped_local_id_fallback() -> None:
     assert same.source_message_id == first.source_message_id
     assert other_chat.source_message_id != first.source_message_id
     assert other_account.source_message_id != first.source_message_id
+
+
+def test_local_id_fallback_is_generation_scoped_without_changing_generation_zero() -> None:
+    raw = raw_message(serverId=None)
+    legacy = normalize_wechat_message(
+        raw,
+        source_account_id="wxid_bot",
+        regression_generation=0,
+    )
+    first_generation = normalize_wechat_message(
+        raw,
+        source_account_id="wxid_bot",
+        regression_generation=1,
+    )
+    repeated_generation = normalize_wechat_message(
+        raw,
+        source_account_id="wxid_bot",
+        regression_generation=1,
+    )
+    second_generation = normalize_wechat_message(
+        raw,
+        source_account_id="wxid_bot",
+        regression_generation=2,
+    )
+
+    assert legacy.source_message_id.startswith("local:v1:")
+    assert first_generation.source_message_id.startswith("local:v2:")
+    assert first_generation.source_message_id == repeated_generation.source_message_id
+    assert (
+        len(
+            {
+                legacy.source_message_id,
+                first_generation.source_message_id,
+                second_generation.source_message_id,
+            }
+        )
+        == 3
+    )
+
+
+def test_checkpoint_fingerprint_prefers_stable_server_identity() -> None:
+    first = build_wechat_checkpoint_fingerprint(raw_message())
+    changed_payload = build_wechat_checkpoint_fingerprint(
+        raw_message(
+            senderName="Renamed",
+            content="changed body",
+            timestamp="2030-01-01T00:00:00Z",
+        )
+    )
+    other_server = build_wechat_checkpoint_fingerprint(raw_message(serverId=9002))
+
+    assert first is not None and len(first) == 64
+    assert changed_payload == first
+    assert other_server != first
+
+
+def test_checkpoint_fallback_fingerprint_is_content_free_and_uses_stable_metadata() -> None:
+    first = build_wechat_checkpoint_fingerprint(raw_message(serverId=None))
+    changed_private_fields = build_wechat_checkpoint_fingerprint(
+        raw_message(
+            serverId=None,
+            senderName="Renamed",
+            content="changed body",
+        )
+    )
+    same_utc_instant = build_wechat_checkpoint_fingerprint(
+        raw_message(serverId=None, timestamp="2026-08-01T02:15:00Z")
+    )
+    changed_metadata = [
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, localId=102)),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, chatId="wxid_bob")),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, sender="wxid_bob")),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, type=3)),
+        build_wechat_checkpoint_fingerprint(
+            raw_message(serverId=None, timestamp="2026-08-01T02:15:01Z")
+        ),
+        build_wechat_checkpoint_fingerprint(raw_message(serverId=None, isSelf=True)),
+    ]
+
+    assert first is not None and len(first) == 64
+    assert changed_private_fields == first
+    assert same_utc_instant == first
+    assert all(fingerprint != first for fingerprint in changed_metadata)
+    assert build_wechat_checkpoint_fingerprint(raw_message(serverId=None, localId=None)) is None
+
+
+@pytest.mark.parametrize("generation", [-1, 2**63, True, "1"])
+def test_invalid_checkpoint_generation_is_rejected(generation: object) -> None:
+    with pytest.raises(WechatNormalizationError):
+        normalize_wechat_message(
+            raw_message(serverId=None),
+            source_account_id="wxid_bot",
+            regression_generation=generation,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("server_id", [None, "", "   ", 0, "0"])

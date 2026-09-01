@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+import logging
+import os
+import signal
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
+from threading import Event
+from types import FrameType
+from typing import Protocol
+
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from cf_agent_gateway.config import Settings, load_settings
+from cf_agent_gateway.context import EnabledContextAccessPolicy
+from cf_agent_gateway.database import (
+    create_database_engine,
+    create_database_session_factory,
+    initialize_database,
+)
+from cf_agent_gateway.hermes import (
+    HERMES_CONTEXT_TOOL_NAMES,
+    HermesChatClient,
+    HermesChatResult,
+    HermesClient,
+    HermesDispatchService,
+)
+from cf_agent_gateway.hermes.worker import HermesDispatchWorker
+from cf_agent_gateway.logging import configure_logging
+from cf_agent_gateway.response import ResponsePersistenceProcessor
+from cf_agent_gateway.runtime.errors import (
+    DispatchWorkerDisabledError,
+    DispatchWorkerRuntimeError,
+    HermesAPIKeyEnvironmentError,
+    HermesClientInitializationError,
+    HermesRuntimeDisabledError,
+)
+from cf_agent_gateway.runtime.heartbeat import (
+    HeartbeatPublisher,
+    create_worker_heartbeat_from_environment,
+    resident_heartbeat,
+)
+from cf_agent_gateway.runtime.startup import (
+    check_database_migrations,
+    database_startup_check_enabled,
+)
+from cf_agent_gateway.runtime.wechat import (
+    ClosableHermesChatClient,
+    WechatMessageSenderFactory,
+)
+
+DEFAULT_CONFIG_PATH = "config/config.yaml"
+
+logger = logging.getLogger(__name__)
+
+
+class HermesClientFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+    ) -> ClosableHermesChatClient: ...
+
+
+class _OperationObservedHermesClient:
+    def __init__(
+        self,
+        client: HermesChatClient,
+        observer: Callable[[bool], None],
+    ) -> None:
+        self._client = client
+        self._observer = observer
+
+    def chat(
+        self,
+        content: str,
+        *,
+        hermes_thread_id: str | None = None,
+        profile_reference: str | None = None,
+        profile_revision: int | None = None,
+        thread_id: str | None = None,
+        session_metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> HermesChatResult:
+        try:
+            result = self._client.chat(
+                content,
+                hermes_thread_id=hermes_thread_id,
+                profile_reference=profile_reference,
+                profile_revision=profile_revision,
+                thread_id=thread_id,
+                session_metadata=session_metadata,
+                idempotency_key=idempotency_key,
+            )
+        except Exception:
+            self._notify(False)
+            raise
+        self._notify(True)
+        return result
+
+    def _notify(self, succeeded: bool) -> None:
+        with suppress(Exception):
+            self._observer(succeeded)
+
+
+def build_dispatch_worker(
+    settings: Settings,
+    *,
+    session_factory: sessionmaker[Session],
+    hermes_client: HermesChatClient,
+    sender_factory: WechatMessageSenderFactory | None,
+    operation_observer: Callable[[bool], None] | None = None,
+) -> HermesDispatchWorker:
+    """Build the public worker core around injected runtime dependencies."""
+
+    del sender_factory
+    observed_client: HermesChatClient = (
+        _OperationObservedHermesClient(hermes_client, operation_observer)
+        if operation_observer is not None
+        else hermes_client
+    )
+    return HermesDispatchWorker(
+        session_factory,
+        lambda session: HermesDispatchService(
+            session,
+            observed_client,
+            context_access_policy=EnabledContextAccessPolicy(),
+            available_tools=HERMES_CONTEXT_TOOL_NAMES,
+        ),
+        lease_seconds=settings.worker.lease_seconds,
+        retry_limit=settings.worker.retry_limit,
+        response_processor_factory=ResponsePersistenceProcessor,
+        reconcile_persisted_responses=True,
+    )
+
+
+def run_dispatch_worker(
+    settings: Settings,
+    *,
+    stop_event: Event,
+    hermes_client_factory: HermesClientFactory = HermesClient,
+    sender_factory: WechatMessageSenderFactory | None = None,
+    engine_factory: Callable[[str], Engine] = create_database_engine,
+    environment_reader: Callable[[str], str | None] = os.getenv,
+    heartbeat: HeartbeatPublisher | None = None,
+) -> None:
+    """Run the independent durable Hermes dispatch worker process."""
+
+    if not settings.worker.enabled:
+        raise DispatchWorkerDisabledError()
+    if not settings.hermes.enabled:
+        raise HermesRuntimeDisabledError()
+
+    api_key = environment_reader(settings.hermes.api_key_env)
+    if api_key is None or not api_key.strip():
+        raise HermesAPIKeyEnvironmentError(settings.hermes.api_key_env)
+
+    engine: Engine | None = None
+    hermes_client: ClosableHermesChatClient | None = None
+    try:
+        engine = engine_factory(settings.database.url)
+        if database_startup_check_enabled():
+            check_database_migrations(engine)
+        else:
+            initialize_database(engine)
+
+        client_initialization_failed = False
+        try:
+            hermes_client = hermes_client_factory(
+                base_url=settings.hermes.base_url,
+                api_key=api_key,
+                model=settings.hermes.model,
+            )
+        except Exception:
+            client_initialization_failed = True
+        if client_initialization_failed:
+            raise HermesClientInitializationError()
+
+        session_factory = create_database_session_factory(engine)
+        worker = build_dispatch_worker(
+            settings,
+            session_factory=session_factory,
+            hermes_client=hermes_client,
+            sender_factory=sender_factory,
+            operation_observer=_hermes_operation_observer(
+                heartbeat,
+                concurrency=settings.worker.concurrency,
+            ),
+        )
+        logger.info(
+            "dispatch worker started",
+            extra={
+                "fields": {
+                    "concurrency": settings.worker.concurrency,
+                    "lease_seconds": settings.worker.lease_seconds,
+                    "retry_limit": settings.worker.retry_limit,
+                }
+            },
+        )
+        _run_resident_worker(
+            worker,
+            stop_event=stop_event,
+            concurrency=settings.worker.concurrency,
+            heartbeat=heartbeat,
+        )
+    finally:
+        if hermes_client is not None:
+            with suppress(Exception):
+                hermes_client.close()
+        if engine is not None:
+            engine.dispose()
+
+
+def main() -> int:
+    stop_event: Event | None = None
+    heartbeat: HeartbeatPublisher | None = None
+    try:
+        config_path = os.getenv("CF_GATEWAY_CONFIG", DEFAULT_CONFIG_PATH)
+        try:
+            settings = load_settings(config_path)
+        except Exception:
+            configure_logging("INFO")
+            logger.error(
+                "dispatch worker failed",
+                extra={"fields": {"error_code": "runtime_configuration_invalid"}},
+            )
+            return 1
+
+        configure_logging(settings.logging.level)
+        heartbeat = create_worker_heartbeat_from_environment(
+            error_handler=_log_heartbeat_failure,
+        )
+        stop_event = Event()
+        with _shutdown_signal_handlers(stop_event):
+            run_dispatch_worker(
+                settings,
+                stop_event=stop_event,
+                heartbeat=heartbeat,
+            )
+    except KeyboardInterrupt:
+        if stop_event is not None:
+            stop_event.set()
+    except DispatchWorkerDisabledError as error:
+        _log_worker_failure(error)
+        return 2
+    except Exception as error:
+        _log_worker_failure(error)
+        return 1
+    return 0
+
+
+def _log_worker_failure(error: Exception) -> None:
+    error_code = (
+        error.code
+        if isinstance(
+            error,
+            (
+                DispatchWorkerRuntimeError,
+                HermesAPIKeyEnvironmentError,
+                HermesClientInitializationError,
+            ),
+        )
+        else "dispatch_worker_failed"
+    )
+    logger.error(
+        "dispatch worker failed",
+        extra={"fields": {"error_code": error_code}},
+    )
+
+
+def _run_resident_worker(
+    worker: HermesDispatchWorker,
+    *,
+    stop_event: Event,
+    concurrency: int,
+    heartbeat: HeartbeatPublisher | None,
+) -> None:
+    try:
+        with resident_heartbeat(
+            heartbeat,
+            stop_event=stop_event,
+            phase="dispatching",
+            concurrency=concurrency,
+        ):
+            worker.run(stop_event=stop_event, concurrency=concurrency)
+    finally:
+        logger.info("dispatch worker stopped")
+
+
+def _hermes_operation_observer(
+    heartbeat: HeartbeatPublisher | None,
+    *,
+    concurrency: int,
+) -> Callable[[bool], None] | None:
+    if heartbeat is None:
+        return None
+
+    def publish(succeeded: bool) -> None:
+        heartbeat.update(
+            "running",
+            phase="dispatching",
+            concurrency=concurrency,
+            last_operation_succeeded=succeeded,
+            last_operation_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
+
+    return publish
+
+
+def _log_heartbeat_failure() -> None:
+    logger.error(
+        "dispatch worker heartbeat write failed",
+        extra={"fields": {"error_code": "worker_heartbeat_write_failed"}},
+    )
+
+
+@contextmanager
+def _shutdown_signal_handlers(stop_event: Event) -> Iterator[None]:
+    handled_signals = (signal.SIGINT, signal.SIGTERM)
+    previous_handlers: dict[signal.Signals, signal.Handlers] = {}
+
+    def request_shutdown(signum: int, frame: FrameType | None) -> None:
+        del signum, frame
+        stop_event.set()
+
+    try:
+        for shutdown_signal in handled_signals:
+            previous_handlers[shutdown_signal] = signal.signal(
+                shutdown_signal,
+                request_shutdown,
+            )
+        yield
+    finally:
+        for shutdown_signal, previous_handler in previous_handlers.items():
+            signal.signal(shutdown_signal, previous_handler)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

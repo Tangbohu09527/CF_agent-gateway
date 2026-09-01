@@ -4,6 +4,8 @@ from threading import TIMEOUT_MAX
 import pytest
 
 from cf_agent_gateway.config import (
+    APISettings,
+    ArtifactSettings,
     HermesSettings,
     RuntimeSettings,
     WechatSettings,
@@ -11,10 +13,47 @@ from cf_agent_gateway.config import (
 )
 
 
+def test_artifact_settings_defaults() -> None:
+    settings = ArtifactSettings()
+
+    assert settings.storage_root == "./data/artifacts"
+
+
+def test_artifact_settings_rejects_empty_storage_root() -> None:
+    with pytest.raises(ValueError, match="artifact.storage_root"):
+        ArtifactSettings(storage_root="  ")
+
+
+def test_api_settings_are_fail_closed_and_bounded_by_default() -> None:
+    settings = APISettings()
+
+    assert settings.token_env == "CF_GATEWAY_API_TOKEN"
+    assert settings.admin_token_env == "CF_AGENT_GATEWAY_ADMIN_TOKEN"
+    assert settings.max_request_body_bytes == 1_048_576
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("token_env", ""),
+        ("token_env", "TOKEN=value"),
+        ("admin_token_env", "ADMIN TOKEN"),
+        ("max_request_body_bytes", 0),
+        ("max_request_body_bytes", 64 * 1024 * 1024 + 1),
+    ],
+)
+def test_api_settings_reject_invalid_security_bounds(field: str, value: object) -> None:
+    values = {field: value}
+
+    with pytest.raises(ValueError):
+        APISettings(**values)  # type: ignore[arg-type]
+
+
 def test_runtime_settings_defaults() -> None:
     settings = RuntimeSettings()
 
     assert settings.polling_interval_seconds == 3.0
+    assert settings.v2_routing_enabled is False
 
 
 def test_runtime_settings_rejects_interval_above_platform_wait_limit() -> None:
@@ -47,6 +86,7 @@ def test_legacy_yaml_without_runtime_or_wechat_settings_uses_safe_defaults(
     config_path.write_text("logging:\n  level: INFO\n", encoding="utf-8")
 
     settings = load_settings(config_path)
+    assert settings.artifact == ArtifactSettings()
 
     assert settings.runtime == RuntimeSettings()
     assert settings.wechat == WechatSettings()
@@ -62,10 +102,13 @@ server:
   port: 9090
 database:
   url: postgresql+psycopg://gateway:secret@db/gateway
+artifact:
+  storage_root: /var/lib/cf-agent-gateway/artifacts
 logging:
   level: debug
 runtime:
   polling_interval_seconds: 1.5
+  v2_routing_enabled: true
 wechat:
   enabled: true
   base_url: https://agent-wechat.internal:6174
@@ -85,8 +128,12 @@ hermes:
     assert settings.server.host == "127.0.0.1"
     assert settings.server.port == 9090
     assert settings.database.url.startswith("postgresql+psycopg://")
+    assert settings.artifact == ArtifactSettings(storage_root="/var/lib/cf-agent-gateway/artifacts")
     assert settings.logging.level == "DEBUG"
-    assert settings.runtime == RuntimeSettings(polling_interval_seconds=1.5)
+    assert settings.runtime == RuntimeSettings(
+        polling_interval_seconds=1.5,
+        v2_routing_enabled=True,
+    )
     assert settings.wechat == WechatSettings(
         enabled=True,
         base_url="https://agent-wechat.internal:6174",
@@ -124,6 +171,21 @@ def test_load_settings_rejects_invalid_polling_interval(
     )
 
     with pytest.raises(ValueError, match="runtime.polling_interval_seconds"):
+        load_settings(config_path)
+
+
+@pytest.mark.parametrize("yaml_value", ["'true'", "1", "[]"])
+def test_load_settings_rejects_non_boolean_v2_routing_flag(
+    tmp_path: Path,
+    yaml_value: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"runtime:\n  v2_routing_enabled: {yaml_value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="runtime.v2_routing_enabled"):
         load_settings(config_path)
 
 
@@ -230,3 +292,27 @@ def test_yaml_parse_error_does_not_echo_sensitive_source_text(tmp_path: Path) ->
         load_settings(config_path)
 
     assert sensitive_value not in str(error.value)
+
+
+def test_environment_overrides_production_database_and_log_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+database:
+  url: sqlite:///ignored.db
+logging:
+  level: WARNING
+""".strip(),
+        encoding="utf-8",
+    )
+    database_url = "postgresql+psycopg://gateway:password@database/gateway"
+    monkeypatch.setenv("CF_AGENT_GATEWAY_DATABASE_URL", database_url)
+    monkeypatch.setenv("CF_GATEWAY_LOG_LEVEL", " debug ")
+
+    settings = load_settings(config_path)
+
+    assert settings.database.url == database_url
+    assert settings.logging.level == "DEBUG"

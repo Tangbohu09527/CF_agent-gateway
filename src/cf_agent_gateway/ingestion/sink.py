@@ -5,7 +5,7 @@ from contextlib import suppress
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from cf_agent_gateway.adapters.wechat import NormalizedWechatMessage
+from cf_agent_gateway.adapters.wechat import MessageSinkDisposition, NormalizedWechatMessage
 from cf_agent_gateway.hermes import HermesDispatcher
 from cf_agent_gateway.ingestion.models import MessageIngestionOutcome
 from cf_agent_gateway.ingestion.service import AdmissionRequestResolver, MessageAdmissionService
@@ -20,6 +20,17 @@ class MessageStoreAdmissionSink:
     def handle(self, message: NormalizedWechatMessage) -> None:
         self.process(message)
 
+    def handle_with_disposition(
+        self,
+        message: NormalizedWechatMessage,
+    ) -> MessageSinkDisposition:
+        outcome = self.process(message)
+        return (
+            MessageSinkDisposition.CREATED
+            if outcome.message_created
+            else MessageSinkDisposition.DUPLICATE
+        )
+
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         return self._service.process(message)
 
@@ -32,14 +43,27 @@ class SessionFactoryMessageStoreAdmissionSink:
         session_factory: sessionmaker[Session],
         request_resolver: AdmissionRequestResolver | None = None,
         *,
+        v2_routing_enabled: bool = False,
         hermes_dispatcher_factory: Callable[[Session], HermesDispatcher] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._request_resolver = request_resolver
         self._hermes_dispatcher_factory = hermes_dispatcher_factory
+        self._v2_routing_enabled = v2_routing_enabled
 
     def handle(self, message: NormalizedWechatMessage) -> None:
         self.process(message)
+
+    def handle_with_disposition(
+        self,
+        message: NormalizedWechatMessage,
+    ) -> MessageSinkDisposition:
+        outcome = self.process(message)
+        return (
+            MessageSinkDisposition.CREATED
+            if outcome.message_created
+            else MessageSinkDisposition.DUPLICATE
+        )
 
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
         session = self._session_factory()
@@ -52,6 +76,7 @@ class SessionFactoryMessageStoreAdmissionSink:
             outcome = MessageAdmissionService(
                 session,
                 request_resolver=self._request_resolver,
+                v2_routing_enabled=self._v2_routing_enabled,
                 hermes_dispatcher=hermes_dispatcher,
             ).process(message)
         except Exception:
