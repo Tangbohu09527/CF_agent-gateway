@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
+from threading import Event
 from typing import Any
 
 import pytest
@@ -31,6 +32,7 @@ from cf_agent_gateway.adapters.wechat.polling_errors import (
 )
 from cf_agent_gateway.adapters.wechat.polling_models import (
     PollFailureStage,
+    PollResult,
     WechatSyncCheckpoint,
 )
 from cf_agent_gateway.adapters.wechat.polling_service import (
@@ -43,6 +45,7 @@ from cf_agent_gateway.adapters.wechat.raw_models import (
     RawWechatMessage,
 )
 from cf_agent_gateway.admission.models import MessageAdmissionOutcome
+from cf_agent_gateway.config import RuntimeSettings, Settings
 from cf_agent_gateway.database import create_database_engine, initialize_database
 from cf_agent_gateway.delivery.models import (
     DeliveryAttempt,
@@ -52,6 +55,7 @@ from cf_agent_gateway.delivery.models import (
 from cf_agent_gateway.ingestion import MessageAdmissionService, MessageStoreAdmissionSink
 from cf_agent_gateway.message.models import Attachment, Message, MessageRawPayload
 from cf_agent_gateway.response.models import ResponseRecord
+from cf_agent_gateway.runtime import worker as runtime_worker_module
 from cf_agent_gateway.task.model.models import HermesDispatchRecord
 
 ACCOUNT_ID = "wxid_gateway"
@@ -1907,7 +1911,126 @@ def test_idle_chat_summary_is_debug_and_contains_only_redacted_references(
     )
 
 
-def test_124_checkpoint_skips_emit_constant_info_logs_and_exact_aggregate(
+def test_stable_production_history_shape_does_not_repeat_chat_or_cycle_info(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stable_counts = (9, 14, 20, 50, 1, 1)
+    chat_ids = [f"wxid-production-{index:02d}" for index in range(21)]
+    messages: dict[str, list[dict[str, Any]]] = {}
+    for index, chat_id in enumerate(chat_ids):
+        count = stable_counts[index] if index < len(stable_counts) else 0
+        visible = [raw_message(local_id, chat_id=chat_id) for local_id in range(1, count + 1)]
+        messages[chat_id] = visible
+        checkpoint_store.initialize(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=chat_id,
+            last_local_id=count,
+            last_message_fingerprint=(
+                checkpoint_fingerprint(raw_message(count, chat_id=chat_id)) if count else None
+            ),
+        )
+
+    client = FakeWechatClient(
+        chats=[{"id": chat_id} for chat_id in chat_ids],
+        messages=messages,
+    )
+    service = WechatPollingService(client, checkpoint_store, RecordingSink())
+    settings = Settings(runtime=RuntimeSettings(polling_interval_seconds=3))
+    results: list[PollResult] = []
+
+    class StopAfterCycles(Event):
+        def __init__(self, cycles: int) -> None:
+            super().__init__()
+            self._remaining = cycles
+
+        def wait(self, timeout: float | None = None) -> bool:
+            del timeout
+            self._remaining -= 1
+            return self._remaining == 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        result = service.poll_once()
+        results.append(result)
+        return result
+
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+    caplog.set_level(logging.INFO, logger=runtime_worker_module.logger.name)
+    runtime_worker_module.run_worker(
+        settings,
+        stop_event=StopAfterCycles(4),
+        poll_once=poll_once,
+    )
+
+    assert len(results) == 4
+    for result in results:
+        assert result.chats_seen == 21
+        assert result.messages_seen == 95
+        assert result.messages_skipped_by_checkpoint == 95
+        assert result.messages_processed == 0
+        assert result.messages_new == 0
+        assert result.messages_duplicate == 0
+        assert result.messages_failed == 0
+
+    chat_info = [
+        record
+        for record in caplog.records
+        if record.name == polling_service_module.__name__
+        and record.getMessage() == "poll chat completed"
+        and record.levelno == logging.INFO
+    ]
+    cycle_info = [
+        record
+        for record in caplog.records
+        if record.name == runtime_worker_module.logger.name
+        and record.getMessage() == "poll cycle completed"
+        and record.levelno == logging.INFO
+    ]
+    assert len(chat_info) == 6
+    assert sorted(record.fields["messages_seen"] for record in chat_info) == [  # type: ignore[attr-defined]
+        1,
+        1,
+        9,
+        14,
+        20,
+        50,
+    ]
+    assert len(cycle_info) == 1
+    assert cycle_info[0].fields["chats_seen"] == 21  # type: ignore[attr-defined]
+    assert cycle_info[0].fields["messages_seen"] == 95  # type: ignore[attr-defined]
+
+
+def test_checkpoint_history_window_shape_change_reenables_one_info_summary(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=10,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(10)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(8), raw_message(9), raw_message(10)]})
+    service = WechatPollingService(client, checkpoint_store, RecordingSink())
+    caplog.set_level(logging.DEBUG, logger=polling_service_module.__name__)
+
+    service.poll_once()
+    service.poll_once()
+    client.messages[CHAT_ID] = [raw_message(7), raw_message(9), raw_message(10)]
+    service.poll_once()
+
+    summaries = [
+        record for record in caplog.records if record.getMessage() == "poll chat completed"
+    ]
+    assert [record.levelno for record in summaries] == [
+        logging.INFO,
+        logging.DEBUG,
+        logging.INFO,
+    ]
+
+
+def test_124_checkpoint_skips_emit_one_initial_info_summary_and_exact_aggregate(
     checkpoint_store: WechatSyncCheckpointStore,
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -39,6 +39,13 @@ _FATAL_POLL_ERRORS = (
     WechatRuntimeDisabledError,
     WechatTokenContractError,
 )
+_PollHistoryShape = tuple[
+    int,
+    int,
+    int,
+    int,
+    tuple[tuple[str | None, int, int, int], ...],
+]
 
 
 def run_worker(
@@ -54,6 +61,7 @@ def run_worker(
     lifecycle_state = WechatPollingLifecycleState() if poll_once is None else None
     interval = settings.runtime.polling_interval_seconds
     cycle_sequence = 0
+    last_history_shape: _PollHistoryShape | None = None
     final_heartbeat_state: Literal["stopped", "failed"] = "stopped"
 
     try:
@@ -85,6 +93,7 @@ def run_worker(
             except _FATAL_POLL_ERRORS:
                 raise
             except Exception as error:
+                last_history_shape = None
                 logger.error(
                     "poll cycle failed",
                     extra={"fields": {"error_code": _safe_error_code(error)}},
@@ -101,7 +110,10 @@ def run_worker(
                 cycle_succeeded = (
                     result.logged_in and result.chats_failed == 0 and not result.failures
                 )
-                level = logging.INFO if _poll_result_has_activity(result) else logging.DEBUG
+                level, last_history_shape = _poll_result_log_level(
+                    result,
+                    previous_history_shape=last_history_shape,
+                )
                 logger.log(
                     level,
                     "poll cycle completed",
@@ -205,7 +217,21 @@ def _safe_error_code(error: Exception) -> str:
     return "poll_cycle_failed"
 
 
-def _poll_result_has_activity(result: PollResult) -> bool:
+def _poll_result_log_level(
+    result: PollResult,
+    *,
+    previous_history_shape: _PollHistoryShape | None,
+) -> tuple[int, _PollHistoryShape | None]:
+    if _poll_result_has_immediate_activity(result):
+        return logging.INFO, None
+    history_shape = _poll_history_shape(result)
+    if history_shape is None:
+        return logging.DEBUG, None
+    level = logging.INFO if history_shape != previous_history_shape else logging.DEBUG
+    return level, history_shape
+
+
+def _poll_result_has_immediate_activity(result: PollResult) -> bool:
     return (
         not result.logged_in
         or result.chats_failed > 0
@@ -214,16 +240,33 @@ def _poll_result_has_activity(result: PollResult) -> bool:
         or any(
             count > 0
             for count in (
-                result.messages_seen,
                 result.messages_processed,
                 result.messages_new,
                 result.messages_duplicate,
-                result.messages_skipped_by_checkpoint,
                 result.messages_skipped_as_self,
                 result.messages_failed,
-                result.messages_without_server_id,
             )
         )
+    )
+
+
+def _poll_history_shape(result: PollResult) -> _PollHistoryShape | None:
+    if result.messages_seen <= 0:
+        return None
+    return (
+        result.chats_seen,
+        result.messages_seen,
+        result.messages_skipped_by_checkpoint,
+        result.messages_without_server_id,
+        tuple(
+            (
+                chat_result.conversation_id,
+                chat_result.messages_seen,
+                chat_result.messages_skipped_by_checkpoint,
+                chat_result.messages_without_server_id,
+            )
+            for chat_result in result.chat_results
+        ),
     )
 
 

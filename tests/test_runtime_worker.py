@@ -8,7 +8,12 @@ from threading import Event, Thread
 
 import pytest
 
-from cf_agent_gateway.adapters.wechat import PollFailure, PollFailureStage, PollResult
+from cf_agent_gateway.adapters.wechat import (
+    ChatPollResult,
+    PollFailure,
+    PollFailureStage,
+    PollResult,
+)
 from cf_agent_gateway.config import RuntimeSettings, Settings
 from cf_agent_gateway.runtime import worker
 from cf_agent_gateway.runtime.errors import (
@@ -142,6 +147,65 @@ def test_idle_poll_cycle_is_debug_while_worker_lifecycle_remains_info(
         ("poll cycle started", logging.DEBUG),
         ("poll cycle completed", logging.DEBUG),
         ("worker stopped", logging.INFO),
+    ]
+
+
+def test_checkpoint_history_cycle_count_change_reenables_info(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop_event = Event()
+    stable_chat = ChatPollResult(
+        conversation_id="wxid-history",
+        succeeded=True,
+        messages_seen=9,
+        messages_skipped_by_checkpoint=9,
+    )
+    stable = PollResult(
+        logged_in=True,
+        chats_seen=21,
+        chats_succeeded=21,
+        messages_seen=95,
+        messages_skipped_by_checkpoint=95,
+        chat_results=[stable_chat],
+    )
+    changed = stable.model_copy(
+        update={
+            "messages_seen": 96,
+            "messages_skipped_by_checkpoint": 96,
+            "chat_results": [
+                stable_chat.model_copy(
+                    update={
+                        "messages_seen": 10,
+                        "messages_skipped_by_checkpoint": 10,
+                    }
+                )
+            ],
+        }
+    )
+    results = iter((stable, stable, changed))
+    calls = 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal calls
+        assert candidate is settings
+        calls += 1
+        if calls == 3:
+            stop_event.set()
+        return next(results)
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
+
+    cycle_records = [
+        record
+        for record in worker_log_records(caplog)
+        if record.getMessage() == "poll cycle completed"
+    ]
+    assert [record.levelno for record in cycle_records] == [
+        logging.INFO,
+        logging.DEBUG,
+        logging.INFO,
     ]
 
 

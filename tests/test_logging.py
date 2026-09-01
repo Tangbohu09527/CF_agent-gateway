@@ -141,6 +141,7 @@ def test_json_formatter_redacts_secrets_bodies_and_raw_identifiers() -> None:
     except ValueError:
         record = make_record(
             (
+                "content_length=321; content_type=application/json; "
                 f"Cookie={sensitive_cookie}; content={sensitive_body}; "
                 f"account_id={sensitive_account}; chat_id={sensitive_chat}"
             ),
@@ -151,6 +152,10 @@ def test_json_formatter_redacts_secrets_bodies_and_raw_identifiers() -> None:
         "authorization": f"Bearer {sensitive_token}",
         "Cookie": sensitive_cookie,
         "message_body": sensitive_body,
+        "response_content": sensitive_body,
+        "content_length": 321,
+        "content_type": "application/json",
+        "body_length": 654,
         "source_account_id": sensitive_account,
         "conversation_id": sensitive_chat,
         "source_account_id_ref": "source_account:sha256:0123456789abcdef",
@@ -173,6 +178,11 @@ def test_json_formatter_redacts_secrets_bodies_and_raw_identifiers() -> None:
     assert payload["conversation_id_ref"] == "conversation:sha256:fedcba9876543210"
     assert payload["source_account_id"] == "[REDACTED]"
     assert payload["nested"]["chat_id"] == "[REDACTED]"
+    assert payload["content_length"] == 321
+    assert payload["content_type"] == "application/json"
+    assert payload["body_length"] == 654
+    assert "content_length=321" in payload["message"]
+    assert "content_type=application/json" in payload["message"]
 
 
 def test_configure_logging_is_idempotent(

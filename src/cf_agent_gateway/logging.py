@@ -21,8 +21,6 @@ _RESERVED_FIELDS = frozenset(
 _REDACTED = "[REDACTED]"
 _SENSITIVE_KEY_PARTS = (
     "authorization",
-    "body",
-    "content",
     "cookie",
     "password",
     "secret",
@@ -46,7 +44,8 @@ _QUIET_THIRD_PARTY_LOGGERS = (
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _CREDENTIAL_URL_PATTERN = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@")
 _ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(authorization|body|content|cookie|password|secret|token|api[_-]?key|"
+    r"(?i)\b(authorization|(?:[a-z0-9_-]+[_-])?(?:body|content)|"
+    r"cookie|password|secret|token|api[_-]?key|"
     r"account[_-]?id|chat[_-]?id|conversation[_-]?id)(\s*[:=]\s*)[^,;]+"
 )
 
@@ -104,6 +103,8 @@ def _redact_value(value: object, *, key: str | None = None) -> object:
 
 def _sensitive_key(key: str) -> bool:
     normalized = key.casefold().replace("-", "_")
+    if normalized in {"body", "content"} or normalized.endswith(("_body", "_content")):
+        return True
     if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
         return True
     if normalized.endswith("_ref"):

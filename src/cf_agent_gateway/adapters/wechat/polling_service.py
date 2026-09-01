@@ -50,6 +50,14 @@ class _EmptyWindowMarker:
     observation_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ChatHistoryObservation:
+    visible_local_ids: tuple[int, ...]
+    messages_seen: int
+    messages_skipped_by_checkpoint: int
+    messages_without_server_id: int
+
+
 class WechatPollingLifecycleState:
     """Process-lifetime evidence shared by finite polling service instances."""
 
@@ -57,9 +65,13 @@ class WechatPollingLifecycleState:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._active_source_account_id: str | None = None
         self._empty_window_markers: dict[tuple[str, str], _EmptyWindowMarker] = {}
+        self._pending_visible_windows: dict[tuple[str, str], tuple[int, ...]] = {}
+        self._chat_history_observations: dict[tuple[str, str], _ChatHistoryObservation] = {}
 
     def invalidate_all(self) -> None:
         self._empty_window_markers.clear()
+        self._pending_visible_windows.clear()
+        self._chat_history_observations.clear()
         self._active_source_account_id = None
 
     def observe_account(self, source_account_id: str) -> None:
@@ -68,7 +80,47 @@ class WechatPollingLifecycleState:
             self._active_source_account_id = source_account_id
 
     def invalidate_chat(self, source_account_id: str, conversation_id: str) -> None:
-        self._empty_window_markers.pop((source_account_id, conversation_id), None)
+        key = (source_account_id, conversation_id)
+        self._empty_window_markers.pop(key, None)
+        self._pending_visible_windows.pop(key, None)
+        self._chat_history_observations.pop(key, None)
+
+    def record_visible_window(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        local_ids: Sequence[int],
+    ) -> None:
+        self._pending_visible_windows[(source_account_id, conversation_id)] = tuple(local_ids)
+
+    def chat_result_log_level(
+        self,
+        *,
+        source_account_id: str,
+        result: ChatPollResult,
+    ) -> int:
+        if result.conversation_id is None:
+            return logging.INFO if _chat_result_has_immediate_activity(result) else logging.DEBUG
+
+        key = (source_account_id, result.conversation_id)
+        visible_local_ids = self._pending_visible_windows.pop(key, ())
+        if _chat_result_has_immediate_activity(result):
+            self._chat_history_observations.pop(key, None)
+            return logging.INFO
+        if result.messages_seen <= 0:
+            self._chat_history_observations.pop(key, None)
+            return logging.DEBUG
+
+        observation = _ChatHistoryObservation(
+            visible_local_ids=visible_local_ids,
+            messages_seen=result.messages_seen,
+            messages_skipped_by_checkpoint=result.messages_skipped_by_checkpoint,
+            messages_without_server_id=result.messages_without_server_id,
+        )
+        previous = self._chat_history_observations.get(key)
+        self._chat_history_observations[key] = observation
+        return logging.INFO if observation != previous else logging.DEBUG
 
     def record_empty_window(
         self,
@@ -219,7 +271,11 @@ class WechatPollingService:
                 chat,
                 failed_conversation_ids=failed_conversation_ids,
             )
-            _log_chat_result(source_account_id, result)
+            _log_chat_result(
+                source_account_id,
+                result,
+                lifecycle_state=self._lifecycle_state,
+            )
             chat_results.append(result)
             if not result.succeeded and result.conversation_id is not None:
                 failed_conversation_ids.add(result.conversation_id)
@@ -320,6 +376,11 @@ class WechatPollingService:
 
         messages_without_server_id = sum(
             not _message_has_usable_server_id(raw_message) for _, raw_message in ordered_messages
+        )
+        self._lifecycle_state.record_visible_window(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            local_ids=tuple(local_id for local_id, _ in ordered_messages),
         )
         try:
             checkpoint = self._checkpoint_store.get(
@@ -1439,8 +1500,16 @@ def _log_message_skip(
     )
 
 
-def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
-    level = logging.INFO if _chat_result_has_activity(result) else logging.DEBUG
+def _log_chat_result(
+    source_account_id: str,
+    result: ChatPollResult,
+    *,
+    lifecycle_state: WechatPollingLifecycleState,
+) -> None:
+    level = lifecycle_state.chat_result_log_level(
+        source_account_id=source_account_id,
+        result=result,
+    )
     logger.log(
         level,
         "poll chat completed",
@@ -1468,7 +1537,7 @@ def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
     )
 
 
-def _chat_result_has_activity(result: ChatPollResult) -> bool:
+def _chat_result_has_immediate_activity(result: ChatPollResult) -> bool:
     return (
         not result.succeeded
         or bool(result.failures)
@@ -1476,14 +1545,11 @@ def _chat_result_has_activity(result: ChatPollResult) -> bool:
         or any(
             count > 0
             for count in (
-                result.messages_seen,
                 result.messages_processed,
                 result.messages_new,
                 result.messages_duplicate,
-                result.messages_skipped_by_checkpoint,
                 result.messages_skipped_as_self,
                 result.messages_failed,
-                result.messages_without_server_id,
             )
         )
     )
