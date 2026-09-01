@@ -209,6 +209,53 @@ def test_checkpoint_history_cycle_count_change_reenables_info(
     ]
 
 
+def test_repeated_non_continuity_failures_remain_info(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop_event = Event()
+    failure = PollFailure(
+        stage=PollFailureStage.LIST_MESSAGES,
+        code="wechat_list_messages_error",
+        conversation_id="wxid-network-failure",
+    )
+    failed_result = PollResult(
+        logged_in=True,
+        chats_seen=1,
+        chats_failed=1,
+        failures=[failure],
+        chat_results=[
+            ChatPollResult(
+                conversation_id="wxid-network-failure",
+                succeeded=False,
+                failures=[failure],
+            )
+        ],
+    )
+    calls = 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal calls
+        assert candidate is settings
+        calls += 1
+        if calls == 2:
+            stop_event.set()
+        return failed_result
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
+
+    cycle_records = [
+        record
+        for record in worker_log_records(caplog)
+        if record.getMessage() == "poll cycle completed"
+    ]
+    assert [record.levelno for record in cycle_records] == [
+        logging.INFO,
+        logging.INFO,
+    ]
+
+
 def test_default_worker_reuses_one_polling_lifecycle_state_across_cycles(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,

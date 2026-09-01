@@ -39,12 +39,24 @@ _FATAL_POLL_ERRORS = (
     WechatRuntimeDisabledError,
     WechatTokenContractError,
 )
+_PollChatShape = tuple[
+    str | None,
+    bool,
+    int,
+    int,
+    int,
+    str | None,
+    tuple[tuple[str, str], ...],
+]
 _PollHistoryShape = tuple[
+    str | None,
     int,
     int,
     int,
     int,
-    tuple[tuple[str | None, int, int, int], ...],
+    int,
+    int,
+    tuple[_PollChatShape, ...],
 ]
 
 
@@ -226,7 +238,13 @@ def _poll_result_log_level(
         return logging.INFO, None
     history_shape = _poll_history_shape(result)
     if history_shape is None:
-        return logging.DEBUG, None
+        level = logging.INFO if previous_history_shape is not None else logging.DEBUG
+        return level, None
+    if any(
+        chat_result.continuity_only and chat_result.continuity_state_changed
+        for chat_result in result.chat_results
+    ):
+        return logging.INFO, history_shape
     level = logging.INFO if history_shape != previous_history_shape else logging.DEBUG
     return level, history_shape
 
@@ -234,8 +252,7 @@ def _poll_result_log_level(
 def _poll_result_has_immediate_activity(result: PollResult) -> bool:
     return (
         not result.logged_in
-        or result.chats_failed > 0
-        or bool(result.failures)
+        or _poll_result_has_ordinary_failure(result)
         or result.bootstrapped_chats > 0
         or any(
             count > 0
@@ -250,20 +267,43 @@ def _poll_result_has_immediate_activity(result: PollResult) -> bool:
     )
 
 
+def _poll_result_has_ordinary_failure(result: PollResult) -> bool:
+    continuity_results = [
+        chat_result for chat_result in result.chat_results if chat_result.continuity_only
+    ]
+    continuity_failure_count = sum(len(chat_result.failures) for chat_result in continuity_results)
+    return (
+        any(
+            not chat_result.succeeded and not chat_result.continuity_only
+            for chat_result in result.chat_results
+        )
+        or result.chats_failed > len(continuity_results)
+        or len(result.failures) > continuity_failure_count
+    )
+
+
 def _poll_history_shape(result: PollResult) -> _PollHistoryShape | None:
-    if result.messages_seen <= 0:
+    if result.messages_seen <= 0 and not any(
+        chat_result.continuity_only for chat_result in result.chat_results
+    ):
         return None
     return (
+        result.source_account_id,
         result.chats_seen,
+        result.chats_succeeded,
+        result.chats_failed,
         result.messages_seen,
         result.messages_skipped_by_checkpoint,
         result.messages_without_server_id,
         tuple(
             (
                 chat_result.conversation_id,
+                chat_result.succeeded,
                 chat_result.messages_seen,
                 chat_result.messages_skipped_by_checkpoint,
                 chat_result.messages_without_server_id,
+                chat_result.continuity_state_ref,
+                tuple((failure.stage.value, failure.code) for failure in chat_result.failures),
             )
             for chat_result in result.chat_results
         ),

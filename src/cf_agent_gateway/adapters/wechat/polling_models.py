@@ -60,6 +60,9 @@ class ChatPollResult(BaseModel):
     messages_without_server_id: int = 0
     bootstrapped: bool = False
     failures: list[PollFailure] = Field(default_factory=list)
+    continuity_only: bool = Field(default=False, exclude=True, repr=False)
+    continuity_state_ref: str | None = Field(default=None, exclude=True, repr=False)
+    continuity_state_changed: bool = Field(default=False, exclude=True, repr=False)
 
 
 class PollResult(BaseModel):
