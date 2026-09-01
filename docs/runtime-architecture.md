@@ -132,14 +132,20 @@ dispatch, response, and delivery facts are not rewritten.
 
 ## Polling observability
 
-Per-message checkpoint and self skips are DEBUG records. INFO volume is bounded to one
-`poll chat completed` summary per chat and the resident worker's cycle start/completion
-records. Summaries expose redacted account/conversation references and
+Per-message checkpoint and self skips are DEBUG records. A completely idle
+`poll chat completed` or `poll cycle completed` summary and every
+`poll cycle started` record are also DEBUG. Chats and cycles with new or duplicate
+messages, failures, bootstrap, self/checkpoint skips, missing server IDs, or authentication
+activity remain INFO. Worker start/stop remains INFO and heartbeat failure remains ERROR.
+Activity summaries expose redacted account/conversation references and
 `messages_seen`, `messages_processed`, `messages_new`, `messages_duplicate`,
 `messages_skipped_checkpoint`, `messages_skipped_self`, `messages_failed`,
 serverId-less, bootstrap, and failure counts.
-Checkpoint regression detected/recovered remains WARNING. No message body, nickname, token,
-Cookie, connection string, or raw upstream response is logged.
+Checkpoint regression detected/rebased/live-suffix, continuity failed-closed, and CAS
+conflict records remain WARNING. Successful `httpx`/`httpcore` request records and
+routine Alembic context records are suppressed below WARNING by default. No message body,
+nickname, token, Authorization/Cookie header, connection string, raw account/chat ID, or
+raw upstream response is logged.
 
 ## Dispatch lifecycle and FIFO
 

@@ -9,8 +9,11 @@ curl --silent --show-error http://127.0.0.1:8080/health/runtime
 ```
 
 Then inspect structured service logs and durable facts through authenticated APIs. Do
-not paste tokens, message bodies, cookies, database URLs or raw upstream responses into
-an incident ticket.
+not paste tokens, Authorization/Cookie headers, message bodies, raw account/chat IDs,
+database URLs or raw upstream responses into an incident ticket. Production Compose keeps
+`docker logs` available and defaults to 64 MiB across 10 files per container; use
+`docker compose logs --since 168h <service>` to collect the retained seven-day window.
+The capacity is bounded and does not replace database audit/recovery evidence.
 
 ## Messages seen but none processed
 
@@ -22,10 +25,10 @@ an incident ticket.
 3. Compare only local ID bounds and hashed account/conversation references in logs.
 4. Check `components.wechat_checkpoint_continuity` in runtime health.
 
-INFO logs are aggregated per chat/cycle. Individual checkpoint and self skips are DEBUG, so
-raising the polling logger to DEBUG should be a temporary targeted diagnostic rather than
-the normal production level. A large all-skipped window should still produce one chat INFO
-summary, not one INFO record per message.
+Completely idle chat/cycle summaries and cycle starts are DEBUG. A chat with checkpoint or
+self skips, bootstrap, duplicate/new/failed messages, or other activity still produces one
+INFO summary, not one INFO record per message. Raising the polling logger to DEBUG should
+be a temporary targeted diagnostic rather than the normal production level.
 
 If the visible maximum is below the checkpoint, or a saved anchor mismatches at the same
 local ID, one poller should CAS-rewind and increment generation. An empty window does not

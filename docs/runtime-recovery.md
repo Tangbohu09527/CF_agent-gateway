@@ -18,6 +18,28 @@ Before acting:
 All mutating steps below are manual actions. They have not been exercised against a real
 CFserver by this repository change.
 
+## Retained log evidence
+
+Production Compose retains each service's Docker `json-file` logs independently with
+defaults of 64 MiB across 10 files. The tested sustained polling model is about
+69.9 MiB/day in the busiest container and retains 8.24 days after reserving 10% capacity.
+Use `docker compose logs --since 168h <service>` before restarting or recreating a
+container, and preserve worker stop/start, checkpoint continuity/regression/CAS evidence,
+dispatch uncertainty/quarantine/recovery, delivery uncertainty/recovery, heartbeat failure,
+and controller stop/start/rollback output with UTC timestamps.
+
+Idle per-chat/cycle summaries, poll starts, successful HTTP client requests, and routine
+Alembic context setup are DEBUG or suppressed below WARNING. Their absence at INFO is not
+evidence of an outage; use runtime health and heartbeats for liveness, and enable DEBUG
+only for a bounded diagnostic window.
+
+Docker logs are bounded operational evidence, not the audit authority. Dispatch recovery
+audits, Message/Admission/Checkpoint facts, delivery attempts and receipts remain in the
+database and must be preserved independently. Never add Token, Authorization, Cookie,
+message body, raw account/chat/conversation ID, database credential, or raw upstream
+response values to logs or incident notes; retain only hashed references and aggregate
+counters.
+
 ## Checkpoint regression recovery
 
 ### `LATEST` fail-safe rebase

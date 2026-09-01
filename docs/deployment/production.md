@@ -118,6 +118,52 @@ Set `CF_GATEWAY_CONFIG_FILE` only when the site-specific YAML lives somewhere ot
 `./config/production.yaml`; the container target remains read-only at
 `/app/config/production.yaml`.
 
+## Log noise and retention
+
+Production INFO excludes successful `httpx`/`httpcore` request lines, Alembic
+`Context impl`/transactional-DDL setup lines, poll-cycle starts, and completely idle
+per-chat/cycle summaries. Those records remain available at DEBUG where applicable.
+A chat or cycle with new/duplicate/failed messages, bootstrap, self/checkpoint skips,
+server-ID gaps, authentication failure, or other failure activity remains INFO or above.
+Library WARNING/ERROR records and exception stacks are not suppressed.
+
+Treat these as high-value lifecycle evidence and preserve them before recovery:
+
+- checkpoint regression detected/rebased/live-suffix, continuity failed-closed and CAS
+  conflict records;
+- worker start/stop and heartbeat-write failure;
+- dispatch uncertainty, quarantine, reconciliation and operator recovery transitions;
+- delivery uncertainty and recovery transitions; and
+- runtime controller start/stop success, failure and rollback/rollback-failure output.
+
+Production Compose keeps the `json-file` driver, so `docker logs` and
+`docker compose logs` remain available. The per-container defaults are
+`CF_GATEWAY_LOG_MAX_SIZE=64m` and `CF_GATEWAY_LOG_MAX_FILES=10`, or 640 MiB of
+configured capacity for each service. `tests/test_log_retention.py` reserves 10% for
+rotation/format variation and models the busiest polling container with:
+
+- a three-second polling interval for 201,600 cycles over seven days;
+- two active chat summaries plus one active cycle summary on every cycle;
+- two checkpoint transition records per hour and one worker stop/start per day;
+- the Docker `json-file` envelope, eight-digit PID, large counters/IDs, and an extra
+  128-byte margin per record.
+
+That model produces 512,986,764 bytes over seven days (about 69.9 MiB/day). Against the
+576 MiB safety budget it estimates 8.24 days, so an initial worker-stop and checkpoint
+transition remain inside the retained window. Recalculate the busiest container before
+lowering the defaults or increasing traffic:
+
+`retention_days = (max_size_bytes * max_files * safety_ratio) / modeled_bytes_per_day`.
+
+Increase either environment value when the site model does not clear seven days, and
+confirm host disk capacity for the sum across containers. Log retention is operational
+evidence, not a replacement for immutable dispatch recovery audits, delivery attempts,
+Messages, Admission Outcomes, checkpoints, or other authoritative database facts.
+
+Never log or paste Token values, Authorization/Cookie headers, message bodies, raw
+account/chat/conversation IDs, database credentials, or raw upstream responses. Use only
+hashed `*_id_ref` fields and aggregate counters in retained logs.
+
 ## Pre-deployment gate
 
 1. Confirm the intended commit, immutable image digest and pull request #4's green
