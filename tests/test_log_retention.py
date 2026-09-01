@@ -18,7 +18,14 @@ DEFAULT_LOG_MAX_SIZE_BYTES = 64 * 1024 * 1024
 DEFAULT_LOG_MAX_FILES = 10
 RETENTION_DAYS = 7
 POLLING_INTERVAL_SECONDS = 3
-ACTIVE_CHATS_PER_CYCLE = 2
+PRODUCTION_CHAT_COUNT = 21
+PRODUCTION_VISIBLE_MESSAGES = 95
+STABLE_NONEMPTY_CHAT_COUNTS = (9, 14, 20, 50, 1, 1)
+STEADY_STATE_REPEATED_INFO_RECORDS_PER_CYCLE = 0
+BUSINESS_ACTIVE_CHATS_PER_CYCLE = 2
+HISTORY_SHAPE_CHANGES_PER_HOUR = 1
+CHECKPOINT_TRANSITIONS_PER_HOUR = 2
+WORKER_RESTARTS_PER_DAY = 1
 RECORD_SAFETY_MARGIN_BYTES = 128
 USABLE_CAPACITY_RATIO = 0.90
 RUNTIME_SERVICES = (
@@ -63,26 +70,48 @@ def _docker_json_file_bytes(
 
 
 def retention_model() -> dict[str, float | int]:
-    chat_summary_bytes = _docker_json_file_bytes(
-        "poll chat completed",
-        level=logging.INFO,
-        fields={
-            "source_account_id_ref": "source_account:sha256:0123456789abcdef",
-            "conversation_id_ref": "conversation:sha256:fedcba9876543210",
-            "succeeded": True,
-            "failure_count": 0,
-            "messages_seen": 999,
-            "messages_processed": 999,
-            "messages_new": 999,
-            "messages_duplicate": 999,
-            "messages_skipped_checkpoint": 999,
-            "messages_skipped_self": 999,
-            "messages_failed": 0,
-            "messages_without_server_id": 999,
-            "bootstrapped": False,
-        },
+    def chat_summary_bytes(
+        *,
+        messages_seen: int,
+        messages_processed: int,
+        messages_new: int,
+        messages_duplicate: int,
+        messages_skipped_checkpoint: int,
+        messages_skipped_self: int,
+        messages_failed: int,
+        messages_without_server_id: int,
+    ) -> int:
+        return _docker_json_file_bytes(
+            "poll chat completed",
+            level=logging.INFO,
+            fields={
+                "source_account_id_ref": "source_account:sha256:0123456789abcdef",
+                "conversation_id_ref": "conversation:sha256:fedcba9876543210",
+                "succeeded": True,
+                "failure_count": 0,
+                "messages_seen": messages_seen,
+                "messages_processed": messages_processed,
+                "messages_new": messages_new,
+                "messages_duplicate": messages_duplicate,
+                "messages_skipped_checkpoint": messages_skipped_checkpoint,
+                "messages_skipped_self": messages_skipped_self,
+                "messages_failed": messages_failed,
+                "messages_without_server_id": messages_without_server_id,
+                "bootstrapped": False,
+            },
+        )
+
+    active_chat_summary_bytes = chat_summary_bytes(
+        messages_seen=999,
+        messages_processed=999,
+        messages_new=999,
+        messages_duplicate=999,
+        messages_skipped_checkpoint=999,
+        messages_skipped_self=999,
+        messages_failed=999,
+        messages_without_server_id=999,
     )
-    cycle_summary_bytes = _docker_json_file_bytes(
+    active_cycle_summary_bytes = _docker_json_file_bytes(
         "poll cycle completed",
         level=logging.INFO,
         fields={
@@ -96,8 +125,41 @@ def retention_model() -> dict[str, float | int]:
             "messages_duplicate": 999,
             "messages_skipped_checkpoint": 999,
             "messages_skipped_self": 999,
-            "messages_failed": 0,
+            "messages_failed": 999,
             "messages_without_server_id": 999,
+            "bootstrapped_chats": 0,
+            "failure_count": 0,
+        },
+    )
+    stable_history_chat_bytes = sum(
+        chat_summary_bytes(
+            messages_seen=count,
+            messages_processed=0,
+            messages_new=0,
+            messages_duplicate=0,
+            messages_skipped_checkpoint=count,
+            messages_skipped_self=0,
+            messages_failed=0,
+            messages_without_server_id=0,
+        )
+        for count in STABLE_NONEMPTY_CHAT_COUNTS
+    )
+    stable_history_cycle_bytes = _docker_json_file_bytes(
+        "poll cycle completed",
+        level=logging.INFO,
+        fields={
+            "logged_in": True,
+            "chats_seen": PRODUCTION_CHAT_COUNT,
+            "chats_succeeded": PRODUCTION_CHAT_COUNT,
+            "chats_failed": 0,
+            "messages_seen": PRODUCTION_VISIBLE_MESSAGES,
+            "messages_processed": 0,
+            "messages_new": 0,
+            "messages_duplicate": 0,
+            "messages_skipped_checkpoint": PRODUCTION_VISIBLE_MESSAGES,
+            "messages_skipped_self": 0,
+            "messages_failed": 0,
+            "messages_without_server_id": 0,
             "bootstrapped_chats": 0,
             "failure_count": 0,
         },
@@ -127,22 +189,44 @@ def retention_model() -> dict[str, float | int]:
     worker_stopped_bytes = _docker_json_file_bytes("worker stopped", level=logging.INFO)
 
     cycles = RETENTION_DAYS * 24 * 60 * 60 // POLLING_INTERVAL_SECONDS
-    routine_bytes = cycles * (ACTIVE_CHATS_PER_CYCLE * chat_summary_bytes + cycle_summary_bytes)
-    hourly_checkpoint_bytes = RETENTION_DAYS * 24 * 2 * checkpoint_transition_bytes
-    daily_restart_bytes = RETENTION_DAYS * (worker_stopped_bytes + worker_started_bytes)
+    steady_state_repeated_info_bytes = cycles * STEADY_STATE_REPEATED_INFO_RECORDS_PER_CYCLE
+    business_activity_bytes = cycles * (
+        BUSINESS_ACTIVE_CHATS_PER_CYCLE * active_chat_summary_bytes + active_cycle_summary_bytes
+    )
+    history_change_burst_bytes = stable_history_chat_bytes + stable_history_cycle_bytes
+    hourly_history_change_bytes = (
+        RETENTION_DAYS * 24 * HISTORY_SHAPE_CHANGES_PER_HOUR * history_change_burst_bytes
+    )
+    hourly_checkpoint_bytes = (
+        RETENTION_DAYS * 24 * CHECKPOINT_TRANSITIONS_PER_HOUR * checkpoint_transition_bytes
+    )
+    daily_restart_bytes = (
+        RETENTION_DAYS * WORKER_RESTARTS_PER_DAY * (worker_stopped_bytes + worker_started_bytes)
+    )
     initial_evidence_bytes = checkpoint_transition_bytes + worker_stopped_bytes
     modeled_bytes = (
-        routine_bytes + hourly_checkpoint_bytes + daily_restart_bytes + initial_evidence_bytes
+        steady_state_repeated_info_bytes
+        + business_activity_bytes
+        + hourly_history_change_bytes
+        + hourly_checkpoint_bytes
+        + daily_restart_bytes
+        + initial_evidence_bytes
     )
     configured_capacity_bytes = DEFAULT_LOG_MAX_SIZE_BYTES * DEFAULT_LOG_MAX_FILES
+    maximum_compose_disk_bytes = configured_capacity_bytes * len(RUNTIME_SERVICES)
     usable_capacity_bytes = int(configured_capacity_bytes * USABLE_CAPACITY_RATIO)
     modeled_bytes_per_day = modeled_bytes / RETENTION_DAYS
     estimated_retention_days = usable_capacity_bytes / modeled_bytes_per_day
     return {
         "cycles": cycles,
+        "steady_state_repeated_info_records_per_cycle": (
+            STEADY_STATE_REPEATED_INFO_RECORDS_PER_CYCLE
+        ),
+        "business_info_records_per_cycle": BUSINESS_ACTIVE_CHATS_PER_CYCLE + 1,
         "modeled_bytes": modeled_bytes,
         "modeled_bytes_per_day": modeled_bytes_per_day,
         "configured_capacity_bytes": configured_capacity_bytes,
+        "maximum_compose_disk_bytes": maximum_compose_disk_bytes,
         "usable_capacity_bytes": usable_capacity_bytes,
         "estimated_retention_days": estimated_retention_days,
         "initial_evidence_bytes": initial_evidence_bytes,
@@ -183,5 +267,8 @@ def test_retention_model_keeps_worker_stop_and_checkpoint_transition_for_seven_d
 
     assert model["initial_evidence_bytes"] > 0
     assert model["cycles"] == 201_600
+    assert model["steady_state_repeated_info_records_per_cycle"] == 0
+    assert model["business_info_records_per_cycle"] == 3
+    assert model["maximum_compose_disk_bytes"] == 3_840 * 1024 * 1024
     assert model["modeled_bytes"] <= model["usable_capacity_bytes"]
     assert model["estimated_retention_days"] >= RETENTION_DAYS

@@ -118,10 +118,12 @@ ambiguous production effect just to test recovery.
   content-free fallback anchor is safely enrolled and confirmed.
 - [ ] An ambiguous checkpoint anchor stops the chat and emits only one identical warning
   per poller process state.
-- [ ] A 124-message all-checkpoint-skip cycle has constant INFO volume and exact
+- [ ] The 21-chat/95-visible-message steady shape (non-empty counts 9/14/20/50/1/1,
+  all inside checkpoint) emits at most six chat summaries plus one cycle summary on
+  first/change, then zero repeated chat/cycle INFO while unchanged. Aggregate
   `messages_seen`, `messages_new`, `messages_duplicate`,
-  `messages_skipped_checkpoint`, `messages_skipped_self`, and `messages_failed` counters;
-  per-message checkpoint/self skips are DEBUG.
+  `messages_skipped_checkpoint`, `messages_skipped_self`, and `messages_failed`
+  counters remain exact; per-message checkpoint/self skips are DEBUG.
 - [ ] A live admission claim fails closed; an expired claim recovers from its stored
   request snapshot.
 - [ ] A crash between allowed-dispatch staging and outcome completion commits neither,

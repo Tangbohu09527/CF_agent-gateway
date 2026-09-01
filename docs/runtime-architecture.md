@@ -134,18 +134,21 @@ dispatch, response, and delivery facts are not rewritten.
 
 Per-message checkpoint and self skips are DEBUG records. A completely idle
 `poll chat completed` or `poll cycle completed` summary and every
-`poll cycle started` record are also DEBUG. Chats and cycles with new or duplicate
-messages, failures, bootstrap, self/checkpoint skips, missing server IDs, or authentication
-activity remain INFO. Worker start/stop remains INFO and heartbeat failure remains ERROR.
+`poll cycle started` record are also DEBUG. A non-empty checkpoint-only history window is
+INFO when first observed or when its content-free local-ID sequence/count changes; the same
+window and checkpoint-skip count on later cycles is DEBUG. Chats and cycles with new or
+duplicate messages, failures, bootstrap, self skips, or authentication activity remain
+INFO. Worker start/stop remains INFO and heartbeat failure remains ERROR.
 Activity summaries expose redacted account/conversation references and
 `messages_seen`, `messages_processed`, `messages_new`, `messages_duplicate`,
 `messages_skipped_checkpoint`, `messages_skipped_self`, `messages_failed`,
 serverId-less, bootstrap, and failure counts.
 Checkpoint regression detected/rebased/live-suffix, continuity failed-closed, and CAS
 conflict records remain WARNING. Successful `httpx`/`httpcore` request records and
-routine Alembic context records are suppressed below WARNING by default. No message body,
-nickname, token, Authorization/Cookie header, connection string, raw account/chat ID, or
-raw upstream response is logged.
+routine Alembic context records are pinned to WARNING by default. Setting the Gateway root
+level to DEBUG does not restore those third-party records; their logger levels require an
+explicit bounded override. No message body, nickname, token, Authorization/Cookie header,
+connection string, raw account/chat ID, or raw upstream response is logged.
 
 ## Dispatch lifecycle and FIFO
 

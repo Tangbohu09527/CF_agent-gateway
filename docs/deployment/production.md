@@ -122,9 +122,16 @@ Set `CF_GATEWAY_CONFIG_FILE` only when the site-specific YAML lives somewhere ot
 
 Production INFO excludes successful `httpx`/`httpcore` request lines, Alembic
 `Context impl`/transactional-DDL setup lines, poll-cycle starts, and completely idle
-per-chat/cycle summaries. Those records remain available at DEBUG where applicable.
-A chat or cycle with new/duplicate/failed messages, bootstrap, self/checkpoint skips,
-server-ID gaps, authentication failure, or other failure activity remains INFO or above.
+per-chat/cycle summaries. Gateway polling records remain available at DEBUG. The
+`httpx`, `httpcore`, `alembic`, and `alembic.runtime.migration` loggers remain
+explicitly pinned to WARNING even when the root Gateway level is DEBUG; this release has
+no production environment override for them. A reviewed diagnostic build must set those
+logger levels explicitly and only for a bounded capture window.
+
+New/duplicate/failed messages, bootstrap, self skips, authentication failure, or other
+failure activity remains INFO or above. A non-empty window containing only messages already
+inside the checkpoint logs one INFO summary when first observed or when its local-ID
+sequence/count changes; an identical repeated window and checkpoint-skip count is DEBUG.
 Library WARNING/ERROR records and exception stacks are not suppressed.
 
 Treat these as high-value lifecycle evidence and preserve them before recovery:
@@ -143,22 +150,29 @@ configured capacity for each service. `tests/test_log_retention.py` reserves 10%
 rotation/format variation and models the busiest polling container with:
 
 - a three-second polling interval for 201,600 cycles over seven days;
-- two active chat summaries plus one active cycle summary on every cycle;
+- the production steady shape of 21 chats/95 visible messages, with non-empty counts
+  9/14/20/50/1/1: the first/changed shape emits six chat summaries and one cycle summary,
+  while identical subsequent cycles emit zero repeated INFO;
+- a conservative business ceiling of two real-activity chat summaries plus one active
+  cycle summary on every three-second cycle;
+- all six stable history windows changing once per hour;
 - two checkpoint transition records per hour and one worker stop/start per day;
 - the Docker `json-file` envelope, eight-digit PID, large counters/IDs, and an extra
   128-byte margin per record.
 
-That model produces 512,986,764 bytes over seven days (about 69.9 MiB/day). Against the
-576 MiB safety budget it estimates 8.24 days, so an initial worker-stop and checkpoint
+That model produces 515,192,772 bytes over seven days (about 70.19 MiB/day). Against the
+576 MiB safety budget it estimates 8.21 days, so an initial worker-stop and checkpoint
 transition remain inside the retained window. Recalculate the busiest container before
 lowering the defaults or increasing traffic:
 
 `retention_days = (max_size_bytes * max_files * safety_ratio) / modeled_bytes_per_day`.
 
 Increase either environment value when the site model does not clear seven days, and
-confirm host disk capacity for the sum across containers. Log retention is operational
-evidence, not a replacement for immutable dispatch recovery audits, delivery attempts,
-Messages, Admission Outcomes, checkpoints, or other authoritative database facts.
+confirm host disk capacity for the sum across containers. All six Compose services inherit
+the policy, so their theoretical combined maximum is 3.75 GiB at the defaults. Log
+retention is operational evidence, not a replacement for immutable dispatch recovery
+audits, delivery attempts, Messages, Admission Outcomes, checkpoints, or other
+authoritative database facts.
 
 Never log or paste Token values, Authorization/Cookie headers, message bodies, raw
 account/chat/conversation IDs, database credentials, or raw upstream responses. Use only

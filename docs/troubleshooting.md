@@ -25,10 +25,13 @@ The capacity is bounded and does not replace database audit/recovery evidence.
 3. Compare only local ID bounds and hashed account/conversation references in logs.
 4. Check `components.wechat_checkpoint_continuity` in runtime health.
 
-Completely idle chat/cycle summaries and cycle starts are DEBUG. A chat with checkpoint or
-self skips, bootstrap, duplicate/new/failed messages, or other activity still produces one
-INFO summary, not one INFO record per message. Raising the polling logger to DEBUG should
-be a temporary targeted diagnostic rather than the normal production level.
+Completely idle chat/cycle summaries and cycle starts are DEBUG. A checkpoint-only visible
+window produces one INFO summary when first seen or when its local-ID sequence/count
+changes; identical later windows are DEBUG. Self skips, bootstrap, duplicate/new/failed
+messages, or other activity still produce one INFO summary, not one INFO record per
+message. Raising the Gateway polling logger to DEBUG should be a temporary targeted
+diagnostic rather than the normal production level. Root DEBUG does not restore
+`httpx`/`httpcore`/Alembic records because those named loggers remain pinned to WARNING.
 
 If the visible maximum is below the checkpoint, or a saved anchor mismatches at the same
 local ID, one poller should CAS-rewind and increment generation. An empty window does not
