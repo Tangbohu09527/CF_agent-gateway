@@ -12,11 +12,13 @@ recorded in [Production status](production-status.md). Every future release must
 revalidate the external session, protected Token File, Controller readiness, and
 host lifecycle.
 
-Run the control entry point from a deployed repository checkout:
+The production entry point is:
 
-```console
-deploy/wechat-runtime-control <contract|stop|start|status>
+```text
+/opt/cf-agent-gateway/deploy/wechat-runtime-control
 ```
+
+The read-only `contract` action does not require Docker access.
 
 ## Published contract
 
@@ -51,7 +53,9 @@ sudo credentials once, then use non-interactive sudo for each control operation:
 
 ```console
 sudo -v
-sudo -n /opt/cf-agent-gateway/deploy/wechat-runtime-control <stop|start|status>
+sudo -n /opt/cf-agent-gateway/deploy/wechat-runtime-control stop --timeout-seconds 30
+sudo -n /opt/cf-agent-gateway/deploy/wechat-runtime-control start --timeout-seconds 180
+sudo -n /opt/cf-agent-gateway/deploy/wechat-runtime-control status --timeout-seconds 30
 ```
 
 Do not add ordinary users to the `docker` group or loosen the Token File's

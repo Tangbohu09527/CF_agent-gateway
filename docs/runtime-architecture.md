@@ -198,10 +198,17 @@ Production long-running containers use `restart: unless-stopped`. After a CFserv
 reboot, Gateway, Dispatch Worker, Poll Worker, and Delivery Worker are expected to restart
 when their Docker-managed state and dependencies are available.
 
-The `agent-wechat` authenticated session has a separate external lifecycle. It may survive
-a reboot, or it may require a fresh QR. If a fresh QR is required, close the Poll/Delivery
-gate before login and reopen it only through the Runtime Controller after the session and
-Token Contract are ready.
+`agent-wechat` has a different contract: it uses `restart="no"`, does not auto-start
+after a CFserver/Debian reboot, and its old Session does not automatically become active.
+Do not assume the Poll/Delivery Gate is stopped merely because `agent-wechat` is down;
+the Gateway Workers may already have restarted. The operator must first use the formal
+Controller stop and confirm both controlled Workers are stopped, then start
+`agent-wechat`, complete a fresh QR, validate the Token Contract, and reopen the gate
+through the Controller.
+
+A Gateway-only deployment that does not restart or recreate `agent-wechat` can preserve
+the existing active Session, as the P1 deployment did. An AI/Hermes host-only reboot does
+not require a fresh QR when CFserver and `agent-wechat` remain running.
 
 PostgreSQL startup ordering and availability remain external. Long-running Gateway
 processes run migration check mode and fail closed on a schema mismatch; only the one-shot

@@ -180,10 +180,14 @@ degrades top-level status.
 
 ## Runtime Controller status
 
-Run from the active release directory through the approved privileged execution path:
+Keep the operator out of the Docker group. Begin the interactive administrative session
+once, define the absolute Controller path, and use non-interactive sudo:
 
 ```bash
-${CONTROLLER} status
+sudo -v
+export RELEASE_DIR="/opt/cf-agent-gateway"
+export CONTROLLER="${RELEASE_DIR}/deploy/wechat-runtime-control"
+sudo -n "${CONTROLLER}" status --timeout-seconds 30
 ```
 
 The JSON object has exactly:

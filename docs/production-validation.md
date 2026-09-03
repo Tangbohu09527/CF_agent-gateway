@@ -98,7 +98,8 @@ observation.
 - [x] Token Contract valid.
 - [x] Outstanding queue work zero.
 - [x] Production online.
-- [x] Existing authenticated `agent-wechat` session preserved.
+- [x] Existing authenticated `agent-wechat` Session preserved during the Gateway-only P1
+  deployment; `agent-wechat` was not restarted or recreated.
 - [x] Formal pre-P1 rollback release preserved.
 - [x] Offline production image archive and checksum recorded.
 - [x] Final evidence file and evidence run ID recorded.
@@ -164,8 +165,12 @@ identities, message content, endpoints, credentials, or connection strings.
 - [ ] Start Gateway and Dispatch Worker while Poll/Delivery remain stopped.
 - [ ] Confirm `/health`, `/ready`, and database/migration runtime components.
 - [ ] Classify Dispatch/reconciliation state before opening intake.
-- [ ] Verify the external `agent-wechat` session; complete fresh QR with the gate closed
-  when required.
+- [ ] For a Gateway-only release that leaves `agent-wechat` untouched, verify the
+  existing active Session without forcing a QR.
+- [ ] After a CFserver/Debian reboot or `agent-wechat` recreation, formally stop the
+  Poll/Delivery Gate, confirm both Workers are stopped, and complete a mandatory fresh QR.
+- [ ] After an AI/Hermes host-only reboot with CFserver and `agent-wechat` untouched,
+  restore Hermes without forcing a QR.
 - [ ] Start Poll/Delivery only through the Runtime Controller.
 - [ ] Confirm both controlled Docker health states, fresh heartbeat age, valid Token
   Contract, and `ready: true`.
@@ -205,8 +210,12 @@ identities, message content, endpoints, credentials, or connection strings.
 ### Reboot, observation, and sign-off
 
 - [ ] Verify Gateway and all Workers recover after a controlled host/Docker restart.
-- [ ] Treat `agent-wechat` fresh QR as a separate lifecycle and gate Poll/Delivery when
-  required.
+- [ ] Do not assume the Poll/Delivery Gate remained stopped after CFserver reboot; run the
+  formal Controller stop and confirm stopped before starting `agent-wechat`.
+- [ ] Confirm `agent-wechat` did not auto-start (`restart="no"`) and complete a
+  mandatory fresh QR after every CFserver/Debian reboot or container recreation.
+- [ ] Confirm Gateway-only deployment preserves an untouched active Session, while an
+  AI/Hermes host-only reboot does not trigger a QR.
 - [ ] Observe queue/database totals and oldest ages for the approved steady window.
 - [ ] Confirm no unexplained stale claim, `uncertain`, blocked Thread, missing Delivery,
   reconciliation poison, or continuity warning remains.

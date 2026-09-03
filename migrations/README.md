@@ -14,6 +14,13 @@ runner in an approved exclusive window, performs the upgrade:
 cf-agent-gateway-migrate
 ```
 
+For the current rootful-Docker production topology, do not run that command directly from
+an ordinary operator shell. Use the fully defined `sudo -v`/`sudo -n`, absolute
+`--project-directory`, explicit `--env-file`, and `COMPOSE` array procedure in
+[Production deployment](../docs/deployment/production.md#operator-variables), followed by
+its documented migration step. The direct CLI examples below are for local development or
+a separately approved non-Compose maintenance environment.
+
 The runner reads `config/config.yaml` by default, honors `CF_GATEWAY_CONFIG`, and upgrades
 to the latest packaged revision. It does not depend on the current working directory.
 `CF_GATEWAY_ALEMBIC_CONFIG` can select a separate Alembic configuration when needed.
@@ -182,8 +189,10 @@ a nonzero legacy checkpoint, populated Message/admission/dispatch/delivery facts
 row/relationship preservation, conservative admission backfill, reconciliation tuples,
 direct-SQL audit immutability, recovery constraints, downgrade and partial-schema
 fail-closed behavior. The final exact local test result and GitHub Actions run ID are
-release evidence in pull request #4; they are not a substitute for the external production
-backup, restore proof, lock/scale review, or CFserver validation.
+historical migration and CI evidence in merged PR #4. Current production Release authority
+remains [Production status](../docs/production-status.md); the historical PR evidence is not
+a substitute for production backup, restore proof, lock/scale review, or CFserver
+validation.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or

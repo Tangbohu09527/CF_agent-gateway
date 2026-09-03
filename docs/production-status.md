@@ -30,7 +30,9 @@ build the production image and is an ancestor of the merge commit.
 After acceptance, Gateway, Dispatch Worker, Poll Worker, Delivery Worker, PostgreSQL, and
 external `agent-wechat` were healthy. Runtime Controller `ready` was `true`, the Token
 Contract was valid, outstanding queue work was zero, production remained online, and the
-authenticated `agent-wechat` session was preserved.
+authenticated `agent-wechat` Session was preserved during the Gateway-only P1 deployment.
+The deployment did not restart or recreate `agent-wechat`; this fact does not imply
+Session survival after a CFserver/Debian reboot.
 
 PostgreSQL and `agent-wechat` are operationally external to the Gateway Compose lifecycle.
 Hermes is also an external execution service; its implementation and capacity are not
@@ -133,7 +135,11 @@ Every future release must revalidate, at minimum:
   business path;
 - structured-log privacy, steady-state noise, rotation policy, and retention capacity;
 - intact previous release, image archive, database backup procedure, and rollback decision;
-- host reboot behavior and the separate `agent-wechat` fresh-QR boundary when applicable.
+- after every CFserver/Debian reboot or `agent-wechat` recreation, formal Controller stop
+  confirmation followed by a mandatory fresh QR and controlled gate reopen;
+- Session preservation for Gateway-only releases that leave `agent-wechat` untouched;
+- no fresh QR for an AI/Hermes host-only reboot when CFserver and `agent-wechat` did not
+  restart.
 
 Use [Production deployment](deployment/production.md) for procedure and
 [Production validation](production-validation.md) for the reusable checklist.

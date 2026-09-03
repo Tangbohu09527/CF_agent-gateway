@@ -21,31 +21,57 @@ receipt.
 
 ## Operator variables
 
+The protected incident evidence directory must be created and permissioned by the site
+process before recovery begins. Start the interactive administrative session once with
+`sudo -v`; every later privileged command uses `sudo -n`.
+
 ```bash
-export RELEASE_DIR=/opt/cf-agent-gateway
-export COMPOSE_FILE=docker-compose.prod.yml
+sudo -v
+
+export RELEASE_DIR="/opt/cf-agent-gateway"
+export COMPOSE_FILE="${RELEASE_DIR}/docker-compose.prod.yml"
+export CF_GATEWAY_ENV_FILE="${CF_GATEWAY_ENV_FILE:-${RELEASE_DIR}/.env}"
+export CF_GATEWAY_CONFIG_FILE="${CF_GATEWAY_CONFIG_FILE:-${RELEASE_DIR}/config/production.yaml}"
 export CONTROLLER="${RELEASE_DIR}/deploy/wechat-runtime-control"
-export GATEWAY_URL=http://localhost:8080
-export EVIDENCE_DIR=<protected-incident-evidence-directory>
-cd "${RELEASE_DIR}"
+export GATEWAY_URL="http://127.0.0.1:8080"
+export EVIDENCE_DIR="/path/to/protected/incident-evidence"
+
+COMPOSE=(
+  sudo -n env
+  "CF_GATEWAY_ENV_FILE=${CF_GATEWAY_ENV_FILE}"
+  "CF_GATEWAY_CONFIG_FILE=${CF_GATEWAY_CONFIG_FILE}"
+  docker compose
+  --project-directory "${RELEASE_DIR}"
+  --env-file "${CF_GATEWAY_ENV_FILE}"
+  -f "${COMPOSE_FILE}"
+  --profile worker
+)
+
+sudo -n test -d "${EVIDENCE_DIR}"
+sudo -n test -w "${EVIDENCE_DIR}"
+sudo -n test -r "${COMPOSE_FILE}"
+sudo -n test -r "${CF_GATEWAY_ENV_FILE}"
+sudo -n test -r "${CF_GATEWAY_CONFIG_FILE}"
+sudo -n test -x "${CONTROLLER}"
 ```
 
 Do not print the protected environment file, Token File, database URL, Authorization
-header, message content, personal identity, or raw channel identifiers.
+header, message content, personal identity, or raw channel identifiers. Do not source the
+env-file. Do not replace the `COMPOSE` array with an ordinary-user Docker command.
 
 ## Preserve evidence first
 
 Before restarting or recreating a container:
 
 ```bash
-mkdir -p "${EVIDENCE_DIR}"
 date -u
-docker compose -f "${COMPOSE_FILE}" --profile worker ps
-sudo -n "${CONTROLLER}" status
+"${COMPOSE[@]}" ps
+sudo -n "${CONTROLLER}" status --timeout-seconds 30
 curl --silent --show-error --max-time 5 "${GATEWAY_URL}/health/runtime"
 ```
 
-Store command output only in the protected incident location. Preserve the relevant
+Do not create the protected directory from this Runbook. Store command output only in the
+pre-provisioned incident location. Preserve the relevant
 structured container logs with the site's approved redaction and access controls. Record:
 
 - active release and immutable image identity;
@@ -77,11 +103,14 @@ Database facts remain authoritative, but losing logs may remove timing evidence.
 
 **Operate**
 
-1. Keep the gate closed with Controller `stop`.
+1. Keep the gate closed with
+   `sudo -n "${CONTROLLER}" stop --timeout-seconds 30` and require
+   `{"stopped":true}`.
 2. Correct only the external Token File metadata/source or approved release configuration;
    never reveal the value.
 3. Confirm the external `agent-wechat` session is ready.
-4. Run Controller `start`, then `status`.
+4. Run `sudo -n "${CONTROLLER}" start --timeout-seconds 180`, then
+   `sudo -n "${CONTROLLER}" status --timeout-seconds 30`.
 
 **Verify**
 
@@ -191,22 +220,28 @@ service is unavailable.
 
 **Check**
 
-Read Controller status and runtime `wechat_auth`. Determine through the external owner's
-approved procedure whether the session survived.
+After a CFserver/Debian reboot, do not infer Session state from the old heartbeat or
+container metadata. `agent-wechat` uses `restart="no"`, does not auto-start, and its old
+Session does not automatically become active. Poll and Delivery may have restarted under
+their own Docker policy, so first close the gate.
 
 **Classify**
 
-- process/session healthy: no QR action;
-- `logged_out` or invalid session: external login lifecycle;
+- CFserver/Debian reboot: fresh QR is required after the formal gate stop;
+- `agent-wechat` container recreation: fresh QR is required after the formal gate stop;
+- Gateway-only deployment with `agent-wechat` untouched: the active Session can remain;
+- AI/Hermes host-only reboot with CFserver and `agent-wechat` untouched: no fresh QR;
 - Token Contract invalid: Gateway-controlled mount/source contract, not QR state.
 
 **Operate**
 
-1. Close the Poll/Delivery Gate.
-2. Let the external owner complete the fresh-QR process without exposing account/session
-   evidence.
-3. Verify the protected Token File contract.
-4. Open the gate only through Controller `start`.
+1. Run `sudo -n "${CONTROLLER}" stop --timeout-seconds 30`.
+2. Require `{"stopped":true}` before starting `agent-wechat` or presenting a QR.
+3. Let the external owner start `agent-wechat` and complete the fresh-QR process without
+   exposing account/session evidence.
+4. Verify the protected Token File contract.
+5. Run `sudo -n "${CONTROLLER}" start --timeout-seconds 180`, then
+   `sudo -n "${CONTROLLER}" status --timeout-seconds 30`.
 
 **Verify**
 
@@ -215,8 +250,8 @@ the controlled acceptance Message is processed once.
 
 **Rollback**
 
-A QR requirement alone is not a Gateway rollback reason. Roll back only if the release's
-contract cannot operate with a valid external session.
+A mandatory post-reboot QR is not a Gateway rollback reason. Roll back only if the
+release's contract cannot operate after the external service has a new active Session.
 
 ## Pending or uncertain queue work
 

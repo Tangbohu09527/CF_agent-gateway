@@ -94,19 +94,32 @@ login boundary.
 
 Python 3.12 or newer is required.
 
+POSIX:
+
 ```bash
 python -m venv .venv
-python -m pip install -e ".[dev]"
-python -m cf_agent_gateway.main
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m cf_agent_gateway.main
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m cf_agent_gateway.main
 ```
 
 The default configuration is `config/config.yaml`; override it with
 `CF_GATEWAY_CONFIG`. Local adapter integrations require their own non-committed test
-configuration and credentials.
+configuration and credentials. After the service starts, run the health check from a
+second terminal:
 
 ```bash
 curl http://127.0.0.1:8080/health
 ```
+
+In PowerShell, use `curl.exe http://127.0.0.1:8080/health`.
 
 ## Documentation
 
