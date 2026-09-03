@@ -95,8 +95,25 @@ cycle and can admit later messages. A legacy anchorless checkpoint can CAS-enrol
 serverId or content-free fallback anchor from one exact overlapping message, then stops that
 chat for the cycle so the following cycle confirms continuity. If the anchor message is
 absent, duplicated, or lacks the required non-content fields, the chat fails closed.
-Identical ambiguous warnings are deduplicated in the poller process; restart or a changed
-continuity state can produce a new warning.
+Continuity observations live in the process-lifetime `WechatPollingLifecycleState`, not
+the finite per-cycle service. Their signature binds account/conversation, checkpoint local
+ID/generation/fingerprint, remote bounds, recovery action, and failure code. First/change
+emits WARNING; an identical state emits no periodic reminder. Worker restart or account
+change rebuilds the observation and can warn again.
+
+The same lifecycle state owns empty-window markers, pending visible windows, history
+observations, continuity observations, and marker clock watermarks behind one 1,024-Chat
+bound. Every successful `list_chats` cycle prunes all state kinds for missing Chats. New
+keys evict the least recently touched Chat at the bound, preventing process-lifetime
+growth under Chat churn.
+
+Full Chat invalidation and Marker-only invalidation are deliberately distinct. Account
+change, Chat disappearance, and ordinary auth/list/parse/database/network failures can
+drop the complete Chat state. Invalid fingerprint, failed/unusable/backwards marker clock,
+or marker identity mismatch drops only empty-marker/pending/history evidence and retains
+the continuity observation. A monotonic clock watermark keeps repeated backwards time
+fail-closed even after the unsafe marker is removed. No invalid Marker can be reused to
+start a live suffix.
 
 Message Store uniqueness remains the final idempotency boundary; the checkpoint is an
 optimization and continuity record, not a substitute for that constraint. Polling can
@@ -132,14 +149,27 @@ dispatch, response, and delivery facts are not rewritten.
 
 ## Polling observability
 
-Per-message checkpoint and self skips are DEBUG records. INFO volume is bounded to one
-`poll chat completed` summary per chat and the resident worker's cycle start/completion
-records. Summaries expose redacted account/conversation references and
+Per-message checkpoint and self skips are DEBUG records. A completely idle
+`poll chat completed` or `poll cycle completed` summary and every
+`poll cycle started` record are also DEBUG. A non-empty checkpoint-only history window is
+INFO when first observed or when its content-free local-ID sequence/count changes; the same
+window and checkpoint-skip count on later cycles is DEBUG. Chats and cycles with new or
+duplicate messages, failures, bootstrap, self skips, or authentication activity remain
+INFO. Worker start/stop remains INFO and heartbeat failure remains ERROR.
+Known continuity-only failures are different from ordinary failures: first/signature change
+retains the continuity WARNING plus chat/cycle INFO, while an identical later result is
+DEBUG. Auth, list-chats/list-messages, parsing, database, network, and unknown failures
+remain INFO/ERROR every occurrence.
+Activity summaries expose redacted account/conversation references and
 `messages_seen`, `messages_processed`, `messages_new`, `messages_duplicate`,
 `messages_skipped_checkpoint`, `messages_skipped_self`, `messages_failed`,
 serverId-less, bootstrap, and failure counts.
-Checkpoint regression detected/recovered remains WARNING. No message body, nickname, token,
-Cookie, connection string, or raw upstream response is logged.
+Checkpoint regression detected/rebased/live-suffix, continuity failed-closed, and CAS
+conflict records remain WARNING. Successful `httpx`/`httpcore` request records and
+routine Alembic context records are pinned to WARNING by default. Setting the Gateway root
+level to DEBUG does not restore those third-party records; their logger levels require an
+explicit bounded override. No message body, nickname, token, Authorization/Cookie header,
+connection string, raw account/chat ID, or raw upstream response is logged.
 
 ## Dispatch lifecycle and FIFO
 

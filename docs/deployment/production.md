@@ -118,6 +118,98 @@ Set `CF_GATEWAY_CONFIG_FILE` only when the site-specific YAML lives somewhere ot
 `./config/production.yaml`; the container target remains read-only at
 `/app/config/production.yaml`.
 
+## Log noise and retention
+
+Production INFO excludes successful `httpx`/`httpcore` request lines, Alembic
+`Context impl`/transactional-DDL setup lines, poll-cycle starts, and completely idle
+per-chat/cycle summaries. Gateway polling records remain available at DEBUG. The
+`httpx`, `httpcore`, `alembic`, and `alembic.runtime.migration` loggers remain
+explicitly pinned to WARNING even when the root Gateway level is DEBUG; this release has
+no production environment override for them. A reviewed diagnostic build must set those
+logger levels explicitly and only for a bounded capture window.
+
+New/duplicate/failed messages, bootstrap, self skips, authentication failure, or other
+failure activity remains INFO or above. A non-empty window containing only messages already
+inside the checkpoint logs one INFO summary when first observed or when its local-ID
+sequence/count changes; an identical repeated window and checkpoint-skip count is DEBUG.
+Known continuity-only fail-closed states such as
+`stop_chat_visible_window_empty` emit one `checkpoint continuity unverified` WARNING,
+one chat INFO, and one cycle INFO on first observation or signature change. An identical
+state emits no repeated WARNING/INFO on later three-second cycles. There is no periodic
+reminder; account change or Worker restart creates a new process-lifetime observation.
+Continuity signatures include checkpoint local ID/generation/fingerprint, remote bounds,
+recovery action, and failure code within the account/conversation scope.
+
+Marker evidence and continuity observation have separate invalidation boundaries. Missing
+or malformed checkpoint fingerprint, unavailable/naive/backwards marker clock, or marker
+identity mismatch removes the empty-window marker plus pending/history helper state but
+preserves the unchanged continuity signature. The Chat remains fail-closed with
+`stop_chat_empty_window_marker_unavailable`; no invalid marker can start live-suffix
+processing. Account change, Chat disappearance, or ordinary auth/list/parse/database/network
+failure may still invalidate the complete Chat state.
+Library WARNING/ERROR records and exception stacks are not suppressed.
+
+Process-lifetime polling state is limited to 1,024 Chat keys. Each successful
+`list_chats` cycle prunes empty markers, marker clock watermarks,
+visible-window/history observations, continuity observations, and pending windows for
+Chats no longer present. Account change clears all state. The limit evicts the least
+recently touched Chat before accepting another key, so Chat churn cannot grow these
+dictionaries indefinitely.
+
+Treat these as high-value lifecycle evidence and preserve them before recovery:
+
+- checkpoint regression detected/rebased/live-suffix, continuity failed-closed and CAS
+  conflict records;
+- worker start/stop and heartbeat-write failure;
+- dispatch uncertainty, quarantine, reconciliation and operator recovery transitions;
+- delivery uncertainty and recovery transitions; and
+- runtime controller start/stop success, failure and rollback/rollback-failure output.
+
+Production Compose keeps the `json-file` driver, so `docker logs` and
+`docker compose logs` remain available. The per-container defaults are
+`CF_GATEWAY_LOG_MAX_SIZE=64m` and `CF_GATEWAY_LOG_MAX_FILES=10`, or 640 MiB of
+configured capacity for each service. `tests/test_log_retention.py` reserves 10% for
+rotation/format variation and models the busiest polling container with:
+
+- a three-second polling interval for 201,600 cycles over seven days;
+- the production steady shape of 21 chats/95 visible messages, with non-empty counts
+  9/14/20/50/1/1: the first/changed shape emits six chat summaries and one cycle summary,
+  while identical subsequent cycles emit zero repeated INFO;
+- five persistent `stop_chat_visible_window_empty` Chats: first/change emits five
+  continuity WARNINGs, five chat summaries, and one cycle summary; identical subsequent
+  cycles emit zero repeated WARNING/INFO and no periodic reminder;
+- one persistent old Checkpoint with no valid fingerprint, producing
+  `stop_chat_empty_window_marker_unavailable`: first/change emits one WARNING, one chat
+  INFO, and one cycle INFO; identical three-second cycles emit zero repeated WARNING/INFO;
+- a conservative business ceiling of two real-activity chat summaries plus one active
+  cycle summary on every three-second cycle;
+- all six stable history windows changing once per hour;
+- all five empty-window continuity signatures changing once per hour;
+- the Marker-unavailable signature changing once per hour;
+- two checkpoint transition records per hour and one worker stop/start per day;
+- both steady-state first-observation bursts rebuilding after each modeled Worker restart;
+- the Marker-unavailable first-observation burst rebuilding after each Worker restart;
+- the Docker `json-file` envelope, eight-digit PID, large counters/IDs, and an extra
+  128-byte margin per record.
+
+That model produces 517,295,964 bytes over seven days (about 70.48 MiB/day). Against the
+576 MiB safety budget it estimates 8.17 days, so an initial worker-stop and checkpoint
+transition remain inside the retained window. Recalculate the busiest container before
+lowering the defaults or increasing traffic:
+
+`retention_days = (max_size_bytes * max_files * safety_ratio) / modeled_bytes_per_day`.
+
+Increase either environment value when the site model does not clear seven days, and
+confirm host disk capacity for the sum across containers. All six Compose services inherit
+the policy, so their theoretical combined maximum is 3.75 GiB at the defaults. Log
+retention is operational evidence, not a replacement for immutable dispatch recovery
+audits, delivery attempts, Messages, Admission Outcomes, checkpoints, or other
+authoritative database facts.
+
+Never log or paste Token values, Authorization/Cookie headers, message bodies, raw
+account/chat/conversation IDs, database credentials, or raw upstream responses. Use only
+hashed `*_id_ref` fields and aggregate counters in retained logs.
+
 ## Pre-deployment gate
 
 1. Confirm the intended commit, immutable image digest and pull request #4's green

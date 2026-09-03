@@ -35,7 +35,7 @@ from cf_agent_gateway.adapters.wechat.polling_store import WechatSyncCheckpointS
 from cf_agent_gateway.adapters.wechat.raw_models import AgentWechatAuthStatus, RawWechatMessage
 
 logger = logging.getLogger(__name__)
-_MAX_CONTINUITY_WARNING_KEYS = 1024
+_MAX_LIFECYCLE_CHAT_STATES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +50,25 @@ class _EmptyWindowMarker:
     observation_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ChatHistoryObservation:
+    visible_local_ids: tuple[int, ...]
+    messages_seen: int
+    messages_skipped_by_checkpoint: int
+    messages_without_server_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ContinuityObservation:
+    checkpoint_local_id: int
+    checkpoint_generation: int
+    checkpoint_fingerprint: str | None
+    remote_first_local_id: int
+    remote_latest_local_id: int
+    recovery_action: str
+    failure_code: str
+
+
 class WechatPollingLifecycleState:
     """Process-lifetime evidence shared by finite polling service instances."""
 
@@ -57,9 +76,19 @@ class WechatPollingLifecycleState:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._active_source_account_id: str | None = None
         self._empty_window_markers: dict[tuple[str, str], _EmptyWindowMarker] = {}
+        self._marker_clock_watermarks: dict[tuple[str, str], datetime] = {}
+        self._pending_visible_windows: dict[tuple[str, str], tuple[int, ...]] = {}
+        self._chat_history_observations: dict[tuple[str, str], _ChatHistoryObservation] = {}
+        self._continuity_observations: dict[tuple[str, str], _ContinuityObservation] = {}
+        self._chat_state_order: dict[tuple[str, str], None] = {}
 
     def invalidate_all(self) -> None:
         self._empty_window_markers.clear()
+        self._marker_clock_watermarks.clear()
+        self._pending_visible_windows.clear()
+        self._chat_history_observations.clear()
+        self._continuity_observations.clear()
+        self._chat_state_order.clear()
         self._active_source_account_id = None
 
     def observe_account(self, source_account_id: str) -> None:
@@ -68,7 +97,160 @@ class WechatPollingLifecycleState:
             self._active_source_account_id = source_account_id
 
     def invalidate_chat(self, source_account_id: str, conversation_id: str) -> None:
-        self._empty_window_markers.pop((source_account_id, conversation_id), None)
+        self._drop_chat_state((source_account_id, conversation_id))
+
+    @property
+    def cached_chat_count(self) -> int:
+        return len(self._chat_state_order)
+
+    def observation_counts(self) -> dict[str, int]:
+        return {
+            "chats": len(self._chat_state_order),
+            "empty_markers": len(self._empty_window_markers),
+            "marker_clock_watermarks": len(self._marker_clock_watermarks),
+            "pending_windows": len(self._pending_visible_windows),
+            "history": len(self._chat_history_observations),
+            "continuity": len(self._continuity_observations),
+        }
+
+    def prune_chats(
+        self,
+        *,
+        source_account_id: str,
+        conversation_ids: Sequence[str],
+    ) -> None:
+        retained = set(conversation_ids)
+        for key in tuple(self._chat_state_order):
+            if key[0] == source_account_id and key[1] not in retained:
+                self._drop_chat_state(key)
+
+    def _touch_chat_state(self, key: tuple[str, str]) -> None:
+        if key in self._chat_state_order:
+            self._chat_state_order.pop(key)
+        elif len(self._chat_state_order) >= _MAX_LIFECYCLE_CHAT_STATES:
+            self._drop_chat_state(next(iter(self._chat_state_order)))
+        self._chat_state_order[key] = None
+
+    def _drop_chat_state(self, key: tuple[str, str]) -> None:
+        self._chat_state_order.pop(key, None)
+        self._empty_window_markers.pop(key, None)
+        self._marker_clock_watermarks.pop(key, None)
+        self._pending_visible_windows.pop(key, None)
+        self._chat_history_observations.pop(key, None)
+        self._continuity_observations.pop(key, None)
+
+    def _release_chat_state_if_unused(self, key: tuple[str, str]) -> None:
+        if not any(
+            key in state
+            for state in (
+                self._empty_window_markers,
+                self._marker_clock_watermarks,
+                self._pending_visible_windows,
+                self._chat_history_observations,
+                self._continuity_observations,
+            )
+        ):
+            self._chat_state_order.pop(key, None)
+
+    def invalidate_marker_evidence(
+        self,
+        source_account_id: str,
+        conversation_id: str,
+    ) -> None:
+        key = (source_account_id, conversation_id)
+        self._empty_window_markers.pop(key, None)
+        self._pending_visible_windows.pop(key, None)
+        self._chat_history_observations.pop(key, None)
+        self._release_chat_state_if_unused(key)
+
+    def record_visible_window(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        local_ids: Sequence[int],
+    ) -> None:
+        key = (source_account_id, conversation_id)
+        self._touch_chat_state(key)
+        self._pending_visible_windows[key] = tuple(local_ids)
+
+    def observe_continuity_failure(
+        self,
+        *,
+        source_account_id: str,
+        conversation_id: str,
+        checkpoint_local_id: int,
+        checkpoint_generation: int,
+        checkpoint_fingerprint: str | None,
+        remote_first_local_id: int,
+        remote_latest_local_id: int,
+        recovery_action: str,
+        failure_code: str,
+    ) -> tuple[bool, str]:
+        key = (source_account_id, conversation_id)
+        self._touch_chat_state(key)
+        observation = _ContinuityObservation(
+            checkpoint_local_id=checkpoint_local_id,
+            checkpoint_generation=checkpoint_generation,
+            checkpoint_fingerprint=checkpoint_fingerprint,
+            remote_first_local_id=remote_first_local_id,
+            remote_latest_local_id=remote_latest_local_id,
+            recovery_action=recovery_action,
+            failure_code=failure_code,
+        )
+        changed = self._continuity_observations.get(key) != observation
+        self._continuity_observations[key] = observation
+        signature = "|".join(
+            (
+                _redacted_reference("source_account", source_account_id),
+                _redacted_reference("conversation", conversation_id),
+                str(checkpoint_local_id),
+                str(checkpoint_generation),
+                checkpoint_fingerprint or "",
+                str(remote_first_local_id),
+                str(remote_latest_local_id),
+                recovery_action,
+                failure_code,
+            )
+        )
+        signature_ref = f"continuity:sha256:{hashlib.sha256(signature.encode()).hexdigest()[:16]}"
+        return changed, signature_ref
+
+    def chat_result_log_level(
+        self,
+        *,
+        source_account_id: str,
+        result: ChatPollResult,
+    ) -> int:
+        if result.conversation_id is None:
+            return logging.INFO if _chat_result_has_immediate_activity(result) else logging.DEBUG
+
+        key = (source_account_id, result.conversation_id)
+        visible_local_ids = self._pending_visible_windows.pop(key, ())
+        if result.continuity_only:
+            self._chat_history_observations.pop(key, None)
+            return logging.INFO if result.continuity_state_changed else logging.DEBUG
+
+        self._continuity_observations.pop(key, None)
+        if _chat_result_has_immediate_activity(result):
+            self._chat_history_observations.pop(key, None)
+            self._release_chat_state_if_unused(key)
+            return logging.INFO
+        if result.messages_seen <= 0:
+            self._chat_history_observations.pop(key, None)
+            self._release_chat_state_if_unused(key)
+            return logging.DEBUG
+
+        self._touch_chat_state(key)
+        observation = _ChatHistoryObservation(
+            visible_local_ids=visible_local_ids,
+            messages_seen=result.messages_seen,
+            messages_skipped_by_checkpoint=result.messages_skipped_by_checkpoint,
+            messages_without_server_id=result.messages_without_server_id,
+        )
+        previous = self._chat_history_observations.get(key)
+        self._chat_history_observations[key] = observation
+        return logging.INFO if observation != previous else logging.DEBUG
 
     def record_empty_window(
         self,
@@ -77,22 +259,32 @@ class WechatPollingLifecycleState:
         conversation_id: str,
         checkpoint: object,
     ) -> bool:
+        key = (source_account_id, conversation_id)
+        self._touch_chat_state(key)
         if not _valid_checkpoint_marker_state(checkpoint):
-            self.invalidate_chat(source_account_id, conversation_id)
+            self.invalidate_marker_evidence(source_account_id, conversation_id)
             return False
         try:
             observed_at = _aware_utc(self._clock())
         except Exception:
             observed_at = None
         if observed_at is None:
-            self.invalidate_chat(source_account_id, conversation_id)
+            self.invalidate_marker_evidence(source_account_id, conversation_id)
             return False
 
-        key = (source_account_id, conversation_id)
+        previous_observed_at = self._marker_clock_watermarks.get(key)
+        if previous_observed_at is not None and observed_at < previous_observed_at:
+            self.invalidate_marker_evidence(source_account_id, conversation_id)
+            return False
+        self._marker_clock_watermarks[key] = observed_at
+
         existing = self._empty_window_markers.get(key)
-        if existing is not None and _marker_matches_checkpoint(existing, checkpoint):
+        if existing is not None:
+            if not _marker_matches_checkpoint(existing, checkpoint):
+                self.invalidate_marker_evidence(source_account_id, conversation_id)
+                return False
             if observed_at < existing.last_empty_observed_at:
-                self.invalidate_chat(source_account_id, conversation_id)
+                self.invalidate_marker_evidence(source_account_id, conversation_id)
                 return False
             self._empty_window_markers[key] = _EmptyWindowMarker(
                 source_account_id=source_account_id,
@@ -124,10 +316,10 @@ class WechatPollingLifecycleState:
         source_account_id: str,
         conversation_id: str,
     ) -> _EmptyWindowMarker | None:
-        return self._empty_window_markers.pop(
-            (source_account_id, conversation_id),
-            None,
-        )
+        key = (source_account_id, conversation_id)
+        marker = self._empty_window_markers.pop(key, None)
+        self._marker_clock_watermarks.pop(key, None)
+        return marker
 
 
 class WechatPollingClient(Protocol):
@@ -172,7 +364,6 @@ class WechatPollingService:
         if lifecycle_state is not None and clock is not None:
             raise ValueError("clock belongs to lifecycle_state when shared")
         self._lifecycle_state = lifecycle_state or WechatPollingLifecycleState(clock=clock)
-        self._continuity_warning_keys: set[str] = set()
         try:
             self._bootstrap_mode = BootstrapMode(bootstrap_mode)
         except (TypeError, ValueError):
@@ -219,10 +410,22 @@ class WechatPollingService:
                 chat,
                 failed_conversation_ids=failed_conversation_ids,
             )
-            _log_chat_result(source_account_id, result)
+            _log_chat_result(
+                source_account_id,
+                result,
+                lifecycle_state=self._lifecycle_state,
+            )
             chat_results.append(result)
             if not result.succeeded and result.conversation_id is not None:
                 failed_conversation_ids.add(result.conversation_id)
+        self._lifecycle_state.prune_chats(
+            source_account_id=source_account_id,
+            conversation_ids=tuple(
+                result.conversation_id
+                for result in chat_results
+                if result.conversation_id is not None
+            ),
+        )
         failures = [failure for result in chat_results for failure in result.failures]
         return PollResult(
             source_account_id=source_account_id,
@@ -321,6 +524,11 @@ class WechatPollingService:
         messages_without_server_id = sum(
             not _message_has_usable_server_id(raw_message) for _, raw_message in ordered_messages
         )
+        self._lifecycle_state.record_visible_window(
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+            local_ids=tuple(local_id for local_id, _ in ordered_messages),
+        )
         try:
             checkpoint = self._checkpoint_store.get(
                 source_account_id=source_account_id,
@@ -364,6 +572,7 @@ class WechatPollingService:
                 bootstrapped=False,
                 checkpoint=checkpoint.last_local_id,
                 generation=checkpoint.regression_generation,
+                checkpoint_fingerprint=checkpoint.last_message_fingerprint,
                 remote_first_local_id=0,
                 remote_latest_local_id=0,
                 recovery_action=(
@@ -371,7 +580,7 @@ class WechatPollingService:
                     if marker_recorded
                     else "stop_chat_empty_window_marker_unavailable"
                 ),
-                warning_keys=self._continuity_warning_keys,
+                lifecycle_state=self._lifecycle_state,
             )
 
         empty_window_marker = self._lifecycle_state.take_empty_window(
@@ -392,10 +601,11 @@ class WechatPollingService:
                 bootstrapped=False,
                 checkpoint=empty_window_marker.checkpoint_last_local_id,
                 generation=empty_window_marker.checkpoint_generation,
+                checkpoint_fingerprint=empty_window_marker.checkpoint_fingerprint,
                 remote_first_local_id=ordered_messages[0][0] if ordered_messages else 0,
                 remote_latest_local_id=ordered_messages[-1][0] if ordered_messages else 0,
                 recovery_action="stop_chat_empty_window_marker_mismatch",
-                warning_keys=self._continuity_warning_keys,
+                lifecycle_state=self._lifecycle_state,
             )
 
         bootstrapped = False
@@ -488,10 +698,11 @@ class WechatPollingService:
                         bootstrapped=bootstrapped,
                         checkpoint=old_checkpoint,
                         generation=old_generation,
+                        checkpoint_fingerprint=checkpoint.last_message_fingerprint,
                         remote_first_local_id=remote_first_local_id,
                         remote_latest_local_id=remote_latest_local_id,
                         recovery_action="stop_chat_anchor_ambiguous",
-                        warning_keys=self._continuity_warning_keys,
+                        lifecycle_state=self._lifecycle_state,
                     )
 
                 remote_fingerprint = build_wechat_checkpoint_fingerprint(anchor_candidates[0])
@@ -508,10 +719,11 @@ class WechatPollingService:
                             bootstrapped=bootstrapped,
                             checkpoint=old_checkpoint,
                             generation=old_generation,
+                            checkpoint_fingerprint=checkpoint.last_message_fingerprint,
                             remote_first_local_id=remote_first_local_id,
                             remote_latest_local_id=remote_latest_local_id,
                             recovery_action="stop_chat_anchor_unavailable",
-                            warning_keys=self._continuity_warning_keys,
+                            lifecycle_state=self._lifecycle_state,
                         )
                     try:
                         _, enrolled = self._checkpoint_store.enroll_anchor(
@@ -571,10 +783,11 @@ class WechatPollingService:
                         bootstrapped=bootstrapped,
                         checkpoint=old_checkpoint,
                         generation=old_generation,
+                        checkpoint_fingerprint=saved_fingerprint,
                         remote_first_local_id=remote_first_local_id,
                         remote_latest_local_id=remote_latest_local_id,
                         recovery_action="stop_chat_remote_anchor_unavailable",
-                        warning_keys=self._continuity_warning_keys,
+                        lifecycle_state=self._lifecycle_state,
                     )
                 anchor_match = saved_fingerprint == remote_fingerprint
                 regression_detected = not anchor_match
@@ -598,10 +811,11 @@ class WechatPollingService:
                             bootstrapped=bootstrapped,
                             checkpoint=old_checkpoint,
                             generation=old_generation,
+                            checkpoint_fingerprint=checkpoint.last_message_fingerprint,
                             remote_first_local_id=remote_first_local_id,
                             remote_latest_local_id=remote_latest_local_id,
                             recovery_action="stop_chat_empty_window_time_unverified",
-                            warning_keys=self._continuity_warning_keys,
+                            lifecycle_state=self._lifecycle_state,
                         )
                 recovery_action = (
                     "process_live_suffix_after_empty_window"
@@ -653,10 +867,11 @@ class WechatPollingService:
                                 bootstrapped=bootstrapped,
                                 checkpoint=old_checkpoint,
                                 generation=old_generation,
+                                checkpoint_fingerprint=checkpoint.last_message_fingerprint,
                                 remote_first_local_id=remote_first_local_id,
                                 remote_latest_local_id=remote_latest_local_id,
                                 recovery_action="stop_chat_live_suffix_baseline_unavailable",
-                                warning_keys=self._continuity_warning_keys,
+                                lifecycle_state=self._lifecycle_state,
                             )
                         try:
                             checkpoint, live_suffix_started = (
@@ -1313,26 +1528,25 @@ def _continuity_failure_result(
     bootstrapped: bool,
     checkpoint: int,
     generation: int,
+    checkpoint_fingerprint: str | None,
     remote_first_local_id: int,
     remote_latest_local_id: int,
     recovery_action: str,
-    warning_keys: set[str],
+    lifecycle_state: WechatPollingLifecycleState,
 ) -> ChatPollResult:
-    warning_key = "|".join(
-        (
-            _redacted_reference("source_account", source_account_id),
-            _redacted_reference("conversation", conversation_id),
-            str(checkpoint),
-            str(generation),
-            str(remote_first_local_id),
-            str(remote_latest_local_id),
-            recovery_action,
-        )
+    failure_code = WechatCheckpointContinuityError.code
+    changed, state_ref = lifecycle_state.observe_continuity_failure(
+        source_account_id=source_account_id,
+        conversation_id=conversation_id,
+        checkpoint_local_id=checkpoint,
+        checkpoint_generation=generation,
+        checkpoint_fingerprint=checkpoint_fingerprint,
+        remote_first_local_id=remote_first_local_id,
+        remote_latest_local_id=remote_latest_local_id,
+        recovery_action=recovery_action,
+        failure_code=failure_code,
     )
-    if warning_key not in warning_keys:
-        if len(warning_keys) >= _MAX_CONTINUITY_WARNING_KEYS:
-            warning_keys.clear()
-        warning_keys.add(warning_key)
+    if changed:
         _log_checkpoint_event(
             "checkpoint continuity unverified",
             source_account_id=source_account_id,
@@ -1353,6 +1567,8 @@ def _continuity_failure_result(
         messages_skipped=messages_skipped,
         messages_without_server_id=messages_without_server_id,
         bootstrapped=bootstrapped,
+        continuity_state_ref=state_ref,
+        continuity_state_changed=changed,
     )
 
 
@@ -1364,6 +1580,8 @@ def _continuity_failure(
     messages_skipped: int,
     messages_without_server_id: int,
     bootstrapped: bool,
+    continuity_state_ref: str | None = None,
+    continuity_state_changed: bool = False,
 ) -> ChatPollResult:
     return ChatPollResult(
         conversation_id=conversation_id,
@@ -1373,6 +1591,9 @@ def _continuity_failure(
         messages_skipped_by_checkpoint=messages_skipped,
         messages_without_server_id=messages_without_server_id,
         bootstrapped=bootstrapped,
+        continuity_only=continuity_state_ref is not None,
+        continuity_state_ref=continuity_state_ref,
+        continuity_state_changed=continuity_state_changed,
         failures=[
             _failure(
                 PollFailureStage.CHECKPOINT,
@@ -1439,8 +1660,18 @@ def _log_message_skip(
     )
 
 
-def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
-    logger.info(
+def _log_chat_result(
+    source_account_id: str,
+    result: ChatPollResult,
+    *,
+    lifecycle_state: WechatPollingLifecycleState,
+) -> None:
+    level = lifecycle_state.chat_result_log_level(
+        source_account_id=source_account_id,
+        result=result,
+    )
+    logger.log(
+        level,
         "poll chat completed",
         extra={
             "fields": {
@@ -1463,6 +1694,24 @@ def _log_chat_result(source_account_id: str, result: ChatPollResult) -> None:
                 "bootstrapped": result.bootstrapped,
             }
         },
+    )
+
+
+def _chat_result_has_immediate_activity(result: ChatPollResult) -> bool:
+    return (
+        not result.succeeded
+        or bool(result.failures)
+        or result.bootstrapped
+        or any(
+            count > 0
+            for count in (
+                result.messages_processed,
+                result.messages_new,
+                result.messages_duplicate,
+                result.messages_skipped_as_self,
+                result.messages_failed,
+            )
+        )
     )
 
 

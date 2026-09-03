@@ -30,11 +30,23 @@ _SENSITIVE_KEY_PARTS = (
     "database_url",
     "connection_string",
 )
+_RAW_IDENTIFIER_KEY_PARTS = (
+    "account_id",
+    "chat_id",
+    "conversation_id",
+)
+_QUIET_THIRD_PARTY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "alembic",
+    "alembic.runtime.migration",
+)
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _CREDENTIAL_URL_PATTERN = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@")
 _ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(authorization|cookie|password|secret|token|api[_-]?key)"
-    r"(\s*[:=]\s*)[^\s,;]+"
+    r"(?i)\b(authorization|(?:[a-z0-9_-]+[_-])?(?:body|content)|"
+    r"cookie|password|secret|token|api[_-]?key|"
+    r"account[_-]?id|chat[_-]?id|conversation[_-]?id)(\s*[:=]\s*)[^,;]+"
 )
 
 
@@ -90,8 +102,14 @@ def _redact_value(value: object, *, key: str | None = None) -> object:
 
 
 def _sensitive_key(key: str) -> bool:
-    normalized = key.casefold()
-    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+    normalized = key.casefold().replace("-", "_")
+    if normalized in {"body", "content"} or normalized.endswith(("_body", "_content")):
+        return True
+    if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
+        return True
+    if normalized.endswith("_ref"):
+        return False
+    return any(part in normalized for part in _RAW_IDENTIFIER_KEY_PARTS)
 
 
 def _redact_string(value: str) -> str:
@@ -112,3 +130,6 @@ def configure_logging(level: str) -> None:
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(logger_name).handlers.clear()
         logging.getLogger(logger_name).propagate = True
+
+    for logger_name in _QUIET_THIRD_PARTY_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)

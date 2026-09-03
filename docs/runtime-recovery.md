@@ -18,6 +18,49 @@ Before acting:
 All mutating steps below are manual actions. They have not been exercised against a real
 CFserver by this repository change.
 
+## Retained log evidence
+
+Production Compose retains each service's Docker `json-file` logs independently with
+defaults of 64 MiB across 10 files. The tested production-shape plus sustained-business
+model is about 70.48 MiB/day in the busiest container and retains 8.17 days after reserving
+10% capacity. Across all six services, the theoretical configured maximum is 3.75 GiB.
+Use `docker compose logs --since 168h <service>` before restarting or recreating a
+container, and preserve worker stop/start, checkpoint continuity/regression/CAS evidence,
+dispatch uncertainty/quarantine/recovery, delivery uncertainty/recovery, heartbeat failure,
+and controller stop/start/rollback output with UTC timestamps.
+
+Idle per-chat/cycle summaries and poll starts are DEBUG. The first or changed non-empty
+checkpoint-only window is INFO; identical later windows are DEBUG. Successful HTTP client
+requests and routine Alembic context setup remain pinned below WARNING even when the root
+Gateway level is DEBUG. Their absence at INFO is not evidence of an outage; use runtime
+health and heartbeats for liveness. Third-party DEBUG requires an explicit reviewed logger
+override and must be limited to a bounded diagnostic window.
+
+Persistent continuity-only fail-closed states, including
+`stop_chat_visible_window_empty`, emit their continuity WARNING and chat/cycle INFO only
+on first observation or signature change. Identical later cycles have zero repeated
+WARNING/INFO; no periodic reminder is configured. The signature includes checkpoint
+local ID/generation/fingerprint, remote bounds, recovery action, and failure code under the
+account/conversation scope. Worker restart or account change rebuilds this process-local
+state. A successful `list_chats` cycle prunes disappeared Chats, and all lifecycle state
+shares a 1,024-Chat bound.
+
+An unavailable empty-window Marker is not a reason to erase the continuity observation.
+Missing/malformed fingerprint, clock exception, naive/unusable time, backwards time, or
+marker identity mismatch removes only the unsafe marker plus pending/history helper state.
+The unchanged `stop_chat_empty_window_marker_unavailable` signature remains deduplicated
+across newly-created per-cycle services. A clock watermark prevents backwards observations
+from creating a new marker after the previous marker was rejected. The Chat remains
+fail-closed: no Sink call, checkpoint advance, generation increment, live-suffix start,
+dispatch, response, or delivery side effect is permitted.
+
+Docker logs are bounded operational evidence, not the audit authority. Dispatch recovery
+audits, Message/Admission/Checkpoint facts, delivery attempts and receipts remain in the
+database and must be preserved independently. Never add Token, Authorization, Cookie,
+message body, raw account/chat/conversation ID, database credential, or raw upstream
+response values to logs or incident notes; retain only hashed references and aggregate
+counters.
+
 ## Checkpoint regression recovery
 
 ### `LATEST` fail-safe rebase

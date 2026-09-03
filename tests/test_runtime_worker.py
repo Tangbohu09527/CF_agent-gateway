@@ -8,7 +8,12 @@ from threading import Event, Thread
 
 import pytest
 
-from cf_agent_gateway.adapters.wechat import PollFailure, PollFailureStage, PollResult
+from cf_agent_gateway.adapters.wechat import (
+    ChatPollResult,
+    PollFailure,
+    PollFailureStage,
+    PollResult,
+)
 from cf_agent_gateway.config import RuntimeSettings, Settings
 from cf_agent_gateway.runtime import worker
 from cf_agent_gateway.runtime.errors import (
@@ -99,12 +104,11 @@ def test_worker_starts_polls_logs_result_and_stops(
     assert calls == [settings]
     assert [record.getMessage() for record in records] == [
         "worker started",
-        "poll cycle started",
         "poll cycle completed",
         "worker stopped",
     ]
     assert records[0].fields == {"polling_interval_seconds": 1.25}  # type: ignore[attr-defined]
-    assert records[2].fields == {  # type: ignore[attr-defined]
+    assert records[1].fields == {  # type: ignore[attr-defined]
         "logged_in": True,
         "chats_seen": 3,
         "chats_succeeded": 2,
@@ -120,6 +124,136 @@ def test_worker_starts_polls_logs_result_and_stops(
         "bootstrapped_chats": 1,
         "failure_count": 1,
     }
+    assert [record.levelno for record in records] == [logging.INFO, logging.INFO, logging.INFO]
+
+
+def test_idle_poll_cycle_is_debug_while_worker_lifecycle_remains_info(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop_event = Event()
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        stop_event.set()
+        return PollResult(logged_in=True, chats_seen=3, chats_succeeded=3)
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
+
+    records = worker_log_records(caplog)
+    assert [(record.getMessage(), record.levelno) for record in records] == [
+        ("worker started", logging.INFO),
+        ("poll cycle started", logging.DEBUG),
+        ("poll cycle completed", logging.DEBUG),
+        ("worker stopped", logging.INFO),
+    ]
+
+
+def test_checkpoint_history_cycle_count_change_reenables_info(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop_event = Event()
+    stable_chat = ChatPollResult(
+        conversation_id="wxid-history",
+        succeeded=True,
+        messages_seen=9,
+        messages_skipped_by_checkpoint=9,
+    )
+    stable = PollResult(
+        logged_in=True,
+        chats_seen=21,
+        chats_succeeded=21,
+        messages_seen=95,
+        messages_skipped_by_checkpoint=95,
+        chat_results=[stable_chat],
+    )
+    changed = stable.model_copy(
+        update={
+            "messages_seen": 96,
+            "messages_skipped_by_checkpoint": 96,
+            "chat_results": [
+                stable_chat.model_copy(
+                    update={
+                        "messages_seen": 10,
+                        "messages_skipped_by_checkpoint": 10,
+                    }
+                )
+            ],
+        }
+    )
+    results = iter((stable, stable, changed))
+    calls = 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal calls
+        assert candidate is settings
+        calls += 1
+        if calls == 3:
+            stop_event.set()
+        return next(results)
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
+
+    cycle_records = [
+        record
+        for record in worker_log_records(caplog)
+        if record.getMessage() == "poll cycle completed"
+    ]
+    assert [record.levelno for record in cycle_records] == [
+        logging.INFO,
+        logging.DEBUG,
+        logging.INFO,
+    ]
+
+
+def test_repeated_non_continuity_failures_remain_info(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop_event = Event()
+    failure = PollFailure(
+        stage=PollFailureStage.LIST_MESSAGES,
+        code="wechat_list_messages_error",
+        conversation_id="wxid-network-failure",
+    )
+    failed_result = PollResult(
+        logged_in=True,
+        chats_seen=1,
+        chats_failed=1,
+        failures=[failure],
+        chat_results=[
+            ChatPollResult(
+                conversation_id="wxid-network-failure",
+                succeeded=False,
+                failures=[failure],
+            )
+        ],
+    )
+    calls = 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal calls
+        assert candidate is settings
+        calls += 1
+        if calls == 2:
+            stop_event.set()
+        return failed_result
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop_event, poll_once=poll_once)
+
+    cycle_records = [
+        record
+        for record in worker_log_records(caplog)
+        if record.getMessage() == "poll cycle completed"
+    ]
+    assert [record.levelno for record in cycle_records] == [
+        logging.INFO,
+        logging.INFO,
+    ]
 
 
 def test_default_worker_reuses_one_polling_lifecycle_state_across_cycles(
@@ -398,7 +532,8 @@ def test_worker_retries_an_ordinary_poll_error_without_leaking_it(
     assert stop_event.wait_timeouts == [1.25, 1.25]
     assert failure_record.fields == {"error_code": "poll_cycle_failed"}  # type: ignore[attr-defined]
     assert sensitive_detail not in caplog.text
-    assert [record.getMessage() for record in records].count("poll cycle started") == 2
+    assert [record.getMessage() for record in records].count("poll cycle started") == 0
+    assert [record.getMessage() for record in records].count("poll cycle completed") == 1
     assert records[-1].getMessage() == "worker stopped"
 
 
@@ -438,7 +573,6 @@ def test_worker_propagates_permanent_poll_errors(
     assert stop_event.wait_timeouts == []
     assert [record.getMessage() for record in worker_log_records(caplog)] == [
         "worker started",
-        "poll cycle started",
         "worker stopped",
     ]
 

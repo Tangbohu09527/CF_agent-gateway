@@ -25,8 +25,8 @@ x-runtime: &runtime
   logging:
     driver: json-file
     options:
-      max-size: ${CF_GATEWAY_LOG_MAX_SIZE:-10m}
-      max-file: ${CF_GATEWAY_LOG_MAX_FILES:-5}
+      max-size: ${CF_GATEWAY_LOG_MAX_SIZE:-64m}
+      max-file: ${CF_GATEWAY_LOG_MAX_FILES:-10}
 
 services:
   heartbeat-init:

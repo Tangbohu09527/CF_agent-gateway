@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator, Mapping
+from datetime import UTC, datetime, timedelta
+from threading import Event
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,6 +33,7 @@ from cf_agent_gateway.adapters.wechat.polling_errors import (
 )
 from cf_agent_gateway.adapters.wechat.polling_models import (
     PollFailureStage,
+    PollResult,
     WechatSyncCheckpoint,
 )
 from cf_agent_gateway.adapters.wechat.polling_service import (
@@ -43,6 +46,7 @@ from cf_agent_gateway.adapters.wechat.raw_models import (
     RawWechatMessage,
 )
 from cf_agent_gateway.admission.models import MessageAdmissionOutcome
+from cf_agent_gateway.config import RuntimeSettings, Settings
 from cf_agent_gateway.database import create_database_engine, initialize_database
 from cf_agent_gateway.delivery.models import (
     DeliveryAttempt,
@@ -52,6 +56,7 @@ from cf_agent_gateway.delivery.models import (
 from cf_agent_gateway.ingestion import MessageAdmissionService, MessageStoreAdmissionSink
 from cf_agent_gateway.message.models import Attachment, Message, MessageRawPayload
 from cf_agent_gateway.response.models import ResponseRecord
+from cf_agent_gateway.runtime import worker as runtime_worker_module
 from cf_agent_gateway.task.model.models import HermesDispatchRecord
 
 ACCOUNT_ID = "wxid_gateway"
@@ -272,6 +277,73 @@ def pipeline_counts(session: Session) -> dict[str, int]:
         model.__tablename__: int(session.scalar(select(func.count()).select_from(model)) or 0)
         for model in models
     }
+
+
+def polling_log_counts(caplog: pytest.LogCaptureFixture) -> tuple[int, int, int]:
+    continuity_warnings = sum(
+        record.getMessage() == "checkpoint continuity unverified"
+        and record.levelno == logging.WARNING
+        for record in caplog.records
+    )
+    chat_info = sum(
+        record.name == polling_service_module.__name__
+        and record.getMessage() == "poll chat completed"
+        and record.levelno == logging.INFO
+        for record in caplog.records
+    )
+    cycle_info = sum(
+        record.name == runtime_worker_module.logger.name
+        and record.getMessage() == "poll cycle completed"
+        and record.levelno == logging.INFO
+        for record in caplog.records
+    )
+    return continuity_warnings, chat_info, cycle_info
+
+
+def run_shared_lifecycle_worker_cycles(
+    *,
+    checkpoint_store: WechatSyncCheckpointStore,
+    client: FakeWechatClient,
+    sink: RecordingSink,
+    lifecycle_state: WechatPollingLifecycleState,
+    caplog: pytest.LogCaptureFixture,
+    cycles: int,
+    before_cycle: Callable[[int], None] | None = None,
+) -> tuple[list[PollResult], list[tuple[int, int, int]]]:
+    settings = Settings(runtime=RuntimeSettings(polling_interval_seconds=3))
+    stop_event = Event()
+    results: list[PollResult] = []
+    snapshots: list[tuple[int, int, int]] = []
+    calls = 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal calls
+        assert candidate is settings
+        if calls:
+            snapshots.append(polling_log_counts(caplog))
+        calls += 1
+        if before_cycle is not None:
+            before_cycle(calls)
+        result = WechatPollingService(
+            client,
+            checkpoint_store,
+            sink,
+            lifecycle_state=lifecycle_state,
+        ).poll_once()
+        results.append(result)
+        if calls == cycles:
+            stop_event.set()
+        return result
+
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+    caplog.set_level(logging.INFO, logger=runtime_worker_module.logger.name)
+    runtime_worker_module.run_worker(
+        settings,
+        stop_event=stop_event,
+        poll_once=poll_once,
+    )
+    snapshots.append(polling_log_counts(caplog))
+    return results, snapshots
 
 
 def test_logged_out_does_not_list_chats_or_messages(
@@ -1832,6 +1904,7 @@ def test_checkpoint_recovery_logs_are_structured_and_redacted(
         "checkpoint regression detected",
         "checkpoint regression rebased",
     ]
+    assert [record.levelno for record in events] == [logging.WARNING, logging.WARNING]
     serialized_records = repr([record.__dict__ for record in events])
     assert sensitive_account not in serialized_records
     assert sensitive_chat not in serialized_records
@@ -1862,7 +1935,759 @@ def test_checkpoint_recovery_logs_are_structured_and_redacted(
     assert fields["recovery_action"] == "rebase_latest_visible_window"
 
 
-def test_124_checkpoint_skips_emit_constant_info_logs_and_exact_aggregate(
+def test_idle_chat_summary_is_debug_and_contains_only_redacted_references(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=0,
+    )
+    caplog.set_level(logging.DEBUG, logger=polling_service_module.__name__)
+
+    result = WechatPollingService(
+        FakeWechatClient(messages={CHAT_ID: []}),
+        checkpoint_store,
+        RecordingSink(),
+    ).poll_once()
+
+    summaries = [
+        record for record in caplog.records if record.getMessage() == "poll chat completed"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0].levelno == logging.DEBUG
+    assert result.chat_results[0].succeeded is True
+    assert result.messages_seen == 0
+    assert result.messages_processed == 0
+    serialized = repr(summaries[0].__dict__)
+    assert ACCOUNT_ID not in serialized
+    assert CHAT_ID not in serialized
+    assert (
+        summaries[0]
+        .fields["source_account_id_ref"]
+        .startswith(  # type: ignore[attr-defined]
+            "source_account:sha256:"
+        )
+    )
+    assert (
+        summaries[0]
+        .fields["conversation_id_ref"]
+        .startswith(  # type: ignore[attr-defined]
+            "conversation:sha256:"
+        )
+    )
+
+
+def test_stable_production_history_shape_does_not_repeat_chat_or_cycle_info(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stable_counts = (9, 14, 20, 50, 1, 1)
+    chat_ids = [f"wxid-production-{index:02d}" for index in range(21)]
+    messages: dict[str, list[dict[str, Any]]] = {}
+    for index, chat_id in enumerate(chat_ids):
+        count = stable_counts[index] if index < len(stable_counts) else 0
+        visible = [raw_message(local_id, chat_id=chat_id) for local_id in range(1, count + 1)]
+        messages[chat_id] = visible
+        checkpoint_store.initialize(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=chat_id,
+            last_local_id=count,
+            last_message_fingerprint=(
+                checkpoint_fingerprint(raw_message(count, chat_id=chat_id)) if count else None
+            ),
+        )
+
+    client = FakeWechatClient(
+        chats=[{"id": chat_id} for chat_id in chat_ids],
+        messages=messages,
+    )
+    service = WechatPollingService(client, checkpoint_store, RecordingSink())
+    settings = Settings(runtime=RuntimeSettings(polling_interval_seconds=3))
+    results: list[PollResult] = []
+
+    class StopAfterCycles(Event):
+        def __init__(self, cycles: int) -> None:
+            super().__init__()
+            self._remaining = cycles
+
+        def wait(self, timeout: float | None = None) -> bool:
+            del timeout
+            self._remaining -= 1
+            return self._remaining == 0
+
+    def poll_once(candidate: Settings) -> PollResult:
+        assert candidate is settings
+        result = service.poll_once()
+        results.append(result)
+        return result
+
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+    caplog.set_level(logging.INFO, logger=runtime_worker_module.logger.name)
+    runtime_worker_module.run_worker(
+        settings,
+        stop_event=StopAfterCycles(4),
+        poll_once=poll_once,
+    )
+
+    assert len(results) == 4
+    for result in results:
+        assert result.chats_seen == 21
+        assert result.messages_seen == 95
+        assert result.messages_skipped_by_checkpoint == 95
+        assert result.messages_processed == 0
+        assert result.messages_new == 0
+        assert result.messages_duplicate == 0
+        assert result.messages_failed == 0
+
+    chat_info = [
+        record
+        for record in caplog.records
+        if record.name == polling_service_module.__name__
+        and record.getMessage() == "poll chat completed"
+        and record.levelno == logging.INFO
+    ]
+    cycle_info = [
+        record
+        for record in caplog.records
+        if record.name == runtime_worker_module.logger.name
+        and record.getMessage() == "poll cycle completed"
+        and record.levelno == logging.INFO
+    ]
+    assert len(chat_info) == 6
+    assert sorted(record.fields["messages_seen"] for record in chat_info) == [  # type: ignore[attr-defined]
+        1,
+        1,
+        9,
+        14,
+        20,
+        50,
+    ]
+    assert len(cycle_info) == 1
+    assert cycle_info[0].fields["chats_seen"] == 21  # type: ignore[attr-defined]
+    assert cycle_info[0].fields["messages_seen"] == 95  # type: ignore[attr-defined]
+
+
+def test_checkpoint_history_window_shape_change_reenables_one_info_summary(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=10,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(10)),
+    )
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(8), raw_message(9), raw_message(10)]})
+    service = WechatPollingService(client, checkpoint_store, RecordingSink())
+    caplog.set_level(logging.DEBUG, logger=polling_service_module.__name__)
+
+    service.poll_once()
+    service.poll_once()
+    client.messages[CHAT_ID] = [raw_message(7), raw_message(9), raw_message(10)]
+    service.poll_once()
+
+    summaries = [
+        record for record in caplog.records if record.getMessage() == "poll chat completed"
+    ]
+    assert [record.levelno for record in summaries] == [
+        logging.INFO,
+        logging.DEBUG,
+        logging.INFO,
+    ]
+
+
+def test_persistent_empty_window_continuity_is_deduplicated_across_worker_cycles(
+    checkpoint_store: WechatSyncCheckpointStore,
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat_ids = [f"wxid-empty-{index}" for index in range(5)]
+    for index, chat_id in enumerate(chat_ids, start=1):
+        checkpoint_store.initialize(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=chat_id,
+            last_local_id=index,
+            last_message_fingerprint=checkpoint_fingerprint(raw_message(index, chat_id=chat_id)),
+        )
+
+    client = FakeWechatClient(
+        chats=[{"id": chat_id} for chat_id in chat_ids],
+        messages={chat_id: [] for chat_id in chat_ids},
+    )
+    lifecycle_state = WechatPollingLifecycleState(clock=lambda: EMPTY_WINDOW_OBSERVED_AT)
+    settings = Settings(runtime=RuntimeSettings(polling_interval_seconds=3))
+    stop_event = Event()
+    results: list[PollResult] = []
+    snapshots: list[tuple[int, int, int]] = []
+    calls = 0
+
+    def log_counts() -> tuple[int, int, int]:
+        warnings = sum(
+            record.getMessage() == "checkpoint continuity unverified"
+            and record.levelno == logging.WARNING
+            for record in caplog.records
+        )
+        chat_info = sum(
+            record.name == polling_service_module.__name__
+            and record.getMessage() == "poll chat completed"
+            and record.levelno == logging.INFO
+            for record in caplog.records
+        )
+        cycle_info = sum(
+            record.name == runtime_worker_module.logger.name
+            and record.getMessage() == "poll cycle completed"
+            and record.levelno == logging.INFO
+            for record in caplog.records
+        )
+        return warnings, chat_info, cycle_info
+
+    def poll_once(candidate: Settings) -> PollResult:
+        nonlocal calls
+        assert candidate is settings
+        if calls:
+            snapshots.append(log_counts())
+        calls += 1
+        if calls == 5:
+            changed = checkpoint(
+                checkpoint_store,
+                conversation_id=chat_ids[0],
+            )
+            assert changed is not None
+            changed.last_local_id += 1
+            changed.regression_generation += 1
+            changed.last_message_fingerprint = "f" * 64
+            session.commit()
+
+        result = WechatPollingService(
+            client,
+            checkpoint_store,
+            RecordingSink(),
+            lifecycle_state=lifecycle_state,
+        ).poll_once()
+        results.append(result)
+        if calls == 5:
+            stop_event.set()
+        return result
+
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+    caplog.set_level(logging.INFO, logger=runtime_worker_module.logger.name)
+    runtime_worker_module.run_worker(
+        settings,
+        stop_event=stop_event,
+        poll_once=poll_once,
+    )
+    snapshots.append(log_counts())
+
+    assert len(results) == 5
+    assert all(result.chats_failed == 5 for result in results)
+    assert all(result.messages_seen == 0 for result in results)
+    assert all(
+        not any(key.startswith("continuity_") for key in chat_result.model_dump())
+        for result in results
+        for chat_result in result.chat_results
+    )
+    assert snapshots == [
+        (5, 5, 1),
+        (5, 5, 1),
+        (5, 5, 1),
+        (5, 5, 1),
+        (6, 6, 2),
+    ]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint continuity unverified"
+    ]
+    assert [
+        record.fields["recovery_action"]  # type: ignore[attr-defined]
+        for record in warnings
+    ] == [
+        *(["stop_chat_visible_window_empty"] * 5),
+        "stop_chat_empty_window_marker_unavailable",
+    ]
+    serialized = repr([record.__dict__ for record in warnings])
+    assert ACCOUNT_ID not in serialized
+    assert all(chat_id not in serialized for chat_id in chat_ids)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "fingerprint_none",
+        "fingerprint_empty",
+        "fingerprint_malformed",
+        "clock_raises",
+        "clock_unusable",
+        "clock_backwards",
+    ],
+)
+def test_marker_unavailable_continuity_is_deduplicated_across_worker_cycles(
+    scenario: str,
+    checkpoint_store: WechatSyncCheckpointStore,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    valid_fingerprint = checkpoint_fingerprint(raw_message(15))
+    stored, _ = checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=(None if scenario == "fingerprint_none" else valid_fingerprint),
+    )
+    real_get = checkpoint_store.get
+    if scenario in {"fingerprint_empty", "fingerprint_malformed"}:
+        marker_checkpoint = SimpleNamespace(
+            last_local_id=stored.last_local_id,
+            regression_generation=stored.regression_generation,
+            last_message_fingerprint=("" if scenario == "fingerprint_empty" else "malformed"),
+        )
+        monkeypatch.setattr(
+            checkpoint_store,
+            "get",
+            lambda **kwargs: marker_checkpoint,
+        )
+
+    current_time = [EMPTY_WINDOW_OBSERVED_AT]
+
+    def marker_clock() -> object:
+        if scenario == "clock_raises":
+            raise RuntimeError("controlled marker clock failure")
+        if scenario == "clock_unusable":
+            return datetime(2026, 8, 30, 9, 20)
+        return current_time[0]
+
+    lifecycle_state = WechatPollingLifecycleState(clock=marker_clock)
+    if scenario == "clock_backwards":
+        lifecycle_state.observe_account(ACCOUNT_ID)
+        assert lifecycle_state.record_empty_window(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            checkpoint=stored,
+        )
+        current_time[0] = EMPTY_WINDOW_OBSERVED_AT.replace(second=0) - timedelta(seconds=1)
+
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    initial_checkpoint = (
+        stored.last_local_id,
+        stored.regression_generation,
+        stored.last_message_fingerprint,
+    )
+    initial_pipeline = pipeline_counts(session)
+
+    results, snapshots = run_shared_lifecycle_worker_cycles(
+        checkpoint_store=checkpoint_store,
+        client=client,
+        sink=sink,
+        lifecycle_state=lifecycle_state,
+        caplog=caplog,
+        cycles=4,
+    )
+
+    assert snapshots == [(1, 1, 1)] * 4
+    assert all(result.chats_failed == 1 for result in results)
+    assert all(result.messages_processed == 0 for result in results)
+    assert all(result.messages_new == 0 for result in results)
+    assert all(result.messages_duplicate == 0 for result in results)
+    assert all(result.chat_results[0].continuity_only for result in results)
+    assert sink.attempts == []
+    assert pipeline_counts(session) == initial_pipeline
+    persisted = real_get(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+    )
+    assert persisted is not None
+    assert (
+        persisted.last_local_id,
+        persisted.regression_generation,
+        persisted.last_message_fingerprint,
+    ) == initial_checkpoint
+    warnings = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint continuity unverified"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].fields["recovery_action"] == (  # type: ignore[attr-defined]
+        "stop_chat_empty_window_marker_unavailable"
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint regression live suffix started"
+    ]
+    counts = lifecycle_state.observation_counts()
+    assert counts["empty_markers"] == 0
+    assert counts["pending_windows"] == 0
+    assert counts["history"] == 0
+    assert counts["continuity"] == 1
+    assert counts["marker_clock_watermarks"] == (1 if scenario == "clock_backwards" else 0)
+
+
+def test_marker_mismatch_rejects_marker_without_resetting_continuity(
+    checkpoint_store: WechatSyncCheckpointStore,
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored, _ = checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+        last_message_fingerprint=checkpoint_fingerprint(raw_message(15)),
+    )
+    stale_marker_checkpoint = SimpleNamespace(
+        last_local_id=stored.last_local_id,
+        regression_generation=stored.regression_generation,
+        last_message_fingerprint="f" * 64,
+    )
+    lifecycle_state = WechatPollingLifecycleState(clock=lambda: EMPTY_WINDOW_OBSERVED_AT)
+    lifecycle_state.observe_account(ACCOUNT_ID)
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    initial_pipeline = pipeline_counts(session)
+
+    def seed_mismatched_marker(cycle: int) -> None:
+        del cycle
+        assert lifecycle_state.record_empty_window(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=CHAT_ID,
+            checkpoint=stale_marker_checkpoint,
+        )
+
+    results, snapshots = run_shared_lifecycle_worker_cycles(
+        checkpoint_store=checkpoint_store,
+        client=client,
+        sink=sink,
+        lifecycle_state=lifecycle_state,
+        caplog=caplog,
+        cycles=4,
+        before_cycle=seed_mismatched_marker,
+    )
+
+    assert snapshots == [(1, 1, 1)] * 4
+    assert all(result.messages_processed == 0 for result in results)
+    assert all(result.messages_new == 0 for result in results)
+    assert sink.attempts == []
+    assert pipeline_counts(session) == initial_pipeline
+    persisted = checkpoint(checkpoint_store)
+    assert persisted is not None
+    assert (
+        persisted.last_local_id,
+        persisted.regression_generation,
+        persisted.last_message_fingerprint,
+    ) == (
+        stored.last_local_id,
+        stored.regression_generation,
+        stored.last_message_fingerprint,
+    )
+    assert lifecycle_state.observation_counts() == {
+        "chats": 1,
+        "empty_markers": 0,
+        "marker_clock_watermarks": 1,
+        "pending_windows": 0,
+        "history": 0,
+        "continuity": 1,
+    }
+    warning = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint continuity unverified"
+    )
+    assert warning.fields["recovery_action"] == (  # type: ignore[attr-defined]
+        "stop_chat_empty_window_marker_unavailable"
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint regression live suffix started"
+    ]
+
+
+def test_marker_unavailable_checkpoint_change_reemits_once(
+    checkpoint_store: WechatSyncCheckpointStore,
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored, _ = checkpoint_store.initialize(
+        source_account_id=ACCOUNT_ID,
+        conversation_id=CHAT_ID,
+        last_local_id=15,
+    )
+    client = FakeWechatClient(messages={CHAT_ID: []})
+    sink = RecordingSink()
+    lifecycle_state = WechatPollingLifecycleState(clock=lambda: EMPTY_WINDOW_OBSERVED_AT)
+    initial_pipeline = pipeline_counts(session)
+
+    def mutate_checkpoint(cycle: int) -> None:
+        if cycle != 5:
+            return
+        persisted = checkpoint(checkpoint_store)
+        assert persisted is not None
+        assert (persisted.last_local_id, persisted.regression_generation) == (15, 0)
+        assert pipeline_counts(session) == initial_pipeline
+        persisted.last_local_id = 16
+        persisted.regression_generation = 1
+        session.commit()
+
+    results, snapshots = run_shared_lifecycle_worker_cycles(
+        checkpoint_store=checkpoint_store,
+        client=client,
+        sink=sink,
+        lifecycle_state=lifecycle_state,
+        caplog=caplog,
+        cycles=5,
+        before_cycle=mutate_checkpoint,
+    )
+
+    assert snapshots == [(1, 1, 1)] * 4 + [(2, 2, 2)]
+    assert all(result.messages_processed == 0 for result in results)
+    assert all(result.messages_new == 0 for result in results)
+    assert sink.attempts == []
+    assert pipeline_counts(session) == initial_pipeline
+    persisted = checkpoint(checkpoint_store)
+    assert persisted is not None
+    assert (
+        persisted.last_local_id,
+        persisted.regression_generation,
+        persisted.last_message_fingerprint,
+    ) == (16, 1, None)
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage() == "checkpoint regression live suffix started"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("checkpoint_local_id", 11),
+        ("checkpoint_generation", 3),
+        ("checkpoint_fingerprint", "b" * 64),
+        ("remote_first_local_id", 1),
+        ("remote_latest_local_id", 2),
+        ("recovery_action", "stop_chat_anchor_ambiguous"),
+        ("failure_code", "changed_continuity_failure"),
+    ],
+)
+def test_continuity_signature_change_is_detected(
+    field: str,
+    changed_value: object,
+) -> None:
+    lifecycle_state = WechatPollingLifecycleState()
+    lifecycle_state.observe_account(ACCOUNT_ID)
+    signature: dict[str, object] = {
+        "source_account_id": ACCOUNT_ID,
+        "conversation_id": CHAT_ID,
+        "checkpoint_local_id": 10,
+        "checkpoint_generation": 2,
+        "checkpoint_fingerprint": "a" * 64,
+        "remote_first_local_id": 0,
+        "remote_latest_local_id": 0,
+        "recovery_action": "stop_chat_visible_window_empty",
+        "failure_code": WechatCheckpointContinuityError.code,
+    }
+
+    first_changed, _ = lifecycle_state.observe_continuity_failure(**signature)  # type: ignore[arg-type]
+    repeated_changed, _ = lifecycle_state.observe_continuity_failure(**signature)  # type: ignore[arg-type]
+    signature[field] = changed_value
+    changed, _ = lifecycle_state.observe_continuity_failure(**signature)  # type: ignore[arg-type]
+
+    assert first_changed is True
+    assert repeated_changed is False
+    assert changed is True
+
+
+def test_continuity_observation_resets_for_account_and_new_lifecycle() -> None:
+    def observe(
+        state: WechatPollingLifecycleState,
+        account_id: str,
+    ) -> tuple[bool, str]:
+        state.observe_account(account_id)
+        return state.observe_continuity_failure(
+            source_account_id=account_id,
+            conversation_id=CHAT_ID,
+            checkpoint_local_id=10,
+            checkpoint_generation=2,
+            checkpoint_fingerprint="a" * 64,
+            remote_first_local_id=0,
+            remote_latest_local_id=0,
+            recovery_action="stop_chat_visible_window_empty",
+            failure_code=WechatCheckpointContinuityError.code,
+        )
+
+    lifecycle_state = WechatPollingLifecycleState()
+    first_changed, first_ref = observe(lifecycle_state, ACCOUNT_ID)
+    repeated_changed, repeated_ref = observe(lifecycle_state, ACCOUNT_ID)
+    account_changed, account_ref = observe(lifecycle_state, "wxid-other-account")
+    restarted_changed, restarted_ref = observe(
+        WechatPollingLifecycleState(),
+        ACCOUNT_ID,
+    )
+
+    assert first_changed is True
+    assert repeated_changed is False
+    assert repeated_ref == first_ref
+    assert account_changed is True
+    assert account_ref != first_ref
+    assert restarted_changed is True
+    assert restarted_ref == first_ref
+
+
+def test_chat_removed_from_list_chats_is_pruned_from_lifecycle_state(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    chat_ids = ("wxid-empty-a", "wxid-empty-b")
+    for index, chat_id in enumerate(chat_ids, start=1):
+        checkpoint_store.initialize(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=chat_id,
+            last_local_id=index,
+            last_message_fingerprint=checkpoint_fingerprint(raw_message(index, chat_id=chat_id)),
+        )
+    client = FakeWechatClient(
+        chats=[{"id": chat_id} for chat_id in chat_ids],
+        messages={chat_id: [] for chat_id in chat_ids},
+    )
+    lifecycle_state = WechatPollingLifecycleState(clock=lambda: EMPTY_WINDOW_OBSERVED_AT)
+
+    first = WechatPollingService(
+        client,
+        checkpoint_store,
+        RecordingSink(),
+        lifecycle_state=lifecycle_state,
+    ).poll_once()
+    client.chats = [{"id": chat_ids[0]}]
+    second = WechatPollingService(
+        client,
+        checkpoint_store,
+        RecordingSink(),
+        lifecycle_state=lifecycle_state,
+    ).poll_once()
+
+    assert first.chats_failed == 2
+    assert second.chats_failed == 1
+    assert lifecycle_state.observation_counts() == {
+        "chats": 1,
+        "empty_markers": 1,
+        "marker_clock_watermarks": 1,
+        "pending_windows": 0,
+        "history": 0,
+        "continuity": 1,
+    }
+
+
+def test_prune_chats_removes_all_process_lifetime_state_kinds() -> None:
+    lifecycle_state = WechatPollingLifecycleState(clock=lambda: EMPTY_WINDOW_OBSERVED_AT)
+    lifecycle_state.observe_account(ACCOUNT_ID)
+    marker = SimpleNamespace(
+        last_local_id=1,
+        regression_generation=0,
+        last_message_fingerprint="a" * 64,
+    )
+    lifecycle_state.record_empty_window(
+        source_account_id=ACCOUNT_ID,
+        conversation_id="empty",
+        checkpoint=marker,
+    )
+    lifecycle_state.record_visible_window(
+        source_account_id=ACCOUNT_ID,
+        conversation_id="pending",
+        local_ids=(1,),
+    )
+    lifecycle_state.record_visible_window(
+        source_account_id=ACCOUNT_ID,
+        conversation_id="history",
+        local_ids=(1,),
+    )
+    lifecycle_state.chat_result_log_level(
+        source_account_id=ACCOUNT_ID,
+        result=polling_service_module.ChatPollResult(
+            conversation_id="history",
+            succeeded=True,
+            messages_seen=1,
+            messages_skipped_by_checkpoint=1,
+        ),
+    )
+    lifecycle_state.observe_continuity_failure(
+        source_account_id=ACCOUNT_ID,
+        conversation_id="continuity",
+        checkpoint_local_id=1,
+        checkpoint_generation=0,
+        checkpoint_fingerprint="b" * 64,
+        remote_first_local_id=0,
+        remote_latest_local_id=0,
+        recovery_action="stop_chat_visible_window_empty",
+        failure_code=WechatCheckpointContinuityError.code,
+    )
+
+    assert lifecycle_state.observation_counts() == {
+        "chats": 4,
+        "empty_markers": 1,
+        "marker_clock_watermarks": 1,
+        "pending_windows": 1,
+        "history": 1,
+        "continuity": 1,
+    }
+    lifecycle_state.prune_chats(
+        source_account_id=ACCOUNT_ID,
+        conversation_ids=("history",),
+    )
+    assert lifecycle_state.observation_counts() == {
+        "chats": 1,
+        "empty_markers": 0,
+        "marker_clock_watermarks": 0,
+        "pending_windows": 0,
+        "history": 1,
+        "continuity": 0,
+    }
+    lifecycle_state.prune_chats(
+        source_account_id=ACCOUNT_ID,
+        conversation_ids=(),
+    )
+    assert lifecycle_state.observation_counts() == {
+        "chats": 0,
+        "empty_markers": 0,
+        "marker_clock_watermarks": 0,
+        "pending_windows": 0,
+        "history": 0,
+        "continuity": 0,
+    }
+
+
+def test_continuity_chat_churn_is_bounded() -> None:
+    lifecycle_state = WechatPollingLifecycleState()
+    lifecycle_state.observe_account(ACCOUNT_ID)
+    limit = polling_service_module._MAX_LIFECYCLE_CHAT_STATES
+
+    for index in range(limit + 200):
+        lifecycle_state.observe_continuity_failure(
+            source_account_id=ACCOUNT_ID,
+            conversation_id=f"wxid-temporary-{index}",
+            checkpoint_local_id=index + 1,
+            checkpoint_generation=0,
+            checkpoint_fingerprint="c" * 64,
+            remote_first_local_id=0,
+            remote_latest_local_id=0,
+            recovery_action="stop_chat_visible_window_empty",
+            failure_code=WechatCheckpointContinuityError.code,
+        )
+
+    assert lifecycle_state.cached_chat_count == limit
+    assert lifecycle_state.observation_counts() == {
+        "chats": limit,
+        "empty_markers": 0,
+        "marker_clock_watermarks": 0,
+        "pending_windows": 0,
+        "history": 0,
+        "continuity": limit,
+    }
+
+
+def test_124_checkpoint_skips_emit_one_initial_info_summary_and_exact_aggregate(
     checkpoint_store: WechatSyncCheckpointStore,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1894,6 +2719,36 @@ def test_124_checkpoint_skips_emit_constant_info_logs_and_exact_aggregate(
     assert result.messages_skipped_by_checkpoint == 124
     assert info_records[0].fields["messages_seen"] == 124
     assert info_records[0].fields["messages_skipped_checkpoint"] == 124
+
+
+def test_failed_chat_summary_remains_info_without_exception_detail(
+    checkpoint_store: WechatSyncCheckpointStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_detail = "private upstream response body"
+
+    class FailingListClient(FakeWechatClient):
+        def list_messages(self, chat_id: str) -> list[RawWechatMessage | Mapping[str, Any]]:
+            del chat_id
+            raise RuntimeError(sensitive_detail)
+
+    caplog.set_level(logging.INFO, logger=polling_service_module.__name__)
+
+    result = WechatPollingService(
+        FailingListClient(),
+        checkpoint_store,
+        RecordingSink(),
+    ).poll_once()
+
+    summaries = [
+        record for record in caplog.records if record.getMessage() == "poll chat completed"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0].levelno == logging.INFO
+    assert summaries[0].fields["succeeded"] is False  # type: ignore[attr-defined]
+    assert summaries[0].fields["failure_count"] == 1  # type: ignore[attr-defined]
+    assert result.chats_failed == 1
+    assert sensitive_detail not in repr(summaries[0].__dict__)
 
 
 def test_message_skip_logs_are_debug_and_chat_summary_has_exact_counts(

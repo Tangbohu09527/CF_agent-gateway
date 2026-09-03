@@ -272,10 +272,10 @@ def test_python_module_entrypoint_exits_two_when_runtime_is_disabled(tmp_path: P
     payloads = [json.loads(line) for line in completed.stderr.splitlines()]
     assert [payload["message"] for payload in payloads] == [
         "worker started",
-        "poll cycle started",
         "worker stopped",
         "worker failed",
     ]
+    assert [payload["level"] for payload in payloads] == ["INFO", "INFO", "ERROR"]
     assert payloads[-1]["error_code"] == "wechat_runtime_disabled"
 
 
