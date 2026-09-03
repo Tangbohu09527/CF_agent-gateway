@@ -1,252 +1,83 @@
-# V2 runtime troubleshooting
+# Troubleshooting
 
-Start with these redacted signals:
+## Safe inspection
 
-```bash
-curl --fail --silent --show-error http://127.0.0.1:8080/health
-curl --silent --show-error http://127.0.0.1:8080/ready
-curl --silent --show-error http://127.0.0.1:8080/health/runtime
-```
-
-Then inspect structured service logs and durable facts through authenticated APIs. Do
-not paste tokens, Authorization/Cookie headers, message bodies, raw account/chat IDs,
-database URLs or raw upstream responses into an incident ticket. Production Compose keeps
-`docker logs` available and defaults to 64 MiB across 10 files per container; use
-`docker compose logs --since 168h <service>` to collect the retained seven-day window.
-The capacity is bounded and does not replace database audit/recovery evidence.
-
-## Messages seen but none processed
-
-**Signal:** poll summary has `messages_seen > 0` and `messages_processed = 0`.
-
-1. Check skip counters for checkpoint, self and bootstrap decisions.
-2. Search for `checkpoint regression detected`, `checkpoint regression recovered`,
-   `checkpoint anchor enrolled`, or `checkpoint continuity unverified`.
-3. Compare only local ID bounds and hashed account/conversation references in logs.
-4. Check `components.wechat_checkpoint_continuity` in runtime health.
-
-Completely idle chat/cycle summaries and cycle starts are DEBUG. A checkpoint-only visible
-window produces one INFO summary when first seen or when its local-ID sequence/count
-changes; identical later windows are DEBUG. Self skips, bootstrap, duplicate/new/failed
-messages, or other activity still produce one INFO summary, not one INFO record per
-message. Raising the Gateway polling logger to DEBUG should be a temporary targeted
-diagnostic rather than the normal production level. Root DEBUG does not restore
-`httpx`/`httpcore`/Alembic records because those named loggers remain pinned to WARNING.
-
-For `stop_chat_visible_window_empty` or another recognized continuity-only fail-closed
-state, expect one WARNING/chat INFO/cycle INFO burst on first observation or signature
-change, then no repeated WARNING/INFO while the state is identical. There is no hourly
-reminder. If warnings repeat every three seconds with an unchanged signature, confirm all
-poll cycles share one `WechatPollingLifecycleState`; a new per-cycle state defeats
-deduplication. Ordinary auth, list, parse, database, network, and unknown failures are not
-continuity-only and must continue to appear every occurrence.
-
-If `stop_chat_empty_window_marker_unavailable` repeats every cycle, inspect whether
-Marker rejection is calling complete Chat invalidation. Missing/malformed fingerprint,
-clock failure/naive/backwards time, and marker mismatch must use Marker-only invalidation:
-remove empty-marker/pending/history evidence, retain continuity observation and the safe
-clock watermark, and continue fail-closed. Do not manufacture a fingerprint or clear the
-checkpoint to make live-suffix processing start.
-
-If the visible maximum is below the checkpoint, or a saved anchor mismatches at the same
-local ID, one poller should CAS-rewind and increment generation. An empty window does not
-prove reset. A legacy checkpoint without any verified anchor can remain degraded. Do not
-set `last_local_id=0`, change bootstrap mode to `latest`, or delete the checkpoint.
-
-## Checkpoint recovery repeats or never wins
-
-Repeated `CAS result=false` normally means another poller won. Confirm that duplicate
-resident/one-cycle pollers are not running and reload the current checkpoint. If every
-cycle reports conflict without progress, stop duplicate pollers gracefully and restart
-one resident worker. Preserve checkpoint history and Message rows.
-
-The absence of `serverId` alone no longer makes continuity unverifiable. The poller can
-store a content-free fallback digest of local ID, sender ID, raw type, UTC timestamp, and
-self flag inside the checkpoint's account/conversation scope. That anchor is separate from
-generation-scoped Message identity and lets the next cycle confirm the checkpoint.
-
-Continuity still fails closed if the anchor local ID is absent/duplicated or required
-non-content fields are unavailable. Identical warnings are process-local deduplicated, so
-a restart or changed state can warn again but a stable ambiguous window does not warn every
-three seconds. Escalate rather than synthesizing an anchor from message text, nickname, or
-a timestamp alone.
-
-## Admission repeats or an old denial creates work
-
-Inspect `message_admission_outcomes` through approved read-only database tooling:
-
-- no row means the Message committed before admission started;
-- a live `pending` lease must not be stolen;
-- a free/expired `pending` row can replay from its stored request snapshot;
-- completed `denied` or `legacy_unresolved` must return the stored result without
-  current policy/routing evaluation;
-- completed `allowed` must retain complete identity/Workspace/AIThread targets and at most
-  repair its same idempotent dispatch.
-
-If an allowed outcome exists without a dispatch, normal replay is the repair path. If a
-completed denial changes or a second outcome appears, stop the WeChat worker and preserve
-the Message, outcome, policy, and dispatch facts: that is a database/application invariant
-violation. Do not mark the outcome pending or enqueue historical work with SQL.
-
-## Dispatch queue stops on one thread
-
-**Signal:** `dispatch.uncertain > 0` or `dispatch.blocked_threads > 0` while other threads
-may continue.
-
-Inspect the head record with `GET /admin/dispatches/{id}`. An `uncertain` outcome is not
-a retryable failure. Follow [runtime-recovery.md](runtime-recovery.md) and choose exactly
-one audited action after checking Hermes evidence:
-
-- `retry-approved` only when Hermes did not execute;
-- `mark-dead` when retry is unsafe and success cannot be proved;
-- `confirm-success` only with matching persisted response evidence.
-
-Never translate `uncertain` to `failed` with SQL.
-
-## Dispatch is stale running
-
-**Signal:** `dispatch.stale_running > 0`.
-
-Check dispatch-worker heartbeat and process logs. A stale record within retry budget is
-eligible for fenced takeover. A new owner receives a new claim token; the old owner
-cannot commit. If an external Hermes effect may have happened, the recovered outcome
-must become `uncertain`, not an assumed failure. Investigate persistent stale records for
-database connectivity, a stuck Hermes call, lease renewal loss, or retry exhaustion.
-
-## Failed or dead dispatch grows
-
-Check stable `last_error_code`, attempt count, oldest backlog age and Hermes component
-state. Definite failures retry only to `worker.retry_limit + 1` total attempts. Exhausted
-records become `dead` and release FIFO. A poison candidate is deprioritized by attempt
-count so it should not starve unrelated work. Fix the underlying configuration/service;
-do not reset attempts or delete dead records.
-
-## Response exists but delivery is missing
-
-**Signal:** `dispatch.missing_delivery` or `delivery.missing_delivery` is nonzero.
-
-Confirm the dispatch response and normalized response belong to the same message,
-Workspace and AIThread. Run the existing response/outbox reconciliation path under site
-procedure. It must create only the absent delivery fact. Do not call Hermes again, insert
-a second response, or send directly to WeChat.
-
-## Reconciliation is deferred or poison
-
-**Signal:** `dispatch.reconciliation_deferred > 0`,
-`dispatch.reconciliation_poison > 0`, or reconciliation age continues to grow.
-
-The resident scan runs no more than once every five seconds. Candidate failures persist a
-stable error and back off for 30, 60, 120, then 240 seconds. Failure five quarantines the
-record, so restart does not recreate a high-frequency ERROR loop. Later candidates should
-continue because the cursor advances past the poison record.
-
-Confirm the dispatch is already `success` with its claim-fenced dispatch response, then
-investigate why normalized response or delivery reconstruction is invalid. Do not call
-Hermes again or clear quarantine fields by ad-hoc SQL. Quarantine has no generic force
-endpoint; assign a reviewed corrective code/data change and preserve the failure evidence.
-
-## Delivery is stale or uncertain
-
-**Signal:** `delivery.stale_delivering > 0` or `delivery.uncertain > 0`.
-
-Review delivery attempt and provider receipt evidence. A stale claim with no outbound
-attempt can be reclaimed; an attempt with an ambiguous send result becomes `uncertain`
-to prevent duplicate replies. Do not force retry until the channel outcome is proven.
-Definite retryable errors use the existing bounded delivery policy.
-
-## Worker heartbeat missing or stale
-
-Confirm that the Gateway health process points to the same heartbeat path written by
-each worker:
-
-```text
-CF_GATEWAY_WECHAT_HEARTBEAT_PATH
-CF_GATEWAY_DISPATCH_HEARTBEAT_PATH
-CF_GATEWAY_DELIVERY_HEARTBEAT_PATH
-```
-
-Check service configuration, filesystem permissions, clock skew and recent structured
-logs. A live PID with a stale heartbeat can be stuck and is unhealthy. Gracefully stop
-and restart only the affected worker; preserve the heartbeat and logs for the incident.
-Claim fencing handles stale owners. Do not run an ad-hoc one-cycle command alongside the
-resident process.
-
-For Compose, inspect the exited `heartbeat-init` service before restarting a Worker. It
-must have exited zero, the shared directory must be owned by `10001:10001` with mode `0750`,
-and each heartbeat file must be owned by `10001:10001` with mode `0600`. The Gateway mount
-must remain read-only. Never repair this with `chmod 777` or by running a Worker as root.
-If the initial heartbeat write fails, the Worker fails startup before doing business work;
-after startup, three consecutive write failures make it exit for supervised recovery.
-
-## Hermes is idle or degraded
-
-`ok/no_recent_observation` means Hermes is configured, the dispatch Worker heartbeat is
-healthy, and there is no fresh real-operation observation. It is normal in a low-traffic
-period and is not proof that Hermes is reachable. A recent explicit failure is
-`degraded/last_operation_failed`. Missing configuration is
-`degraded/unconfigured/unverified`; a missing/stale dispatch Worker is independently
-degraded. Use only an approved controlled business call for connectivity evidence; Runtime
-Health does not send a synthetic Hermes request.
-
-## `/ready` fails or database is unavailable
-
-Check network/DNS/TLS, PostgreSQL availability and connection-pool errors without
-printing the connection string. `/ready` uses a cached database probe so it does not
-block every HTTP request on a hung connection. Workers should be supervised and recover
-through a new process/cycle when PostgreSQL returns. Preserve ambiguity for any external
-call that overlapped the outage.
-
-## Migration schema mismatch
-
-Stop all four application processes. Run:
+Set only non-secret operator variables:
 
 ```bash
-python -m alembic heads
-python -m alembic current --verbose
-python -m alembic check
+export RELEASE_DIR=/opt/cf-agent-gateway
+export COMPOSE_FILE=docker-compose.prod.yml
+export CONTROLLER="${RELEASE_DIR}/deploy/wechat-runtime-control"
+export GATEWAY_URL=http://localhost:8080
+cd "${RELEASE_DIR}"
 ```
 
-Expected head is `20260823_04` and there must be exactly one head. Use only the packaged
-migration runner in an exclusive window. A partial checkpoint-generation schema is
-rejected deliberately. Restore from backup or repair under a reviewed database change;
-do not stamp an unknown schema, run standalone SQL, or invoke `create_all`.
+Useful read-only checks:
 
-Revision `20260823_03` also rejects partial admission schema/backfill, and
-`20260823_04` rejects inconsistent manual-retry/audit evidence. A downgrade must fail if
-runtime admission evidence, any recovery audit, or reconciliation failure/quarantine facts
-would be discarded. Prefer an application rollback that leaves the database at head or
-restore the tested pre-upgrade backup.
+```bash
+docker compose -f "${COMPOSE_FILE}" --profile worker ps
+sudo -n "${CONTROLLER}" status
+curl --silent --show-error --max-time 3 "${GATEWAY_URL}/health"
+curl --silent --show-error --max-time 3 "${GATEWAY_URL}/ready"
+curl --silent --show-error --max-time 5 "${GATEWAY_URL}/health/runtime"
+```
 
-Offline `alembic downgrade ... --sql` is intentionally disabled for every revision range:
-without a database transaction the runner cannot prove that protected evidence is absent.
-Use an online, evidence-checked downgrade only during an exclusive approved maintenance
-window. Do not work around the guard by selecting an older revision range; restore the
-verified pre-upgrade backup when an online downgrade cannot be proven safe.
+Preserve relevant structured logs in a protected evidence directory before container
+recreation. Do not print the protected environment file, Token File, database URL,
+Authorization header, message content, personal identity, or raw account/chat/conversation
+ID.
 
-## Authentication or request rejection
+## Fault table
 
-- `401` on Message API: verify the environment variable named by `api.token_env` exists
-  and the client sends one well-formed Bearer header.
-- `401` on Admin API: verify `CF_AGENT_GATEWAY_ADMIN_TOKEN` exists and is separate from
-  the Message API secret.
-- `403` on Admin API: the trusted identity is authenticated but lacks `admin` role.
-- `413`: reduce the body; the default application/Admin body limit is 1 MiB.
-- `422`: correct field lengths, control characters, secret-like values or extra fields.
-- `409` on recovery: another CAS action won, current status is not `uncertain`, evidence
-  is missing/mismatched, or an idempotency reference was reused inconsistently.
+| Symptom | Read-only checks | Likely classification | Safe action | Verification | Do not do |
+| --- | --- | --- | --- | --- | --- |
+| Message not ingested | Controller status; Poll heartbeat and last-cycle detail; `wechat_auth`; Checkpoint continuity; Message count delta; protected Poll logs | Gate closed; Poll stopped/stale; external session logged out; continuity failed closed; self/system/old Message filtered | Close gate if state is ambiguous. Restore external login/Token/dependency state. Start gated Workers only through Controller. For continuity, restore trustworthy history/Marker conditions and let the runtime decide | Controller ready; Poll heartbeat fresh; expected Checkpoint advances once; one authorized test Message persists once | Do not reset/delete the Checkpoint, edit local IDs, replay raw payloads manually, or expose message content |
+| Admission denied | Authenticated Admin Message/Thread view; durable Admission Outcome reason/policy evidence; identity and route configuration references | Expected policy denial; unmapped Identity; group mention absent; Agent Profile/Group Type route unavailable; historical completed denial replay | Correct future identity/policy/route configuration through the owning process. Treat the completed outcome as authoritative for that Message | A new approved Message receives the expected result; the original completed denial remains unchanged on replay | Do not rewrite the old outcome, change the sender identity, or delete/reinsert the Message to force reevaluation |
+| Hermes Dispatch queued | Dispatch heartbeat; Hermes configuration/connectivity; queued/running/failed/uncertain counts; oldest backlog; earlier same-Thread record | Worker stopped/stale; Hermes unavailable; FIFO blocked by earlier work; concurrency saturation | Restore Dispatch Worker or Hermes. Resolve any earlier `uncertain` record from evidence. Allow normal claim/FIFO logic to proceed | Dispatch heartbeat fresh; oldest backlog decreases; one Thread never has overlapping running work | Do not jump queue order, set status by SQL, or create a second Dispatch |
+| Hermes Dispatch running too long | Lease timestamp and `stale_running`; Dispatch heartbeat; protected logs; external Hermes evidence | Active bounded call; stale lease after Worker loss; possible external effect | Let fenced lease recovery handle an expired running record. If outcome may be external/ambiguous, preserve evidence and expect `uncertain` | One claim token owns the terminal write; attempt count and status transition are consistent | Do not clear the lease, reuse a claim token, or manually invoke Hermes |
+| Hermes Dispatch uncertain | Admin Dispatch inspection: response/evidence flags, blocking status, attempts, timestamps; external Hermes evidence | Possible external effect; same-Thread work intentionally blocked | Choose one authenticated action: `retry-approved` only after non-execution proof, `mark-dead`, or `confirm-success` with matching persisted evidence | One CAS winner, one immutable audit row, correct resulting status, no automatic retry | Do not auto-retry, paste assistant content into recovery, fabricate evidence, or delete the Dispatch |
+| Response persisted but not delivered | `missing_delivery`; reconciliation backlog/deferred/poison; Delivery counts/heartbeat; Admin Delivery and response parts; Artifact state | Missing normalized Response/Delivery; deferred/quarantined reconciliation; Delivery Worker stopped; failed/uncertain channel send | Let reconciliation repair from persisted successful Dispatch evidence. Restore Delivery through Controller. Resolve Delivery ambiguity without another Hermes call | One Response/Delivery boundary, ordered parts, durable attempts/receipts, Dispatch remains success | Do not call Hermes again, delete the response, reset part ordinal, or resend an uncertain part manually |
+| Worker heartbeat stale | Runtime components; Controller status for Poll/Delivery; Compose health; last operation/cycle detail; protected service logs | Worker process stopped; invalid/missing heartbeat; blocked external call; alive but failed last cycle | Preserve evidence. Poll/Delivery: Controller stop/start. Dispatch: approved Compose recreation after checking claims and ambiguity | Correct heartbeat file advances, runtime component returns ok, queue state remains consistent | Do not treat container existence as health or point two Workers at one heartbeat file |
+| agent-wechat logged out | `wechat_auth`; Controller status; external owner's session check | External authenticated session lost, often after host reboot or session invalidation | Close Poll/Delivery Gate. Complete fresh QR through the external owner. Validate Token File contract. Open gate with Controller | `wechat_auth: logged_in`; Controller ready; controlled Message processed once | Do not leave Poll/Delivery running during fresh QR, expose QR/account/session data, or loosen Token File permissions |
+| Controller `ready=false` | Exact five fields; Compose state; Poll/Delivery health; heartbeat age; protected Token source metadata | Controlled container not healthy; stale/missing heartbeat; invalid Token File mount/source; startup timeout | Controller stop; repair only the classified release/Token/session issue; Controller start and status | Both health fields healthy, heartbeat age fresh, Token Contract valid, ready true | Do not start controlled containers directly, add an ordinary user to the Docker group, or print the Token |
+| Checkpoint continuity warning | Error code/action; generation; anchor-present flag; visible-window/Marker classification; Sink and mutation counters | Legacy anchor absent; ambiguous overlap; proven regression awaiting safe transition; Marker unavailable/invalid; CAS conflict | Keep affected chat fail closed. Restore trustworthy upstream window, session, and clock/Marker conditions. Allow code-managed enrollment/recovery | No Sink/mutation during ambiguity; proven continuity advances once; unchanged warning signature is deduplicated | Do not hand-edit Checkpoint/generation/fingerprint, infer continuity from message content, or delete history |
+| Logs rotate too quickly | Docker log config for each service; host free space; actual protected daily volume; service count; current retention model | Wrong `max-size`/file count; traffic/log shape above model; disk pressure; unexpected routine logs | Preserve evidence, correct approved Compose settings, recalculate busiest-service retention, and redeploy through the normal release procedure | Every service uses `json-file` with `64m` x `10`; observed daily volume clears the required window and host capacity | Do not expand retention without disk review, copy logs to public storage, or treat logs as the only recovery authority |
+| Database revision mismatch | `/ready`; runtime `migration_schema`; approved Alembic `current` and `heads`; release image identity | Migration job not run; wrong database/release; partial or unsupported schema; multiple heads | Close all application processing, verify target without printing URL, restore backup if required, run only the release migration service | One head `20260823_04`; Gateway/Workers in check mode; aggregate counts unchanged as expected | Do not stamp an unknown database, use `create_all`, run ad hoc DDL, delete evidence to permit downgrade, or start Workers |
+| Failed deployment requires rollback | Current/previous release/image identity; schema compatibility; preserved health/log/queue evidence; backup identifier | Application incompatibility; migration failure; Controller contract failure; external dependency incident misclassified as release | Close gate, stop Gateway/Dispatch, preserve evidence, activate intact previous release and immutable image, prefer forward schema, verify before reopening gate | Previous release ready; schema accepted; queue/Checkpoint facts retained; external session ready; Controller ready | Do not reconstruct from a dirty tree, use `--remove-orphans` without topology review, delete rows, or claim a restore drill that was not run |
 
-Authentication failures must not change durable state. Rotate any credential that was
-accidentally written into a reason/reference or log, then remove it through the site's
-approved incident process rather than rewriting migration/history.
+## Additional interpretations
 
-## Time appears wrong
+### Runtime status is degraded but HTTP is 200
 
-Debian host time is displayed as `Asia/Shanghai`; containers, PostgreSQL and persisted
-timestamps remain UTC. Confirm the display layer conversion and timezone-aware client
-parsing. Do not change the PostgreSQL timezone to make a dashboard look correct.
+This is expected behavior. `/health/runtime` uses HTTP 503 only for database or migration
+schema failure. A stale Worker, logged-out WeChat session, failed/uncertain queue item, or
+missing Delivery produces top-level `degraded` with HTTP 200 so operators can read the
+redacted diagnosis.
 
-## Escalation bundle
+### Hermes says no recent observation
 
-Provide release SHA, Alembic revision, UTC incident interval, `/health/runtime` snapshot,
-hashed account/conversation references, dispatch ID, status/attempt/error code, worker
-heartbeat state and recovery audit ID. Exclude message text and all credentials.
+`connectivity: no_recent_observation` means no fresh operation result is available. It is
+not proof of success and is not by itself a degraded status when Hermes is configured and
+the Dispatch heartbeat is healthy. Use an approved controlled operation when current
+connectivity proof is required.
+
+### Queued work is nonzero
+
+Queued or running work alone does not degrade runtime health. Compare oldest backlog age,
+Worker freshness, FIFO blockers, and site thresholds. Zero is the accepted steady-state
+production baseline recorded in [Production status](production-status.md), not a universal
+requirement during active processing.
+
+## Escalation evidence
+
+An incident handoff should contain only protected, redacted references:
+
+- release label, Git authority, and immutable image digest;
+- Alembic revision;
+- health/Controller status and aggregate counts/ages;
+- stable error codes and hashed references already emitted by the runtime;
+- exact safe actions taken and their timestamps;
+- rollback/evidence directory references.
+
+Use [Runtime recovery](runtime-recovery.md) for full decision flows and
+[Production deployment](deployment/production.md#formal-rollback) for release rollback.

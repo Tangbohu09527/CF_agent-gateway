@@ -6,9 +6,11 @@ Contract version: **1**
 
 This document defines the minimum stable runtime boundary exposed by
 CF_agent-gateway to CF_agent-wechat. It does not define a general automation
-platform, change the dispatch or delivery state machines, or prove operation on
-a real CFserver. CFserver deployment and account acceptance remain external
-validation work.
+platform or change the dispatch or delivery state machines. Contract version 1
+is implemented, automated-test covered, and production validated for the release
+recorded in [Production status](production-status.md). Every future release must
+revalidate the external session, protected Token File, Controller readiness, and
+host lifecycle.
 
 Run the control entry point from a deployed repository checkout:
 
@@ -44,8 +46,8 @@ administrative identity that can access the host's rootful Docker daemon, read
 the protected host Token File, and read the production Compose file and its
 env-file. Missing any required access fails closed.
 
-On CFserver, keep `linxi` out of the `docker` group. Establish sudo credentials
-once, then use non-interactive sudo for each control operation:
+Keep ordinary operator accounts out of the `docker` group. Establish approved
+sudo credentials once, then use non-interactive sudo for each control operation:
 
 ```console
 sudo -v
@@ -167,11 +169,12 @@ gate. A failure after prepare begins rolls back by stopping only `worker` and
 issues no database or migration command. Once running, the Workers resume their
 normal durable processing and may write business state.
 
-This launch split still requires CFserver acceptance after deployment: repeat
-fresh QR, confirm automatic release as soon as readiness is true, recheck the P0
-database no-side-effect baseline, process one unique message through the full
-chain, and verify Docker restart and host reboot behavior. That production
-acceptance has not been completed by this repository change.
+The accepted production release completed the Controller, Token Contract,
+legacy-Checkpoint, queue, log, and host-runtime checks recorded in
+[Production status](production-status.md). A future release still requires its
+own acceptance. When a fresh QR is required, keep Poll and Delivery stopped,
+complete the external login lifecycle, recheck the no-side-effect baseline, and
+open the gate only after Controller readiness succeeds.
 
 ### status
 

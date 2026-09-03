@@ -1,191 +1,219 @@
-# V2 production validation checklist
+# Production validation
 
-Use this checklist for release review and again for an authorized CFserver rollout.
-Repository work does not complete the external steps automatically.
+This document has two separate purposes:
 
-The `cd9990a` candidate failed its authorized CFserver 90-second validation on
-September 2, 2026 with 27 repeated continuity WARNINGs, 27 failed chat INFO summaries, and
-27 failed cycle INFO summaries. It was controlledly rolled back; formal production is
-`7db3384`. The current PR head is not running in production and remains unvalidated until
-the short validation at the end of this checklist passes.
+1. the completed September 2026 production acceptance record;
+2. a reusable unchecked checklist for future releases.
 
-## Evidence labels
+The current deployed facts are authoritative in
+[Production status](production-status.md). A future checklist does not change that record
+until a new release is actually accepted.
 
-- **Implemented**: present in the release commit.
-- **Locally tested**: exact command result is recorded in pull request #4.
-- **GitHub Actions**: exact green run ID is recorded in pull request #4.
-- **Not CFserver-validated**: requires the real deployment and remains open until the
-  deployment owner signs it off.
-- **External responsibility**: infrastructure or credential ownership outside this repo.
-- **Manual action**: an operator must make and audit a decision.
+## Completed production acceptance record
 
-Do not substitute PR #3's wrong-main test result for the V2 release evidence.
+### Candidate failure and rollback
 
-## Repository release gate
+The intermediate candidate `cd9990a` failed its authorized CFserver observation on
+September 2, 2026. During 90 seconds it emitted 27 repeated continuity `WARNING` records,
+27 failed Chat `INFO` summaries, and 27 failed Cycle `INFO` summaries for a stable
+legacy-Checkpoint condition.
 
-- [ ] Branch is based directly on `feat/v2-enterprise-runtime`; record base and head SHA.
-- [ ] One linear Alembic chain reports head `20260823_04`.
-- [ ] `python -m pytest -q` passes; record passed/skipped/warnings exactly.
-- [ ] `ruff check .` passes.
-- [ ] `ruff format --check .` passes.
-- [ ] `git diff --check` passes.
-- [ ] GitHub Actions quality, PostgreSQL/V2 runtime, and production Compose container E2E
-  jobs are green; record run ID.
-- [ ] Secret scan is green and no production value appears in the tree or logs.
-- [ ] Pull request #4 documents PR #3 lineage, migration, rollback risk and
-  the CFserver validation gap.
+The candidate was rolled back in a controlled manner to the preserved pre-P1 release. The
+historical rollback line was based on `7db3384`; it is not the current production
+authority.
 
-## External pre-deployment gate
+The root cause was lifecycle-state invalidation on a rejected/unavailable empty-window
+Marker. That path cleared the continuity observation used to deduplicate an unchanged
+failure signature, so every finite poll cycle treated the same condition as new.
 
-- [ ] Change owner, maintenance window and rollback authority are recorded.
-- [ ] Immutable image digest matches the approved release SHA.
-- [ ] PostgreSQL backup identifier and tested restore procedure are recorded.
-- [ ] Current Alembic revision and pre-migration row counts are captured.
-- [ ] Gateway API, WeChat polling, dispatch and delivery services are stopped for the
-  exclusive migration step.
-- [ ] Database, agent-wechat and Hermes endpoints are verified without printing secrets.
-- [ ] Separate Message API and Admin recovery tokens are injected from protected storage.
-- [ ] Artifact storage is durable, shared where required, writable by the service user,
-  and included in backup policy.
-- [ ] Long-running application containers use `10001:10001`, a read-only root filesystem,
-  and no added Linux capabilities.
-- [ ] The heartbeat volume initializer is one-shot, has no network/Secrets, and is the only
-  root container; no resident service runs as root.
-- [ ] Debian host is `Asia/Shanghai`; containers, PostgreSQL and persistence remain UTC.
+Commit `6737636` preserved continuity observation across Marker-evidence rejection while
+still invalidating untrusted Marker/history state. Commit
+`f36c798294368263433f6132366ac9a864d9482b` completed the Marker-unavailable retention
+model and became the production-validated image code snapshot.
 
-## Migration gate
+### Shadow validation
 
-- [ ] `alembic upgrade head` completes through the packaged tree.
-- [ ] `alembic current --verbose` reports `20260823_04`.
-- [ ] `alembic heads` reports exactly one head.
-- [ ] Schema-head application check succeeds before any worker starts.
-- [ ] Message, dispatch, response, delivery and checkpoint row counts match the expected
-  non-destructive migration result.
-- [ ] Admission outcome count equals Message count after backfill.
-- [ ] Existing dispatch-backed Messages are completed `allowed` with matching
-  identity/Workspace/AIThread targets.
-- [ ] Legacy Messages without dispatch are completed `legacy_unresolved`, not allowed or
-  pending, and replay does not evaluate current policy.
-- [ ] Existing foreign keys and dispatch/delivery statuses remain unchanged.
-- [ ] Existing nonzero checkpoints retain `last_local_id`, use generation zero, and do
-  not receive a fabricated anchor.
-- [ ] Any partial checkpoint-generation schema fails closed and is investigated.
-- [ ] Recovery-audit UPDATE/DELETE is rejected by the PostgreSQL trigger.
-- [ ] Illegal manual-retry status and retry/mark-dead/confirm-success audit tuples are
-  rejected by database constraints.
-- [ ] Downgrade is tested only on a backup/fixture; runtime admission, audit, or
-  reconciliation evidence makes the relevant downgrade fail closed.
+The Stage-11G real legacy-Checkpoint shadow validation completed four cycles with:
 
-## Service startup gate
+- one total continuity `WARNING`;
+- one total failed Chat `INFO` summary;
+- one total failed Cycle `INFO` summary;
+- zero Sink calls;
+- zero Checkpoint mutation attempts;
+- no candidate PostgreSQL connection.
 
-- [ ] Gateway `/health` returns liveness.
-- [ ] Gateway `/ready` returns readiness.
-- [ ] `/health/runtime` reports database and migration schema `ok`.
-- [ ] WeChat, dispatch and delivery heartbeat files are distinct and fresh.
-- [ ] Shared heartbeat directory is `10001:10001` mode `0750`; heartbeat files are mode
-  `0600`; the Gateway heartbeat mount is read-only.
-- [ ] A controlled Worker restart republishes a healthy heartbeat, and SIGTERM produces a
-  clean zero exit with a final `stopped` heartbeat.
-- [ ] WeChat auth is `logged_in` after authorized account login.
-- [ ] Hermes configuration is present; worker liveness is not treated as connectivity.
-- [ ] Before a business call, configured healthy idle Hermes reports
-  `ok/no_recent_observation`; this is not claimed as connectivity success.
-- [ ] A controlled Hermes operation changes connectivity to the expected recent success or
-  failure observation without exposing request/response content.
-- [ ] No unexplained stale running/delivery claims exist.
+This established the candidate's log lifecycle and fail-closed behavior without business
+state changes.
 
-## Controlled end-to-end gate
+### Merge and final production deployment
 
-This section is **Not CFserver-validated** until performed by the deployment owner with
-test identities and approved content.
+- [x] PR #7 merged into `main`.
+- [x] Issue #6 was completed and closed.
+- [x] Git authority is merge commit
+  `b488cf452584e73bc9b752564bf90ea153aa8d18`.
+- [x] Production image code snapshot is
+  `f36c798294368263433f6132366ac9a864d9482b`.
+- [x] No new P1 Git release tag was created.
+- [x] Release label is `p1-observability-main-b488cf452584-20260903`.
+- [x] Immutable image digest and local immutable tag were recorded.
+- [x] Alembic current revision was `20260823_04`.
+- [x] Long-running Gateway containers used `10001:10001`.
+- [x] Docker logging used `json-file` with `64m` x `10` per service.
+- [x] The Runtime Controller path and Token File contract were verified.
 
-- [ ] One new WeChat message is seen and persisted exactly once.
-- [ ] Admission produces one authoritative completed allow/deny outcome without content in
-  logs.
-- [ ] Replay after a policy change returns the original completed denial.
-- [ ] Allowed input creates exactly one dispatch for the correct AIThread.
-- [ ] Dispatch worker creates exactly one persisted response.
-- [ ] Exactly one delivery outbox row and one outbound reply result.
-- [ ] A self-originated echo advances its checkpoint without creating a Message.
-- [ ] A repeated inbound event does not duplicate Message, dispatch, response or delivery.
-- [ ] A second queued record on the same AIThread remains FIFO ordered.
-- [ ] Different AIThreads can progress independently.
+The exact image identity and paths are in
+[Production status](production-status.md#authority).
 
-## Recovery drills
+### Final real-log acceptance
 
-Use controlled fixtures or a non-production staging database. Never manufacture an
-ambiguous production effect just to test recovery.
+One real legacy Checkpoint target was present at Worker startup. The startup observation
+emitted exactly one continuity `WARNING`, one failed Chat `INFO` summary, and one failed
+Cycle `INFO` summary.
 
-- [ ] Checkpoint 15 with visible 10/11/12 performs one CAS generation rewind.
-- [ ] Empty visible window does not rewind.
-- [ ] A serverId-less Message stores a content-free anchor; its second poll confirms
-  continuity and processes later messages.
-- [ ] Legacy nonzero checkpoint without anchor reports degraded until a serverId or
-  content-free fallback anchor is safely enrolled and confirmed.
-- [ ] An ambiguous checkpoint anchor stops the chat and emits only one identical warning
-  per poller process state.
-- [ ] The 21-chat/95-visible-message steady shape (non-empty counts 9/14/20/50/1/1,
-  all inside checkpoint) emits at most six chat summaries plus one cycle summary on
-  first/change, then zero repeated chat/cycle INFO while unchanged. Aggregate
-  `messages_seen`, `messages_new`, `messages_duplicate`,
-  `messages_skipped_checkpoint`, `messages_skipped_self`, and `messages_failed`
-  counters remain exact; per-message checkpoint/self skips are DEBUG.
-- [ ] Five persistent `stop_chat_visible_window_empty` Chats, with a new finite polling
-  service each cycle and one shared lifecycle state, emit five continuity WARNINGs, at most
-  five chat INFO summaries, and at most one cycle INFO on first/change. Four unchanged
-  cycles add zero repeated WARNING/chat INFO/cycle INFO; changing one checkpoint emits
-  exactly one additional WARNING/chat INFO and one cycle INFO.
-- [ ] A persistent old Checkpoint with fingerprint null/empty/malformed, a throwing or
-  unusable marker clock, backwards time, and marker mismatch each use a new finite service
-  per cycle with one shared lifecycle state. Four identical cycles emit one initial
-  WARNING/chat INFO/cycle INFO and zero additional records on cycles 2-4; changing any
-  signature field re-emits exactly once.
-- [ ] Every Marker-unavailable case proves zero Sink calls, processed/new messages,
-  checkpoint/generation movement, business-table inserts, history replay, and live-suffix
-  starts.
-- [ ] Removing a Chat from `list_chats` prunes its empty marker, pending window, history,
-  marker clock watermark, and continuity observation. Account change and a new Worker
-  lifecycle reset state, and temporary Chat churn cannot exceed the documented 1,024-Chat
-  cache bound.
-- [ ] A live admission claim fails closed; an expired claim recovers from its stored
-  request snapshot.
-- [ ] A crash between allowed-dispatch staging and outcome completion commits neither,
-  then replay creates one outcome and one dispatch.
-- [ ] An `uncertain` dispatch blocks later same-thread work and never auto-retries.
-- [ ] `retry-approved` requires authenticated operator/reference/reason and resumes work.
-- [ ] `mark-dead` releases later work without a fake response.
-- [ ] `confirm-success` rejects missing/mismatched evidence and is idempotent with valid
-  persisted response evidence.
-- [ ] A response missing delivery is reconciled without another Hermes call or send.
-- [ ] A poison reconciliation candidate is persistently deferred at 30/60/120/240 seconds,
-  quarantined on failure five, and does not block a later valid candidate.
-- [ ] Runtime Health reports reconciliation backlog/deferred/poison and oldest age.
-- [ ] Concurrent recovery requests produce one CAS winner and one audit fact.
-- [ ] ORM and direct SQL cannot UPDATE/DELETE recovery audit history or insert an illegal
-  action/status/evidence tuple.
-- [ ] Invalid auth, oversize body, control characters and secret-like recovery values do
-  not mutate state.
+The subsequent 45-second steady observation produced:
 
-## Observation window and sign-off
+- [x] zero duplicate continuity signatures;
+- [x] zero repeated target continuity warnings;
+- [x] zero repeated target failed Chat summaries;
+- [x] zero routine idle/history Chat INFO;
+- [x] zero repeated target failed Cycle summaries;
+- [x] zero routine Cycle INFO;
+- [x] zero poll-cycle-start INFO;
+- [x] zero routine `httpx`, `httpcore`, or Alembic INFO;
+- [x] zero ERROR;
+- [x] zero validation violations.
 
-- [ ] Queue counts and oldest ages remain within site thresholds.
-- [ ] No checkpoint regression/continuity warnings remain unexplained.
-- [ ] No `uncertain`, blocked thread, stale lease or missing delivery remains unowned.
-- [ ] Structured logs contain no message text, credential, cookie or connection string.
-- [ ] Container timestamps are UTC and the dashboard renders `Asia/Shanghai` correctly.
-- [ ] Rollback decision point and monitoring owner are recorded.
-- [ ] CFserver, PostgreSQL, WeChat and Hermes owners sign off separately.
+Database and queue totals stayed consistent and unchanged during the controlled
+observation.
 
-Retain the completed checklist with the deployment record, not in a commit containing
-environment-specific identities or secrets.
+### Final state
 
-## Evidence boundary
+- [x] Gateway healthy.
+- [x] Poll Worker healthy.
+- [x] Dispatch Worker healthy.
+- [x] Delivery Worker healthy.
+- [x] PostgreSQL healthy.
+- [x] External `agent-wechat` healthy.
+- [x] Runtime Controller `ready: true`.
+- [x] Token Contract valid.
+- [x] Outstanding queue work zero.
+- [x] Production online.
+- [x] Existing authenticated `agent-wechat` session preserved.
+- [x] Formal pre-P1 rollback release preserved.
+- [x] Offline production image archive and checksum recorded.
+- [x] Final evidence file and evidence run ID recorded.
 
-The repository unit/integration suite proves the state transitions above against controlled
-SQLite and PostgreSQL fixtures when its recorded run is green. A green separate Actions
-container job proves the production image/Compose topology with PostgreSQL 16 and synthetic
-endpoints. Neither proves real
-agent-wechat session behavior, Hermes execution, outbound WeChat delivery, production
-database scale/locks, infrastructure restart policy, dashboards, or backup restoration.
-Those checkboxes remain **Not CFserver-validated** until the external deployment owner
-performs and records them.
+The completed acceptance did not include general media understanding, automatic Skill
+execution, general Provider routing, ERP behavior, Hermes implementation validation,
+cross-repository deployment automation, or a database backup restoration drill.
+
+## Completed evidence boundary
+
+Repository code and automated tests establish state-machine behavior under controlled
+fixtures. GitHub Actions establishes only the checks executed for a specific commit. The
+CFserver record above adds real host, Compose, PostgreSQL, Worker, `agent-wechat` session,
+Token Contract, queue, and log observations for the accepted release.
+
+It does not transfer ownership of PostgreSQL, `agent-wechat`, Hermes, host backup systems,
+network policy, or secrets into this repository. It also does not prove untested inbound
+media/OCR/archive flows or an actual backup restore.
+
+## Reusable future-release checklist
+
+Keep future results in the release evidence record. Do not commit environment-specific
+identities, message content, endpoints, credentials, or connection strings.
+
+### Repository and CI
+
+- [ ] Record the intended base, release commit, merge authority, and immutable image digest.
+- [ ] Confirm the release commit is based on current `main`.
+- [ ] Confirm one Alembic head and record it.
+- [ ] Run `python -m ruff check .`.
+- [ ] Run `python -m ruff format --check .`.
+- [ ] Run `python -m pytest -q`.
+- [ ] Run `git diff --check`.
+- [ ] Confirm required GitHub Actions checks are green and record their run URLs/IDs.
+- [ ] Confirm the tree and captured output contain no secrets or private production data.
+
+### Pre-deployment
+
+- [ ] Record change owner, window, acceptance owner, and rollback authority.
+- [ ] Verify the previous release directory and immutable image/archive are intact.
+- [ ] Record current release/image, health, Controller status, schema, aggregate counts,
+  queue states, oldest ages, and Checkpoint continuity.
+- [ ] Record the approved PostgreSQL backup identifier and restore procedure.
+- [ ] Preserve protected logs before container recreation.
+- [ ] Verify protected environment/configuration and Token File metadata without reading
+  their values.
+- [ ] Verify host capacity for database backup, images, Artifacts, and log retention.
+- [ ] Classify every stale, failed, uncertain, blocked, poison, missing, or unverified item.
+
+### Migration
+
+- [ ] Close the Poll/Delivery Gate through the Runtime Controller.
+- [ ] Stop Gateway and Dispatch Worker for the exclusive application window.
+- [ ] Run only the release migration service.
+- [ ] Confirm `alembic current` equals the packaged head and `alembic heads` returns one
+  head.
+- [ ] Confirm expected non-destructive aggregate counts and constraints.
+- [ ] Confirm long-running services remain in migration check mode.
+- [ ] Abort and restore/escalate on partial schema, unexpected head, or inconsistent data.
+
+### Staged startup
+
+- [ ] Start Gateway and Dispatch Worker while Poll/Delivery remain stopped.
+- [ ] Confirm `/health`, `/ready`, and database/migration runtime components.
+- [ ] Classify Dispatch/reconciliation state before opening intake.
+- [ ] Verify the external `agent-wechat` session; complete fresh QR with the gate closed
+  when required.
+- [ ] Start Poll/Delivery only through the Runtime Controller.
+- [ ] Confirm both controlled Docker health states, fresh heartbeat age, valid Token
+  Contract, and `ready: true`.
+- [ ] Confirm all three Worker heartbeats are distinct and fresh.
+
+### Business and recovery validation
+
+- [ ] Process one approved unique inbound Message through persistence, admission, Dispatch,
+  response, and Delivery.
+- [ ] Confirm duplicate inbound submission does not duplicate Message, Dispatch, Response,
+  or Delivery.
+- [ ] Confirm self-originated input advances Checkpoint without entering Message Store.
+- [ ] Confirm same-Thread FIFO and independent progress across different Threads.
+- [ ] Confirm the configured group Thread policy produces the intended sender isolation or
+  deliberate sharing.
+- [ ] Confirm an unexplained `uncertain` Dispatch never auto-retries.
+- [ ] Confirm Admin recovery authentication, compare-and-swap, evidence requirements,
+  idempotency, and immutable audit behavior in a controlled fixture.
+- [ ] Confirm reconciliation repairs persisted success without another Hermes call.
+- [ ] Confirm Delivery retries/receipts preserve ordered parts without changing Dispatch
+  success.
+
+### Checkpoint and log acceptance
+
+- [ ] Exercise the release-relevant legacy/continuity shape in a controlled or approved
+  observation.
+- [ ] Confirm ambiguous continuity has zero Sink calls and zero Checkpoint mutations.
+- [ ] Confirm an unchanged failure signature does not repeat Warning/Chat/Cycle summaries
+  beyond the accepted lifecycle behavior.
+- [ ] Confirm routine idle/history, cycle-start, HTTP client, and migration logs remain at
+  the intended levels.
+- [ ] Confirm no ERROR or privacy violation appears.
+- [ ] Measure daily volume, recalculate the busiest-service retention window, and confirm
+  host free space.
+- [ ] Confirm every Compose service uses the approved `json-file` rotation.
+
+### Reboot, observation, and sign-off
+
+- [ ] Verify Gateway and all Workers recover after a controlled host/Docker restart.
+- [ ] Treat `agent-wechat` fresh QR as a separate lifecycle and gate Poll/Delivery when
+  required.
+- [ ] Observe queue/database totals and oldest ages for the approved steady window.
+- [ ] Confirm no unexplained stale claim, `uncertain`, blocked Thread, missing Delivery,
+  reconciliation poison, or continuity warning remains.
+- [ ] Record final release/image/schema, evidence directory, rollback directory/image, and
+  acceptance time.
+- [ ] Obtain separate sign-off from Gateway, database, `agent-wechat`, Hermes, and host
+  operations owners as applicable.
+
+Use [Production deployment](deployment/production.md) for the procedure and
+[Runtime recovery](runtime-recovery.md) for failed acceptance.

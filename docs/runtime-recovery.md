@@ -1,281 +1,392 @@
-# V2 runtime recovery
+# Runtime recovery
 
-## Safety rules
+## Recovery rule
 
-Recovery preserves the durable chain. Do not update dispatch status with SQL, delete
-queue rows, clear `attempt_count`, fabricate a Hermes response, or resend a successful
-delivery by hand.
+Use the same sequence for every production incident:
 
-Before acting:
+1. **Check** only redacted health, Controller status, Compose state, protected logs, and
+   durable aggregate/Admin evidence.
+2. **Classify** whether the failure is liveness, external dependency, authentication,
+   Checkpoint continuity, Dispatch ambiguity, Delivery ambiguity, schema, or release.
+3. **Operate** at the narrowest owned boundary. Close the Poll/Delivery Gate before any
+   `agent-wechat` login or ambiguous intake work.
+4. **Verify** health, heartbeats, queue totals, oldest ages, continuity, and absence of new
+   duplicate/uncertain effects.
+5. **Rollback** to an intact previous release when the current release cannot be made safe
+   inside the approved incident window.
 
-1. Open an incident/change record and identify the authenticated operator.
-2. Capture `GET /health/runtime` and the target dispatch inspection response.
-3. Preserve redacted Gateway, dispatch-worker, Hermes and delivery-worker logs.
-4. Verify timestamps in UTC. Convert to `Asia/Shanghai` only for display.
-5. Establish whether Hermes executed from durable upstream evidence, not from a timeout
-   alone.
+Never delete database rows to repair a queue. Never hand-edit a Checkpoint, generation, or
+fingerprint to bypass fail-closed continuity. Never invent a Hermes response or delivery
+receipt.
 
-All mutating steps below are manual actions. They have not been exercised against a real
-CFserver by this repository change.
-
-## Retained log evidence
-
-Production Compose retains each service's Docker `json-file` logs independently with
-defaults of 64 MiB across 10 files. The tested production-shape plus sustained-business
-model is about 70.48 MiB/day in the busiest container and retains 8.17 days after reserving
-10% capacity. Across all six services, the theoretical configured maximum is 3.75 GiB.
-Use `docker compose logs --since 168h <service>` before restarting or recreating a
-container, and preserve worker stop/start, checkpoint continuity/regression/CAS evidence,
-dispatch uncertainty/quarantine/recovery, delivery uncertainty/recovery, heartbeat failure,
-and controller stop/start/rollback output with UTC timestamps.
-
-Idle per-chat/cycle summaries and poll starts are DEBUG. The first or changed non-empty
-checkpoint-only window is INFO; identical later windows are DEBUG. Successful HTTP client
-requests and routine Alembic context setup remain pinned below WARNING even when the root
-Gateway level is DEBUG. Their absence at INFO is not evidence of an outage; use runtime
-health and heartbeats for liveness. Third-party DEBUG requires an explicit reviewed logger
-override and must be limited to a bounded diagnostic window.
-
-Persistent continuity-only fail-closed states, including
-`stop_chat_visible_window_empty`, emit their continuity WARNING and chat/cycle INFO only
-on first observation or signature change. Identical later cycles have zero repeated
-WARNING/INFO; no periodic reminder is configured. The signature includes checkpoint
-local ID/generation/fingerprint, remote bounds, recovery action, and failure code under the
-account/conversation scope. Worker restart or account change rebuilds this process-local
-state. A successful `list_chats` cycle prunes disappeared Chats, and all lifecycle state
-shares a 1,024-Chat bound.
-
-An unavailable empty-window Marker is not a reason to erase the continuity observation.
-Missing/malformed fingerprint, clock exception, naive/unusable time, backwards time, or
-marker identity mismatch removes only the unsafe marker plus pending/history helper state.
-The unchanged `stop_chat_empty_window_marker_unavailable` signature remains deduplicated
-across newly-created per-cycle services. A clock watermark prevents backwards observations
-from creating a new marker after the previous marker was rejected. The Chat remains
-fail-closed: no Sink call, checkpoint advance, generation increment, live-suffix start,
-dispatch, response, or delivery side effect is permitted.
-
-Docker logs are bounded operational evidence, not the audit authority. Dispatch recovery
-audits, Message/Admission/Checkpoint facts, delivery attempts and receipts remain in the
-database and must be preserved independently. Never add Token, Authorization, Cookie,
-message body, raw account/chat/conversation ID, database credential, or raw upstream
-response values to logs or incident notes; retain only hashed references and aggregate
-counters.
-
-## Checkpoint regression recovery
-
-### `LATEST` fail-safe rebase
-
-`BootstrapMode.LATEST` must never replay the current visible window after a session or
-`localId` regression. When the visible maximum is below the checkpoint, or the stored
-checkpoint anchor mismatches the visible anchor, the poller:
-
-1. emits `checkpoint regression detected` with hashed account/conversation references;
-2. builds a content-free fingerprint for the latest visible message;
-3. performs one CAS update fenced by account, conversation, old `last_local_id`, old
-   `regression_generation`, and old `last_message_fingerprint`;
-4. atomically increments `regression_generation` and replaces both `last_local_id` and
-   `last_message_fingerprint` with the latest visible values;
-5. emits `checkpoint regression rebased`; and
-6. treats the entire visible window as the new baseline without calling the Message Sink.
-
-The rebase creates no Message, raw payload, attachment, Admission Outcome, Hermes
-dispatch/response, or delivery record. A CAS loser fails closed and cannot overwrite the
-winner. Missing/ambiguous continuity evidence, an unavailable latest fingerprint, an
-invalid checkpoint, or generation exhaustion also fails closed without advancing the
-checkpoint or calling the Sink.
-
-This is an intentional safety tradeoff: messages that first become visible during a
-maintenance, fresh-QR, or re-login window may be skipped because they cannot be assigned
-safely to the old or new session. The next message above the rebased checkpoint is
-processed normally and exactly-once persistence/idempotency rules apply again. A denied
-Admission is not a replay safety boundary because a replayed authorized historical
-message could be allowed and dispatched.
-
-`BootstrapMode.BACKFILL` retains its explicit historical replay behavior and must be
-configured deliberately. Regression never switches `LATEST` into `BACKFILL`.
-
-### Legacy checkpoint without anchor
-
-Migration keeps a nonzero `last_local_id`, sets generation to zero, and leaves the
-anchor null. It does not infer an anchor from Message rows. On the first overlapping
-window containing exactly one checkpoint message, the poller CAS-enrolls either its
-serverId anchor or a content-free fallback anchor and stops that conversation for the
-cycle. The next cycle must confirm the stored anchor before later messages advance. A
-purely forward window can advance normally.
-
-The fallback continuity digest uses local ID, sender ID, raw type, UTC timestamp, and self
-flag inside the checkpoint's account/conversation scope; it never uses message text or a
-nickname, and it is separate from generation-scoped source-message identity. If those
-fields are missing or the checkpoint local ID is ambiguous, continuity remains
-fail-closed/degraded. An identical ambiguity warning is emitted once per poller process
-state rather than every polling interval.
-
-An empty window is not proof that a stored nonzero checkpoint still belongs to the
-current session. In `LATEST`, it returns `checkpoint continuity unverified` without
-rebasing or calling the Sink. In explicit `BACKFILL`, an empty window remains a
-successful no-op. API failure, incomplete response, or a missing legacy anchor never
-causes a rewind or bootstrap-mode switch. Do not lower the checkpoint with SQL.
-
-### Persist/checkpoint crash
-
-If the process dies after Message persistence but before checkpoint advance, restart the
-WeChat worker. At-least-once discovery replays the message, Message Store uniqueness
-returns the existing row, and dispatch idempotency returns the existing dispatch. No
-manual Message or dispatch insertion is required.
-
-## Durable admission recovery
-
-Each persisted Message has at most one row in `message_admission_outcomes`:
-
-- no row means Message persistence committed before admission began; replay creates a
-  pending authority and evaluates it;
-- `pending` means evaluation has not completed; a live claim fails closed, while a free
-  or expired lease is reclaimed using the stored request snapshot;
-- completed `denied` or `legacy_unresolved` is terminal admission evidence and is
-  returned without evaluating current policy, Profile, mention, or routing state;
-- completed `allowed` retains the exact identity, Workspace, AIThread, policy, and route
-  evidence; replay may only verify or repair its same idempotent dispatch.
-
-For a new allowed decision, outcome completion and dispatch enqueue commit in one
-transaction. A failure after dispatch staging rolls both facts back, releases the pending
-claim with a stable error code, and permits controlled replay. Do not change completed
-denied/unresolved rows to pending, rerun an old Message against today's policy, or insert a
-dispatch with SQL.
-
-Revision `20260823_03` backfills Messages that already have a dispatch as completed
-`allowed`. Legacy Messages without a dispatch become completed `legacy_unresolved`;
-absence of a dispatch is not proof that an old Message should now be allowed. There is no
-generic operator endpoint that reclassifies this evidence. A different disposition needs a
-separately reviewed data/recovery design.
-
-Do not DELETE runtime Admission evidence or related Message rows to fabricate a clean
-baseline. Restore an approved clean backup for production revalidation. CFserver P0
-acceptance remains pending: this repository change has not restored or modified the real
-server, and fresh-QR recovery must be re-tested there after deploying the fixed image and
-migrating the restored database to revision `20260823_04`.
-
-## Dispatch `uncertain`
-
-An `uncertain` dispatch represents an ambiguous external effect. It intentionally blocks
-later queue records on the same AIThread and never enters automatic retry.
-
-Every recovery mutation performs its dispatch CAS and audit insert in one transaction.
-Revision `20260823_04` adds database checks for each legal before/after/evidence tuple and
-rejects UPDATE or DELETE of audit rows through PostgreSQL/SQLite triggers. Audit history is
-therefore immutable even to ordinary ORM or direct SQL paths. Do not disable the trigger or
-delete evidence to make a downgrade possible.
-
-Inspect it first:
+## Operator variables
 
 ```bash
-curl --fail --silent --show-error \
-  -H "Authorization: Bearer ${CF_AGENT_GATEWAY_ADMIN_TOKEN}" \
-  http://127.0.0.1:8080/admin/dispatches/42
+export RELEASE_DIR=/opt/cf-agent-gateway
+export COMPOSE_FILE=docker-compose.prod.yml
+export CONTROLLER="${RELEASE_DIR}/deploy/wechat-runtime-control"
+export GATEWAY_URL=http://localhost:8080
+export EVIDENCE_DIR=<protected-incident-evidence-directory>
+cd "${RELEASE_DIR}"
 ```
 
-Do not print the command through a shell trace or store it in shared history when the
-token is expanded. Prefer the site's secret-aware API client.
+Do not print the protected environment file, Token File, database URL, Authorization
+header, message content, personal identity, or raw channel identifiers.
 
-### Retry approved
+## Preserve evidence first
 
-Use only when the operator has verified that Hermes did not successfully execute the
-request. This moves the record to the existing retryable `failed` state and sets the
-manual retry approval without resetting its attempt count.
+Before restarting or recreating a container:
 
 ```bash
-curl --fail --silent --show-error -X POST \
-  -H "Authorization: Bearer ${CF_AGENT_GATEWAY_ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data '{"operator":"on-call-id","reference":"INC-2026-00123","reason":"Hermes audit proves no execution"}' \
-  http://127.0.0.1:8080/admin/dispatches/42/retry-approved
+mkdir -p "${EVIDENCE_DIR}"
+date -u
+docker compose -f "${COMPOSE_FILE}" --profile worker ps
+sudo -n "${CONTROLLER}" status
+curl --silent --show-error --max-time 5 "${GATEWAY_URL}/health/runtime"
 ```
 
-Watch the dispatch worker claim the same record with a new claim token. Verify exactly
-one response/delivery chain and that the next record on the thread proceeds.
+Store command output only in the protected incident location. Preserve the relevant
+structured container logs with the site's approved redaction and access controls. Record:
 
-### Mark dead
+- active release and immutable image identity;
+- Alembic revision;
+- aggregate Message/Admission/Dispatch/Response/Delivery/Checkpoint counts;
+- status counts and oldest ages;
+- current Controller output and heartbeat timestamps;
+- the incident/change reference.
 
-Use when Hermes execution cannot be disproved and there is no valid success evidence.
-The record becomes terminal `dead`, retains its error and attempt history, and releases
-following work without pretending the user received a response.
+Container recreation can replace the immediately accessible log window and heartbeat file.
+Database facts remain authoritative, but losing logs may remove timing evidence.
 
-```bash
-curl --fail --silent --show-error -X POST \
-  -H "Authorization: Bearer ${CF_AGENT_GATEWAY_ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data '{"operator":"on-call-id","reference":"INC-2026-00123","reason":"Outcome cannot be proven; retry is unsafe"}' \
-  http://127.0.0.1:8080/admin/dispatches/42/mark-dead
-```
+## Controller not ready
 
-Record any required user-facing follow-up outside this runtime. Do not create a fake
-assistant response.
+**Check**
 
-### Confirm success
+- Run Controller `status`.
+- Read `/health/runtime`.
+- Inspect `worker` and `delivery-worker` state with Compose.
+- Preserve both controlled-service logs.
 
-Use only when inspection and durable storage show a valid claim-fenced Hermes dispatch
-response for this exact record. The endpoint does not accept assistant content. If a
-normalized response exists, its message, Workspace, AIThread and stable response ID must
-match.
+**Classify**
 
-```bash
-curl --fail --silent --show-error -X POST \
-  -H "Authorization: Bearer ${CF_AGENT_GATEWAY_ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data '{"operator":"on-call-id","reference":"INC-2026-00123","reason":"Matched persisted claim-fenced response"}' \
-  http://127.0.0.1:8080/admin/dispatches/42/confirm-success
-```
+- `token_contract_valid: false`: protected Token source or container mount/environment
+  contract is invalid.
+- health `starting`: startup is still inside its bounded readiness period.
+- health `unhealthy`, `stopped`, or `not_created`: controlled container failure.
+- null/stale `heartbeat_age`: Worker is not publishing a valid fresh heartbeat.
 
-Afterward, verify the normalized response and existing delivery record. The recovery
-transition does not enqueue a second delivery. If health reports missing delivery, use
-the existing response/outbox reconciliation path; never resend directly.
+**Operate**
 
-## Delivery recovery
+1. Keep the gate closed with Controller `stop`.
+2. Correct only the external Token File metadata/source or approved release configuration;
+   never reveal the value.
+3. Confirm the external `agent-wechat` session is ready.
+4. Run Controller `start`, then `status`.
 
-- A stale delivery claim with no ambiguous external attempt can be reclaimed by the
-  delivery runtime.
-- A stale claim after a possibly sent attempt becomes `uncertain`; do not blindly send
-  it again.
-- Retryable definite failures use the existing delivery retry policy and attempts.
-- A persisted response without delivery is a reconciliation issue, not a reason to call
-  Hermes or recreate the response.
+**Verify**
 
-The resident reconciliation scan is limited to once every five seconds. A candidate that
-cannot be rebuilt stores `reconciliation_failure_count`,
-`reconciliation_next_attempt_at`, and a stable error code. Automatic delays are 30, 60,
-120, and 240 seconds; the fifth failure stores `reconciliation_quarantined_at` and stops
-automatic attempts. The cursor continues to later candidates, and restart retains the
-database schedule.
+`worker_health` and `delivery_health` are healthy, heartbeat age is fresh,
+`token_contract_valid` and `ready` are true, and runtime health has no unexplained queue
+state.
 
-Use `dispatch.reconciliation_backlog`, `reconciliation_deferred`,
-`reconciliation_poison`, and `oldest_reconciliation_age_seconds` to triage. A deferred
-transition logs once per failed attempt; quarantine logs one ERROR state change rather than
-an ERROR every worker idle loop. Investigate the stable error and source facts. Do not call
-Hermes, clear the fields with ad-hoc SQL, or force delivery; a quarantined record requires a
-reviewed corrective release/data action.
+**Rollback**
 
-Inspect attempt/receipt evidence and channel provider history. Escalate an ambiguous
-send for manual disposition under site policy; this branch does not add an unaudited
-force-send API.
+If Controller preparation, launch, readiness, or rollback fails repeatedly for the release,
+keep the gate closed and follow [Formal release rollback](#formal-release-rollback).
 
-## Worker and database recovery
+## Poll Worker stopped
 
-For a stale heartbeat, first distinguish a dead process from a stuck external call.
-Stop only the affected service gracefully, preserve logs, then restart it. Claim-token
-and lease fencing prevent the old owner from overwriting a newer owner. Do not run a
-one-cycle command concurrently with its resident worker unless the deployment's process
-gate proves exclusivity.
+**Check**
 
-On PostgreSQL loss, workers fail their current operation and should reconnect through a
-supervised restart/cycle. Do not mark ambiguous Hermes or WeChat effects as failed merely
-because the database was unavailable. A schema-head mismatch is a deployment stop: run
-the reviewed Alembic migration in an exclusive window rather than enabling automatic
-DDL in every service.
+Controller status is authoritative for gated Worker readiness. Confirm whether the Poll
+container is stopped/unhealthy or merely has a stale/invalid heartbeat. Read the last
+Checkpoint and Message aggregate changes through approved read-only evidence.
 
-Heartbeat persistence is also a startup/runtime gate. The first atomic publish must
-succeed before a worker enters business work. Three consecutive later write failures make
-the worker exit nonzero for supervision; a successful publish resets the failure budget.
-For Compose, confirm the one-shot initializer exited zero, the shared directory is
-`10001:10001` mode `0750`, Worker files are `0600`, and the Gateway mount is read-only.
-Never keep a worker alive without a valid heartbeat by swallowing publisher errors.
+**Classify**
 
-See [troubleshooting.md](troubleshooting.md) for symptom-based triage.
+- No new Messages and a stale Poll heartbeat: Poll liveness failure.
+- Poll healthy but `wechat_auth: logged_out`: external session failure.
+- Poll healthy with a continuity warning: fail-closed chat-level continuity, not general
+  Worker death.
+
+**Operate**
+
+Preserve evidence, close the gate, resolve Token/session/dependency state, then use
+Controller `start`. Do not start the Poll container directly.
+
+**Verify**
+
+Controller readiness, fresh Poll heartbeat, expected Checkpoint behavior, stable aggregate
+counts, and one controlled intake test when authorized.
+
+**Rollback**
+
+If the Poll Worker from the current release cannot become ready without unsafe state
+changes, keep the gate closed and roll back the application release.
+
+## Delivery Worker stopped
+
+**Check**
+
+Read Controller status, Delivery heartbeat, `delivery` runtime metrics, oldest backlog
+age, and protected Delivery logs. Distinguish queued work from `uncertain` sends.
+
+**Classify**
+
+- queued backlog with stopped/stale Worker: Delivery liveness failure;
+- `failed`: definite terminal/provider/Artifact failure;
+- `uncertain`: possible external send whose local result is ambiguous;
+- `missing_delivery`: reconciliation is required from persisted successful Dispatch
+  evidence.
+
+**Operate**
+
+Preserve evidence and use the Controller stop/start cycle for Poll and Delivery together.
+Do not reset `next_part_ordinal`, delete attempts, or resend an `uncertain` part by hand.
+
+**Verify**
+
+Delivery heartbeat is fresh; backlog advances in order; attempts/receipts remain consistent;
+no second Hermes call occurs; no duplicate outbound effect is observed.
+
+**Rollback**
+
+If the release cannot process known-safe queued work, close the gate and use the previous
+application release only after verifying schema compatibility and retained Delivery state.
+
+## Hermes unreachable
+
+**Check**
+
+Read Dispatch heartbeat, Hermes component `configuration` and `connectivity`, Dispatch
+status counts, oldest backlog, stale-running count, and protected Dispatch logs.
+
+**Classify**
+
+- `unconfigured`: release configuration/secret injection failure;
+- `last_operation_failed`: a fresh failed observation;
+- `no_recent_observation`: no current connectivity proof, not itself a failure;
+- growing `failed`: definite retryable failures;
+- any `uncertain`: possible external effect requiring evidence-based manual resolution.
+
+**Operate**
+
+Close the Poll/Delivery Gate if intake should not grow. Restore the external Hermes service
+or approved configuration. Let definite retryable records follow the durable retry budget.
+Use Admin recovery only for an `uncertain` Dispatch after the external owner proves the
+outcome.
+
+**Verify**
+
+A controlled Hermes operation produces the expected fresh observation, backlog advances
+FIFO, and no `uncertain` item is automatically retried.
+
+**Rollback**
+
+Application rollback is appropriate only when the Gateway release caused incompatibility.
+Do not roll back database state or retry ambiguity merely because the external Hermes
+service is unavailable.
+
+## agent-wechat offline after host reboot
+
+**Check**
+
+Read Controller status and runtime `wechat_auth`. Determine through the external owner's
+approved procedure whether the session survived.
+
+**Classify**
+
+- process/session healthy: no QR action;
+- `logged_out` or invalid session: external login lifecycle;
+- Token Contract invalid: Gateway-controlled mount/source contract, not QR state.
+
+**Operate**
+
+1. Close the Poll/Delivery Gate.
+2. Let the external owner complete the fresh-QR process without exposing account/session
+   evidence.
+3. Verify the protected Token File contract.
+4. Open the gate only through Controller `start`.
+
+**Verify**
+
+Controller ready is true, runtime `wechat_auth` is `logged_in`, heartbeats are fresh, and
+the controlled acceptance Message is processed once.
+
+**Rollback**
+
+A QR requirement alone is not a Gateway rollback reason. Roll back only if the release's
+contract cannot operate with a valid external session.
+
+## Pending or uncertain queue work
+
+**Check**
+
+Use runtime aggregate fields and authenticated Admin inspection. Record the Dispatch status,
+attempts, lease, evidence flags, blocking status, and related delivery facts without
+copying message content.
+
+**Classify**
+
+- pending Admission with an expired lease: recoverable from the stored request snapshot;
+- running Dispatch with expired lease: reclaimable under the fenced retry rules;
+- `failed`: definite failure governed by retry budget;
+- `uncertain`: external effect unknown and same-Thread work blocked;
+- `dead`: terminal Dispatch;
+- Delivery `uncertain`: channel effect unknown and not equivalent to Dispatch ambiguity.
+
+**Operate**
+
+Allow automatic fenced recovery only where the state machine permits it. For Dispatch
+`uncertain`, choose exactly one authenticated Admin action based on external evidence:
+`retry-approved`, `mark-dead`, or `confirm-success`.
+
+**Verify**
+
+One compare-and-swap winner, one immutable audit fact, stable idempotency, expected same-
+Thread release/blocking, and no fabricated response/delivery.
+
+**Rollback**
+
+Release rollback does not erase ambiguous queue work. The previous application must read
+the retained state correctly; otherwise keep the current schema/application stopped and
+escalate the evidence decision.
+
+## Stale heartbeat
+
+**Check**
+
+Determine which of Poll, Dispatch, or Delivery heartbeat is missing, stale, or invalid.
+Compare container health, process state, last operation details, and queue movement.
+
+**Classify**
+
+- Poll/Delivery heartbeat: gated Worker incident;
+- Dispatch heartbeat: Dispatch Compose service incident, outside Controller control;
+- fresh heartbeat with failed-cycle detail: Worker is alive but degraded.
+
+**Operate**
+
+For Poll/Delivery, preserve evidence and use Controller stop/start. For Dispatch, use the
+approved Compose release procedure to recreate/start only `dispatch-worker` after
+preserving evidence and checking for running/uncertain claims.
+
+**Verify**
+
+The correct heartbeat file advances, state becomes healthy, old claims follow fencing
+rules, and queue movement is consistent.
+
+**Rollback**
+
+Roll back when the current Worker repeatedly cannot publish a valid heartbeat or safely
+resume its durable state.
+
+## Checkpoint continuity failed closed
+
+**Check**
+
+Record the redacted continuity error code/action, Checkpoint generation, whether an anchor
+exists, visible-window shape, and whether the failure signature repeats. Do not record
+message content or raw IDs.
+
+**Classify**
+
+- legacy nonzero Checkpoint without anchor;
+- ambiguous/missing saved anchor in the visible window;
+- proven local-ID regression;
+- concurrent Checkpoint compare-and-swap conflict;
+- empty-window Marker unavailable or invalid.
+
+**Operate**
+
+Keep the affected chat fail closed. Restore trustworthy upstream history/time/session
+conditions and allow the runtime to enroll or confirm an anchor through its implemented
+rules. If the external session is being rebuilt, close the Poll/Delivery Gate first.
+
+**Verify**
+
+No Sink call or Checkpoint mutation occurred during ambiguity; a subsequent proven window
+advances exactly once; identical steady failure evidence remains deduplicated.
+
+**Rollback**
+
+Application rollback may restore previous code behavior but must retain the authoritative
+Checkpoint row. Never rewind, delete, or fabricate the fingerprint to force progress.
+
+## Empty-window Marker unavailable
+
+**Check**
+
+Confirm the visible window is empty and the persisted Marker is missing, mismatched,
+expired, or based on untrusted/backwards time.
+
+**Classify**
+
+This is a continuity-evidence failure, not proof that history disappeared and not
+permission to reset the cursor.
+
+**Operate**
+
+Leave the chat stopped. Restore trusted clock/Marker persistence or wait for a trustworthy
+visible overlap according to the incident plan. A Worker restart resets in-memory log
+deduplication but does not create continuity evidence.
+
+**Verify**
+
+Zero Sink calls, zero Checkpoint mutation attempts, zero business inserts, and bounded
+warning/summary output while the signature is unchanged.
+
+**Rollback**
+
+Do not restore service by editing the Checkpoint. Use release rollback only for a verified
+software regression and retain all continuity evidence.
+
+## Duplicate or replay suspicion
+
+**Check**
+
+Close the Poll/Delivery Gate if another effect is possible. Preserve Message uniqueness,
+Admission Outcome, Dispatch idempotency key/status, Hermes response, Response parts,
+Delivery attempts/receipts, and Checkpoint facts through approved read-only inspection.
+
+**Classify**
+
+- duplicate inbound event resolved to one existing Message;
+- repeated admission replay using one completed outcome;
+- reclaimed Dispatch protected by upstream idempotency;
+- ambiguous Hermes effect (`uncertain`);
+- ambiguous channel effect (Delivery `uncertain`);
+- confirmed external duplicate.
+
+**Operate**
+
+Resolve only the authoritative ambiguous state. Do not delete the later row, reset an
+attempt counter, rewrite a receipt, or resend from a manual client.
+
+**Verify**
+
+Unique Message/Dispatch/Response/Delivery boundaries remain intact, external effect count is
+understood, and later same-Thread work is released only after the correct resolution.
+
+**Rollback**
+
+Rollback does not remove an already-created duplicate. Preserve evidence and ensure the
+previous application honors the same idempotency and audit boundaries.
+
+## Formal release rollback
+
+1. Close the Poll/Delivery Gate.
+2. Stop Dispatch Worker and Gateway through the approved Compose command.
+3. Preserve logs, health, queue/database aggregates, Controller status, image identity, and
+   incident reference.
+4. Select an intact previous release directory and immutable image.
+5. Prefer application rollback with the current forward-compatible schema.
+6. Restore a pre-upgrade database into a separately verified target only when an older
+   schema is mandatory and an approved restore procedure exists.
+7. Start Gateway and Dispatch Worker with the gate closed.
+8. Verify readiness, schema, queue compatibility, and external session.
+9. Open the gate through the previous release Controller and complete rollback acceptance.
+
+See [Production deployment](deployment/production.md#formal-rollback) for the full release
+procedure and [Production status](production-status.md#rollback-and-evidence) for the
+current release's preserved rollback material.

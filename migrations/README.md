@@ -1,8 +1,14 @@
 # Migrations
 
 Alembic owns the Gateway schema through the packaged migration tree under
-`src/cf_agent_gateway/migrations/`. Application startup upgrades an empty or already-versioned
-database to the current head. The same tree can be run explicitly with:
+`src/cf_agent_gateway/migrations/`. The current packaged and production head is
+`20260823_04`; the deployed release is recorded in
+[Production status](../docs/production-status.md).
+
+Development startup can initialize an empty or already-versioned database through the
+packaged tree. Production long-running services use migration check mode and never upgrade
+schema during normal startup. The one-shot production migration service, or this explicit
+runner in an approved exclusive window, performs the upgrade:
 
 ```console
 cf-agent-gateway-migrate

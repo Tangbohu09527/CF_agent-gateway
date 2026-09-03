@@ -1,292 +1,230 @@
-# V2 production runtime architecture
+# Runtime architecture
 
-## Scope and evidence
+## Current production topology
 
-This document describes the V2 runtime implemented on the
-`feat/v2-enterprise-runtime` line and hardened by the production-runtime work.
-It is the operational view of the lower-level model described in
-[architecture.md](architecture.md).
-
-| Label | Meaning for this document |
-| --- | --- |
-| Implemented | Present in repository code, migration, or configuration. |
-| Locally tested | Covered by the final local test run recorded in the pull request. |
-| GitHub Actions | Rechecked by `.github/workflows/ci.yml`; the run ID belongs in the pull request. |
-| Not CFserver-validated | No real CFserver, production PostgreSQL, WeChat account, or Hermes instance was changed or exercised. |
-| External responsibility | Must be supplied or operated by the deployment owner. |
-| Manual action | Requires an authenticated operator decision; the runtime does not guess. |
-
-## Production topology
-
-The production topology has one external database and four application processes:
+The production V2 runtime is validated on the release recorded in
+[Production status](production-status.md).
 
 ```text
-external PostgreSQL
-        ^
-        |
-Gateway API              wechat-worker
-                              |
-agent-wechat -> polling -> Message Store -> Admission / Routing
-                              |
-                              v
-                    hermes_dispatch_records
-                              |
-                       dispatch-worker
-                              |
-                           Hermes
-                              |
-              durable response persistence
-                              |
-                       delivery_outbox
-                              |
-                       delivery-worker
-                              |
-                        agent-wechat
-                              |
-                            WeChat
+                         external PostgreSQL
+                                  ^
+                                  |
+external agent-wechat -> Poll Worker -> Message / Admission / Dispatch
+                                               |
+                                         Dispatch Worker
+                                               |
+                                         external Hermes
+                                               |
+                                      Response / Delivery
+                                               |
+                                         Delivery Worker
+                                               |
+                                     external agent-wechat
 ```
 
-The Gateway API, `wechat-worker`, `dispatch-worker`, and `delivery-worker` run
-from the same immutable release but are independent processes. PostgreSQL,
-agent-wechat, Hermes, and WeChat are external responsibilities. FastAPI does not
-run polling, dispatch, or delivery as an in-process background task.
+Four application processes use the same immutable Gateway image:
 
-## Durable ownership boundaries
-
-| Owner | Writes | Reads but does not rewrite |
+| Process | Compose service | Primary ownership |
 | --- | --- | --- |
-| WeChat polling | Sync checkpoint, Message Store, authoritative admission outcome and one dispatch row | agent-wechat visible window |
-| Dispatch worker | Dispatch claim/lease/status, claim-fenced Hermes response | Message Store, Workspace, AIThread and routing snapshot |
-| Response persistence | Normalized response parts and existing delivery outbox | Persisted Hermes response |
-| Delivery worker | Delivery claims, attempts, receipts and terminal status | Response parts and artifacts |
-| Admin recovery | CAS dispatch transition plus database-immutable audit row | Dispatch, response and delivery evidence |
+| Gateway API | `gateway` | HTTP API, readiness, runtime health, Admin inspection/recovery |
+| Poll Worker | `worker` | agent-wechat polling, Checkpoint, Message persistence, admission enqueue |
+| Dispatch Worker | `dispatch-worker` | Hermes claims/calls, Dispatch state, response persistence, reconciliation |
+| Delivery Worker | `delivery-worker` | Delivery claims, ordered channel sends, attempts, receipts |
 
-There is one dispatch model (`hermes_dispatch_records` and its existing response
-tables) and one delivery model (`delivery_outbox` and its existing attempt/receipt
-tables). No parallel ledger is used.
+PostgreSQL, `agent-wechat`, and Hermes are external dependencies. The production Compose
+file does not own the external PostgreSQL lifecycle. FastAPI does not run polling,
+dispatch, or delivery as background tasks.
 
-## Checkpoint continuity and identity
+## Runtime Controller and Worker gate
 
-`localId` orders messages only inside one conversation and one visible
-agent-wechat session window. It is not a permanent cursor. Each checkpoint therefore
-stores a regression generation and a content-free fingerprint anchor in addition to
-the last local ID.
+`deploy/wechat-runtime-control` is the formal lifecycle entry for the two WeChat-facing
+gated workers:
 
-The poller proves a reset when either of these conditions is visible:
+- Poll Worker (`worker`)
+- Delivery Worker (`delivery-worker`)
 
-1. The largest visible positive `localId` is below the stored checkpoint.
-2. The visible message at the stored `localId` does not match the stored anchor.
+It does not start, stop, or recreate Gateway, Dispatch Worker, migration, or an external
+PostgreSQL service. The Dispatch Worker service name is published by the Controller
+contract for coordination but is protected from Controller mutation.
 
-An empty or failed response is not proof of reset. A legacy checkpoint with no anchor
-is advanced only after continuity can be established; an ambiguous window fails closed
-and is reported as degraded. Recovery uses a database compare-and-swap: exactly one
-poller increments the generation and rewinds to immediately before the first visible
-message. The same visible window then follows the normal persist-first path.
+The gate is intentionally split:
 
-The upstream `serverId`, when present, remains the stable physical-message identity
-across generations. When it is absent, the source-message identity is scoped by the
-checkpoint generation. Its separate continuity anchor is content-free: the checkpoint row
-provides source-account/conversation/generation scope, while the fallback digest contains
-local ID, conversation ID, sender ID, raw message type, UTC timestamp, and self flag. It
-does not use message text or nickname, and a timestamp alone is never treated as identity.
+- Gateway and Dispatch Worker may be online while Poll and Delivery are stopped.
+- An `agent-wechat` fresh-QR login is an external lifecycle event.
+- Poll and Delivery must remain stopped until the external session and Token File contract
+  are ready.
+- Controller `start` prepares exactly the controlled containers, preserves every
+  protected container ID, starts the controlled container IDs directly, and waits for
+  Docker health, fresh heartbeats, and the Token File contract.
+- Controller `status` is read-only and reports a redacted five-field status object.
 
-A newly processed serverId-less checkpoint therefore validates its own anchor on the next
-cycle and can admit later messages. A legacy anchorless checkpoint can CAS-enroll either a
-serverId or content-free fallback anchor from one exact overlapping message, then stops that
-chat for the cycle so the following cycle confirms continuity. If the anchor message is
-absent, duplicated, or lacks the required non-content fields, the chat fails closed.
-Continuity observations live in the process-lifetime `WechatPollingLifecycleState`, not
-the finite per-cycle service. Their signature binds account/conversation, checkpoint local
-ID/generation/fingerprint, remote bounds, recovery action, and failure code. First/change
-emits WARNING; an identical state emits no periodic reminder. Worker restart or account
-change rebuilds the observation and can warn again.
+See [Gateway to agent-wechat runtime contract](wechat-runtime-contract.md) for exact
+fields, timeout behavior, and Token File validation.
 
-The same lifecycle state owns empty-window markers, pending visible windows, history
-observations, continuity observations, and marker clock watermarks behind one 1,024-Chat
-bound. Every successful `list_chats` cycle prunes all state kinds for missing Chats. New
-keys evict the least recently touched Chat at the bound, preventing process-lifetime
-growth under Chat churn.
+## Poll Worker boundary
 
-Full Chat invalidation and Marker-only invalidation are deliberately distinct. Account
-change, Chat disappearance, and ordinary auth/list/parse/database/network failures can
-drop the complete Chat state. Invalid fingerprint, failed/unusable/backwards marker clock,
-or marker identity mismatch drops only empty-marker/pending/history evidence and retains
-the continuity observation. A monotonic clock watermark keeps repeated backwards time
-fail-closed even after the unsafe marker is removed. No invalid Marker can be reused to
-start a live suffix.
+Each Poll Worker cycle:
 
-Message Store uniqueness remains the final idempotency boundary; the checkpoint is an
-optimization and continuity record, not a substitute for that constraint. Polling can
-therefore redeliver after a crash between sink commit and checkpoint advance without
-creating a second Message or dispatch.
+1. reads the external `agent-wechat` chat/message window;
+2. filters self-originated Messages before the sink;
+3. enforces per-account/per-conversation Checkpoint continuity;
+4. normalizes and persists each new Message in an isolated database session;
+5. resolves or replays one durable Admission Outcome;
+6. atomically commits an allowed outcome and its queued Dispatch;
+7. advances the Checkpoint with compare-and-swap protection.
 
-## Durable admission authority
+Polling ends at the durable Dispatch boundary. It does not create a Hermes client, call
+Hermes, persist an assistant response, or send a channel reply.
 
-`message_admission_outcomes` permits at most one authoritative row per persisted Message,
-enforced by a unique `message_id` and restrictive foreign key. A row can be absent only
-after Message commit and before admission begins. Runtime outcomes begin as
-`pending` with a claim token, lease, attempt count, and stored request facts. Only a free or
-expired lease can be claimed; a live claim makes concurrent replay fail closed. Evaluation
-failure releases the claim, records a stable error code, and leaves the row pending for
-controlled replay.
+Poll cycles do not overlap. `SIGINT` and `SIGTERM` request a graceful stop after the
+current bounded operation.
 
-A completed outcome stores `allowed`, `denied`, or fail-closed `unresolved`, together
-with the reason, task decision, enterprise identity, Workspace/AIThread target, request and
-authorization snapshots, policy IDs/timestamps, routing mode, Profile revision, and
-completion timestamps where applicable. A completed denied/unresolved Message is never
-reevaluated after policy, mention, Profile, or routing changes. A completed allowed Message
-reuses its stored target and repairs only its missing idempotent dispatch.
+## Checkpoint continuity
 
-Message persistence commits before admission, so a crash at that boundary leaves an
-authoritative Message with no outcome and replay may start admission. For a new allowed
-decision, admission completion and dispatch enqueue are staged in one database transaction:
-neither fact can commit alone. The poller still stops before Hermes execution.
+A WeChat Checkpoint is scoped by source account and conversation. It stores:
 
-Revision `20260823_03` backfills every legacy Message. A Message with an existing dispatch
-becomes completed allowed using that dispatch target; every Message without a dispatch
-becomes completed `legacy_unresolved` and cannot be silently reevaluated. Existing Message,
-dispatch, response, and delivery facts are not rewritten.
+- `last_local_id`;
+- a non-negative regression generation;
+- a content-free continuity fingerprint when available.
 
-## Polling observability
+The continuity anchor prefers upstream `serverId`. The fallback fingerprint is scoped
+from identifiers and metadata without message content. A normal overlapping window must
+confirm the saved anchor before history is skipped.
 
-Per-message checkpoint and self skips are DEBUG records. A completely idle
-`poll chat completed` or `poll cycle completed` summary and every
-`poll cycle started` record are also DEBUG. A non-empty checkpoint-only history window is
-INFO when first observed or when its content-free local-ID sequence/count changes; the same
-window and checkpoint-skip count on later cycles is DEBUG. Chats and cycles with new or
-duplicate messages, failures, bootstrap, self skips, or authentication activity remain
-INFO. Worker start/stop remains INFO and heartbeat failure remains ERROR.
-Known continuity-only failures are different from ordinary failures: first/signature change
-retains the continuity WARNING plus chat/cycle INFO, while an identical later result is
-DEBUG. Auth, list-chats/list-messages, parsing, database, network, and unknown failures
-remain INFO/ERROR every occurrence.
-Activity summaries expose redacted account/conversation references and
-`messages_seen`, `messages_processed`, `messages_new`, `messages_duplicate`,
-`messages_skipped_checkpoint`, `messages_skipped_self`, `messages_failed`,
-serverId-less, bootstrap, and failure counts.
-Checkpoint regression detected/rebased/live-suffix, continuity failed-closed, and CAS
-conflict records remain WARNING. Successful `httpx`/`httpcore` request records and
-routine Alembic context records are pinned to WARNING by default. Setting the Gateway root
-level to DEBUG does not restore those third-party records; their logger levels require an
-explicit bounded override. No message body, nickname, token, Authorization/Cookie header,
-connection string, raw account/chat ID, or raw upstream response is logged.
+If a session rebuild causes the remote local-ID range to regress, the Poll Worker may
+perform one compare-and-swap recovery only when continuity is proven. Ambiguous anchors,
+an unavailable or invalid empty-window Marker, backwards/untrusted Marker time, or a
+concurrent Checkpoint change fail closed for that chat.
 
-## Dispatch lifecycle and FIFO
+Fail-closed means:
 
-The V2 dispatch statuses are `queued`, `running`, `success`, `failed`, `uncertain`,
-and `dead`.
+- no Sink call for the ambiguous chat;
+- no Message/admission/Dispatch creation from the unverified window;
+- no fabricated Checkpoint anchor;
+- no manual rewind by the runtime;
+- a structured continuity warning and bounded summary evidence.
 
-- `queued` and retry-eligible `failed` records can be claimed.
-- `running` records hold a fenced claim token and renewable lease.
-- An expired lease can be reclaimed only within the configured retry budget.
-- `success` releases the thread only after response evidence has been persisted.
-- `dead` is terminal and releases the next record without pretending success.
-- `uncertain` means the external Hermes effect cannot be proven. It blocks later
-  records on the same AIThread and is never blindly retried.
+Identical steady-state failures are deduplicated within the Worker lifecycle. The accepted
+real legacy-Checkpoint behavior is recorded in
+[Production status](production-status.md#real-legacy-checkpoint-acceptance).
 
-Claims recheck thread-head order, thread idleness, lease, token, and retry budget in
-the database. Different threads can execute concurrently; one thread cannot overlap
-Hermes calls. Poison candidates are ordered behind lower-attempt work so one repeated
-failure does not starve the entire queue.
+## Admission and routing ownership
 
-Resolving `uncertain` is a manual action through the authenticated Admin API:
+Message persistence precedes admission. `message_admission_outcomes` is the single
+durable authority per Message.
 
-- `retry-approved` is used only after the operator proves Hermes did not execute.
-- `mark-dead` terminates the record and releases the following thread work.
-- `confirm-success` requires matching persisted Hermes response evidence.
+- Pending outcomes use a claim token and lease.
+- A stale pending outcome recovers from its stored request snapshot.
+- Completed outcomes replay their stored decision and route.
+- Denied and unresolved outcomes never request execution.
+- Allowed completion and the initial Dispatch commit atomically.
 
-Every transition is CAS-protected, preserves `attempt_count`, and writes an audit row.
-Replaying the same action/reference is idempotent. `confirm-success` never accepts
-assistant content from an operator and does not enqueue a duplicate delivery.
+Production enables V2 routing. Agent Profile revision and Thread policy are persisted with
+the route. `private_sender` and `group_sender` isolate by enterprise sender identity;
+`group_shared` intentionally shares a Thread across authorized members.
 
-Revision `20260823_04` makes those audit rows immutable at the database boundary:
-PostgreSQL rejects UPDATE/DELETE through a trigger function and SQLite uses equivalent
-triggers. Database constraints also require the exact retry/mark-dead/confirm-success
-before/after/evidence tuples and permit `manual_retry_approved=true` only on `failed`.
-The ORM and direct SQL are subject to the same invariants.
+## Dispatch Worker boundary
 
-## Delivery recovery
+The Dispatch Worker fills up to the configured concurrency across different AI Threads.
+For one Thread, only the eligible FIFO head may run.
 
-Dispatch success and channel delivery are separate durable facts. A delivery failure
-does not call Hermes again or revert dispatch success. The delivery worker reclaims
-eligible stale claims, records each attempt, and treats an ambiguous outbound result as
-`uncertain` to prevent blind duplicate sends.
+The claim transaction rechecks:
 
-If a persisted response has no delivery row, reconciliation uses the existing response
-and delivery tables to create only the missing outbox fact. It does not recreate the
-Message, dispatch, or response. Missing-delivery counts are surfaced by runtime health.
+- eligible status and retry budget;
+- FIFO head order by `(created_at, id)`;
+- absence of another running Dispatch for the AI Thread;
+- the new claim token and lease.
 
-The resident dispatch worker scans reconciliation candidates at most once every five
-seconds, in ID order with a bounded cursor batch. A corrupt candidate records persistent
-failure state and waits 30, 60, 120, then 240 seconds; the fifth failure is quarantined
-without another automatic attempt. State-transition logs are WARNING while deferred and
-ERROR once on quarantine rather than once per 0.25-second worker loop. The cursor continues
-past a poison candidate, and process restart honors the database `next_attempt_at` or
-quarantine. Runtime health reports total, deferred, poison, and oldest reconciliation
-backlog. Quarantine requires investigation and a reviewed corrective change; there is no
-generic force-replay endpoint.
+The database also has a partial unique index that permits at most one `running` Dispatch
+per AI Thread. Lease renewals and terminal writes are fenced by the active claim token.
 
-## Liveness, readiness, and business health
+A definite pre-effect failure can become retryable `failed`. Once the retry budget is
+exhausted it becomes `dead`. A timeout, transport ambiguity, invalid post-call result, or
+other possible external effect becomes `uncertain`; it never auto-retries and blocks
+later work for the same AI Thread.
 
-`GET /health` is HTTP process liveness. `GET /ready` is service readiness and includes
-the database/migration gate used at startup. Runtime business health is a separate,
-redacted snapshot that covers:
+Admin recovery is authenticated and compare-and-swap protected:
 
-- database and Alembic schema state;
-- heartbeats for all three enabled workers;
-- WeChat configuration/auth signal and Hermes configuration/connectivity signal;
-- dispatch counts and oldest backlog/uncertain ages;
-- stale running leases, blocked threads and dead records;
-- delivery failures, uncertain/stale delivery and missing delivery;
-- checkpoint continuity that is still unverified after migration; and
-- reconciliation backlog, deferred candidates, quarantined poison candidates, and age.
+- `retry-approved` records proof that retry is authorized;
+- `mark-dead` terminates the Dispatch without inventing a response;
+- `confirm-success` requires matching persisted response evidence.
 
-See [runtime-health.md](runtime-health.md) for interpretation. A healthy HTTP process
-does not prove that the end-to-end business chain can reply to WeChat. In particular,
-dispatch-worker liveness does not prove Hermes connectivity. A configured, healthy but
-idle worker is `ok/no_recent_observation`; a recent explicit success is
-`last_operation_succeeded`, and a recent explicit failure is degraded. A stale/missing
-dispatch-worker or missing Hermes configuration is degraded. No active probe sends
-synthetic business traffic.
+Each successful action creates a database-immutable recovery audit. Operator-supplied
+assistant content is never accepted.
 
-Production Compose runs all long-lived services as `10001:10001` with read-only root
-filesystems. A networkless, Secret-free, one-shot root `heartbeat-init` owns only the
-shared volume initialization step: it enforces directory owner/group `10001:10001` and
-mode `0750`, then exits. Workers atomically replace their own `0600` heartbeat files;
-the Gateway mounts that volume read-only. Failure of the first heartbeat prevents business
-work, and three consecutive later write failures terminate the worker for supervised
-restart.
+## Response reconciliation and Delivery Worker
 
-## Schema ownership
+The Dispatch Worker also runs a bounded reconciliation scan. It repairs a missing
+normalized Response or Delivery record only from an already successful Dispatch with a
+persisted Hermes response. It never calls Hermes or sends a channel Message.
 
-Alembic is the only schema-evolution mechanism. The repository has one linear revision
-chain with head `20260823_04`. Production deploys run the migration as an exclusive step
-before the four application processes start; normal process startup uses schema-check mode.
-No standalone SQL creates or replaces an existing V2 table, and `create_all` is not a
-production migration mechanism. See [the migration runbook](../migrations/README.md).
+Candidate failures persist exponential deferral and quarantine after the configured
+failure limit. A poison candidate does not block a later valid candidate.
 
-## PR #3 lineage
+The Delivery Worker:
 
-PR #3 (`codex/gateway-production-hardening`) was based on `main`, not the V2 runtime
-baseline. It was audited as design input only; it was not merged, rebased, or
-cherry-picked as a whole.
+1. recovers stale Delivery claims;
+2. claims one available outbox record;
+3. reads ordered Response parts;
+4. sends text or a ready response-owned Artifact;
+5. persists each attempt and provider receipt;
+6. advances the next-part ordinal or records retryable, failed, or uncertain state.
 
-| Disposition | PR #3 material | V2 treatment |
-| --- | --- | --- |
-| PORT | Checkpoint generation/CAS mechanics, serverId-first identity, generation-scoped fallback concepts, structured event/test concepts | Adapted to the existing V2 polling, Message Store and Alembic chain. |
-| REDESIGN | Continuity fail-closed behavior, masked logs, three-worker lifecycle/health, Admin recovery, API boundaries | Reimplemented against existing V2 stores, workers, Admin API and status model. |
-| REJECT | Parallel Hermes dispatch/delivery ledgers, three-state `succeeded/in_progress/failed` model, inline execution, one-service Compose, standalone SQL migration | Not introduced because each conflicts with the V2 durable model. |
+Delivery state does not rewrite Dispatch state. A successful Dispatch is never called
+again merely because channel delivery failed.
 
-PR #3's historical test count is not evidence for this branch. Only the final V2 test
-run and GitHub Actions run attached to pull request #4 are release evidence.
+## Heartbeats and health
 
-## Time contract
+Poll, Dispatch, and Delivery Workers publish distinct atomic JSON heartbeat files in the
+shared runtime volume. The Gateway mounts that volume read-only and uses heartbeat
+freshness plus durable database metrics for `GET /health/runtime`.
 
-- Debian host timezone: `Asia/Shanghai`.
-- Containers: UTC.
-- PostgreSQL: UTC.
-- Persisted timestamps: UTC.
-- Display and reporting layers perform timezone conversion.
+Heartbeat state is not proof of external connectivity. Runtime health reports:
 
-Do not change the PostgreSQL timezone to make displayed timestamps look local. That
-would hide a presentation problem by changing the persistence contract.
+- worker liveness/freshness;
+- `agent-wechat` authentication observation;
+- Hermes configuration and recent-operation observation;
+- database and Alembic state;
+- Checkpoint continuity;
+- Dispatch, reconciliation, and Delivery counts and oldest ages.
+
+The Runtime Controller separately validates Poll/Delivery Docker health, heartbeat age,
+and the protected Token File contract. Endpoint and Controller fields are documented in
+[Runtime health](runtime-health.md).
+
+## Restart semantics
+
+Production long-running containers use `restart: unless-stopped`. After a CFserver host
+reboot, Gateway, Dispatch Worker, Poll Worker, and Delivery Worker are expected to restart
+when their Docker-managed state and dependencies are available.
+
+The `agent-wechat` authenticated session has a separate external lifecycle. It may survive
+a reboot, or it may require a fresh QR. If a fresh QR is required, close the Poll/Delivery
+gate before login and reopen it only through the Runtime Controller after the session and
+Token Contract are ready.
+
+PostgreSQL startup ordering and availability remain external. Long-running Gateway
+processes run migration check mode and fail closed on a schema mismatch; only the one-shot
+migration service may upgrade schema.
+
+## Logging and retention
+
+All processes emit newline-delimited structured logs. Routine per-message Checkpoint/self
+skips are DEBUG-level; Chat and Cycle INFO summaries are bounded and unchanged continuity
+failures are deduplicated for the Worker lifecycle.
+
+Production Compose uses Docker `json-file` rotation at `64m` x `10` for each service.
+The accepted capacity calculation is maintained only in
+[Production status](production-status.md#log-retention-record).
+
+Logs must not contain Tokens, Authorization/Cookie headers, database connection strings,
+message content, personal identities, or raw account/chat/conversation IDs. Logs are
+operational evidence, not a replacement for durable Message, Admission, Dispatch,
+recovery-audit, Response, Delivery, or Checkpoint facts.
+
+## Current limitations
+
+General Provider routing, automatic Skill execution, ERP logic, enterprise knowledge/RAG,
+OCR, general inbound file/archive understanding, and cross-repository deployment are not
+part of this runtime. Outbound response Artifact delivery is implemented and automated-test
+covered but was outside the recorded real production media acceptance.
