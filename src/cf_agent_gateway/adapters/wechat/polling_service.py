@@ -76,6 +76,7 @@ class WechatPollingLifecycleState:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._active_source_account_id: str | None = None
         self._empty_window_markers: dict[tuple[str, str], _EmptyWindowMarker] = {}
+        self._marker_clock_watermarks: dict[tuple[str, str], datetime] = {}
         self._pending_visible_windows: dict[tuple[str, str], tuple[int, ...]] = {}
         self._chat_history_observations: dict[tuple[str, str], _ChatHistoryObservation] = {}
         self._continuity_observations: dict[tuple[str, str], _ContinuityObservation] = {}
@@ -83,6 +84,7 @@ class WechatPollingLifecycleState:
 
     def invalidate_all(self) -> None:
         self._empty_window_markers.clear()
+        self._marker_clock_watermarks.clear()
         self._pending_visible_windows.clear()
         self._chat_history_observations.clear()
         self._continuity_observations.clear()
@@ -105,6 +107,7 @@ class WechatPollingLifecycleState:
         return {
             "chats": len(self._chat_state_order),
             "empty_markers": len(self._empty_window_markers),
+            "marker_clock_watermarks": len(self._marker_clock_watermarks),
             "pending_windows": len(self._pending_visible_windows),
             "history": len(self._chat_history_observations),
             "continuity": len(self._continuity_observations),
@@ -131,6 +134,7 @@ class WechatPollingLifecycleState:
     def _drop_chat_state(self, key: tuple[str, str]) -> None:
         self._chat_state_order.pop(key, None)
         self._empty_window_markers.pop(key, None)
+        self._marker_clock_watermarks.pop(key, None)
         self._pending_visible_windows.pop(key, None)
         self._chat_history_observations.pop(key, None)
         self._continuity_observations.pop(key, None)
@@ -140,12 +144,24 @@ class WechatPollingLifecycleState:
             key in state
             for state in (
                 self._empty_window_markers,
+                self._marker_clock_watermarks,
                 self._pending_visible_windows,
                 self._chat_history_observations,
                 self._continuity_observations,
             )
         ):
             self._chat_state_order.pop(key, None)
+
+    def invalidate_marker_evidence(
+        self,
+        source_account_id: str,
+        conversation_id: str,
+    ) -> None:
+        key = (source_account_id, conversation_id)
+        self._empty_window_markers.pop(key, None)
+        self._pending_visible_windows.pop(key, None)
+        self._chat_history_observations.pop(key, None)
+        self._release_chat_state_if_unused(key)
 
     def record_visible_window(
         self,
@@ -243,23 +259,32 @@ class WechatPollingLifecycleState:
         conversation_id: str,
         checkpoint: object,
     ) -> bool:
+        key = (source_account_id, conversation_id)
+        self._touch_chat_state(key)
         if not _valid_checkpoint_marker_state(checkpoint):
-            self.invalidate_chat(source_account_id, conversation_id)
+            self.invalidate_marker_evidence(source_account_id, conversation_id)
             return False
         try:
             observed_at = _aware_utc(self._clock())
         except Exception:
             observed_at = None
         if observed_at is None:
-            self.invalidate_chat(source_account_id, conversation_id)
+            self.invalidate_marker_evidence(source_account_id, conversation_id)
             return False
 
-        key = (source_account_id, conversation_id)
-        self._touch_chat_state(key)
+        previous_observed_at = self._marker_clock_watermarks.get(key)
+        if previous_observed_at is not None and observed_at < previous_observed_at:
+            self.invalidate_marker_evidence(source_account_id, conversation_id)
+            return False
+        self._marker_clock_watermarks[key] = observed_at
+
         existing = self._empty_window_markers.get(key)
-        if existing is not None and _marker_matches_checkpoint(existing, checkpoint):
+        if existing is not None:
+            if not _marker_matches_checkpoint(existing, checkpoint):
+                self.invalidate_marker_evidence(source_account_id, conversation_id)
+                return False
             if observed_at < existing.last_empty_observed_at:
-                self.invalidate_chat(source_account_id, conversation_id)
+                self.invalidate_marker_evidence(source_account_id, conversation_id)
                 return False
             self._empty_window_markers[key] = _EmptyWindowMarker(
                 source_account_id=source_account_id,
@@ -291,10 +316,10 @@ class WechatPollingLifecycleState:
         source_account_id: str,
         conversation_id: str,
     ) -> _EmptyWindowMarker | None:
-        return self._empty_window_markers.pop(
-            (source_account_id, conversation_id),
-            None,
-        )
+        key = (source_account_id, conversation_id)
+        marker = self._empty_window_markers.pop(key, None)
+        self._marker_clock_watermarks.pop(key, None)
+        return marker
 
 
 class WechatPollingClient(Protocol):
