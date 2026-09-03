@@ -3,6 +3,12 @@
 Use this checklist for release review and again for an authorized CFserver rollout.
 Repository work does not complete the external steps automatically.
 
+The `cd9990a` candidate failed its authorized CFserver 90-second validation on
+September 2, 2026 with 27 repeated continuity WARNINGs, 27 failed chat INFO summaries, and
+27 failed cycle INFO summaries. It was controlledly rolled back; formal production is
+`7db3384`. The current PR head is not running in production and remains unvalidated until
+the short validation at the end of this checklist passes.
+
 ## Evidence labels
 
 - **Implemented**: present in the release commit.
@@ -129,9 +135,18 @@ ambiguous production effect just to test recovery.
   five chat INFO summaries, and at most one cycle INFO on first/change. Four unchanged
   cycles add zero repeated WARNING/chat INFO/cycle INFO; changing one checkpoint emits
   exactly one additional WARNING/chat INFO and one cycle INFO.
+- [ ] A persistent old Checkpoint with fingerprint null/empty/malformed, a throwing or
+  unusable marker clock, backwards time, and marker mismatch each use a new finite service
+  per cycle with one shared lifecycle state. Four identical cycles emit one initial
+  WARNING/chat INFO/cycle INFO and zero additional records on cycles 2-4; changing any
+  signature field re-emits exactly once.
+- [ ] Every Marker-unavailable case proves zero Sink calls, processed/new messages,
+  checkpoint/generation movement, business-table inserts, history replay, and live-suffix
+  starts.
 - [ ] Removing a Chat from `list_chats` prunes its empty marker, pending window, history,
-  and continuity observation. Account change and a new Worker lifecycle reset state, and
-  temporary Chat churn cannot exceed the documented 1,024-Chat cache bound.
+  marker clock watermark, and continuity observation. Account change and a new Worker
+  lifecycle reset state, and temporary Chat churn cannot exceed the documented 1,024-Chat
+  cache bound.
 - [ ] A live admission claim fails closed; an expired claim recovers from its stored
   request snapshot.
 - [ ] A crash between allowed-dispatch staging and outcome completion commits neither,

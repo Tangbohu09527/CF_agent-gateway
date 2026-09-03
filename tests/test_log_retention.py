@@ -26,9 +26,13 @@ CONTINUITY_EMPTY_CHAT_COUNT = 5
 CONTINUITY_STEADY_REPEATED_WARNING_RECORDS_PER_CYCLE = 0
 CONTINUITY_STEADY_REPEATED_INFO_RECORDS_PER_CYCLE = 0
 CONTINUITY_REMINDERS_PER_HOUR = 0
+MARKER_UNAVAILABLE_CHAT_COUNT = 1
+MARKER_UNAVAILABLE_STEADY_WARNING_RECORDS_PER_CYCLE = 0
+MARKER_UNAVAILABLE_STEADY_INFO_RECORDS_PER_CYCLE = 0
 BUSINESS_ACTIVE_CHATS_PER_CYCLE = 2
 HISTORY_SHAPE_CHANGES_PER_HOUR = 1
 CONTINUITY_STATE_CHANGES_PER_HOUR = 1
+MARKER_UNAVAILABLE_STATE_CHANGES_PER_HOUR = 1
 CHECKPOINT_TRANSITIONS_PER_HOUR = 2
 WORKER_RESTARTS_PER_DAY = 1
 RECORD_SAFETY_MARGIN_BYTES = 128
@@ -187,6 +191,22 @@ def retention_model() -> dict[str, float | int]:
             "cas_result": None,
         },
     )
+    marker_unavailable_warning_bytes = _docker_json_file_bytes(
+        "checkpoint continuity unverified",
+        level=logging.WARNING,
+        fields={
+            "source_account_id_ref": "source_account:sha256:0123456789abcdef",
+            "conversation_id_ref": "conversation:sha256:fedcba9876543210",
+            "old_checkpoint": 9_223_372_036_854_775_807,
+            "remote_first_local_id": 0,
+            "remote_latest_local_id": 0,
+            "old_generation": 999_999,
+            "new_generation": 999_999,
+            "anchor_match": None,
+            "recovery_action": "stop_chat_empty_window_marker_unavailable",
+            "cas_result": None,
+        },
+    )
     continuity_chat_summary_bytes = chat_summary_bytes(
         messages_seen=0,
         messages_processed=0,
@@ -217,6 +237,26 @@ def retention_model() -> dict[str, float | int]:
             "messages_without_server_id": 0,
             "bootstrapped_chats": 0,
             "failure_count": CONTINUITY_EMPTY_CHAT_COUNT,
+        },
+    )
+    marker_unavailable_cycle_summary_bytes = _docker_json_file_bytes(
+        "poll cycle completed",
+        level=logging.INFO,
+        fields={
+            "logged_in": True,
+            "chats_seen": MARKER_UNAVAILABLE_CHAT_COUNT,
+            "chats_succeeded": 0,
+            "chats_failed": MARKER_UNAVAILABLE_CHAT_COUNT,
+            "messages_seen": 0,
+            "messages_processed": 0,
+            "messages_new": 0,
+            "messages_duplicate": 0,
+            "messages_skipped_checkpoint": 0,
+            "messages_skipped_self": 0,
+            "messages_failed": 0,
+            "messages_without_server_id": 0,
+            "bootstrapped_chats": 0,
+            "failure_count": MARKER_UNAVAILABLE_CHAT_COUNT,
         },
     )
     checkpoint_transition_bytes = _docker_json_file_bytes(
@@ -253,11 +293,22 @@ def retention_model() -> dict[str, float | int]:
         CONTINUITY_EMPTY_CHAT_COUNT * (continuity_warning_bytes + continuity_chat_summary_bytes)
         + continuity_cycle_summary_bytes
     )
+    marker_unavailable_change_burst_bytes = (
+        MARKER_UNAVAILABLE_CHAT_COUNT
+        * (marker_unavailable_warning_bytes + continuity_chat_summary_bytes)
+        + marker_unavailable_cycle_summary_bytes
+    )
     hourly_history_change_bytes = (
         RETENTION_DAYS * 24 * HISTORY_SHAPE_CHANGES_PER_HOUR * history_change_burst_bytes
     )
     hourly_continuity_change_bytes = (
         RETENTION_DAYS * 24 * CONTINUITY_STATE_CHANGES_PER_HOUR * continuity_change_burst_bytes
+    )
+    hourly_marker_unavailable_change_bytes = (
+        RETENTION_DAYS
+        * 24
+        * MARKER_UNAVAILABLE_STATE_CHANGES_PER_HOUR
+        * marker_unavailable_change_burst_bytes
     )
     periodic_continuity_reminder_bytes = (
         RETENTION_DAYS * 24 * CONTINUITY_REMINDERS_PER_HOUR * continuity_change_burst_bytes
@@ -273,6 +324,7 @@ def retention_model() -> dict[str, float | int]:
             + worker_started_bytes
             + history_change_burst_bytes
             + continuity_change_burst_bytes
+            + marker_unavailable_change_burst_bytes
         )
     )
     initial_evidence_bytes = checkpoint_transition_bytes + worker_stopped_bytes
@@ -281,6 +333,7 @@ def retention_model() -> dict[str, float | int]:
         + business_activity_bytes
         + hourly_history_change_bytes
         + hourly_continuity_change_bytes
+        + hourly_marker_unavailable_change_bytes
         + periodic_continuity_reminder_bytes
         + hourly_checkpoint_bytes
         + daily_restart_bytes
@@ -303,10 +356,18 @@ def retention_model() -> dict[str, float | int]:
             CONTINUITY_STEADY_REPEATED_INFO_RECORDS_PER_CYCLE
         ),
         "continuity_reminders_per_hour": CONTINUITY_REMINDERS_PER_HOUR,
+        "marker_unavailable_steady_warning_records_per_cycle": (
+            MARKER_UNAVAILABLE_STEADY_WARNING_RECORDS_PER_CYCLE
+        ),
+        "marker_unavailable_steady_info_records_per_cycle": (
+            MARKER_UNAVAILABLE_STEADY_INFO_RECORDS_PER_CYCLE
+        ),
         "business_info_records_per_cycle": BUSINESS_ACTIVE_CHATS_PER_CYCLE + 1,
         "history_first_change_info_records": len(STABLE_NONEMPTY_CHAT_COUNTS) + 1,
         "continuity_first_change_warning_records": CONTINUITY_EMPTY_CHAT_COUNT,
         "continuity_first_change_info_records": CONTINUITY_EMPTY_CHAT_COUNT + 1,
+        "marker_unavailable_first_change_warning_records": MARKER_UNAVAILABLE_CHAT_COUNT,
+        "marker_unavailable_first_change_info_records": MARKER_UNAVAILABLE_CHAT_COUNT + 1,
         "modeled_bytes": modeled_bytes,
         "modeled_bytes_per_day": modeled_bytes_per_day,
         "configured_capacity_bytes": configured_capacity_bytes,
@@ -355,10 +416,14 @@ def test_retention_model_keeps_worker_stop_and_checkpoint_transition_for_seven_d
     assert model["continuity_steady_repeated_warning_records_per_cycle"] == 0
     assert model["continuity_steady_repeated_info_records_per_cycle"] == 0
     assert model["continuity_reminders_per_hour"] == 0
+    assert model["marker_unavailable_steady_warning_records_per_cycle"] == 0
+    assert model["marker_unavailable_steady_info_records_per_cycle"] == 0
     assert model["business_info_records_per_cycle"] == 3
     assert model["history_first_change_info_records"] == 7
     assert model["continuity_first_change_warning_records"] == 5
     assert model["continuity_first_change_info_records"] == 6
+    assert model["marker_unavailable_first_change_warning_records"] == 1
+    assert model["marker_unavailable_first_change_info_records"] == 2
     assert model["maximum_compose_disk_bytes"] == 3_840 * 1024 * 1024
     assert model["modeled_bytes"] <= model["usable_capacity_bytes"]
     assert model["estimated_retention_days"] >= RETENTION_DAYS

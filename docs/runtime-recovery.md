@@ -22,7 +22,7 @@ CFserver by this repository change.
 
 Production Compose retains each service's Docker `json-file` logs independently with
 defaults of 64 MiB across 10 files. The tested production-shape plus sustained-business
-model is about 70.42 MiB/day in the busiest container and retains 8.18 days after reserving
+model is about 70.48 MiB/day in the busiest container and retains 8.17 days after reserving
 10% capacity. Across all six services, the theoretical configured maximum is 3.75 GiB.
 Use `docker compose logs --since 168h <service>` before restarting or recreating a
 container, and preserve worker stop/start, checkpoint continuity/regression/CAS evidence,
@@ -44,6 +44,15 @@ local ID/generation/fingerprint, remote bounds, recovery action, and failure cod
 account/conversation scope. Worker restart or account change rebuilds this process-local
 state. A successful `list_chats` cycle prunes disappeared Chats, and all lifecycle state
 shares a 1,024-Chat bound.
+
+An unavailable empty-window Marker is not a reason to erase the continuity observation.
+Missing/malformed fingerprint, clock exception, naive/unusable time, backwards time, or
+marker identity mismatch removes only the unsafe marker plus pending/history helper state.
+The unchanged `stop_chat_empty_window_marker_unavailable` signature remains deduplicated
+across newly-created per-cycle services. A clock watermark prevents backwards observations
+from creating a new marker after the previous marker was rejected. The Chat remains
+fail-closed: no Sink call, checkpoint advance, generation increment, live-suffix start,
+dispatch, response, or delivery side effect is permitted.
 
 Docker logs are bounded operational evidence, not the audit authority. Dispatch recovery
 audits, Message/Admission/Checkpoint facts, delivery attempts and receipts remain in the

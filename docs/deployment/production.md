@@ -139,13 +139,22 @@ state emits no repeated WARNING/INFO on later three-second cycles. There is no p
 reminder; account change or Worker restart creates a new process-lifetime observation.
 Continuity signatures include checkpoint local ID/generation/fingerprint, remote bounds,
 recovery action, and failure code within the account/conversation scope.
+
+Marker evidence and continuity observation have separate invalidation boundaries. Missing
+or malformed checkpoint fingerprint, unavailable/naive/backwards marker clock, or marker
+identity mismatch removes the empty-window marker plus pending/history helper state but
+preserves the unchanged continuity signature. The Chat remains fail-closed with
+`stop_chat_empty_window_marker_unavailable`; no invalid marker can start live-suffix
+processing. Account change, Chat disappearance, or ordinary auth/list/parse/database/network
+failure may still invalidate the complete Chat state.
 Library WARNING/ERROR records and exception stacks are not suppressed.
 
 Process-lifetime polling state is limited to 1,024 Chat keys. Each successful
-`list_chats` cycle prunes empty markers, visible-window/history observations, continuity
-observations, and pending windows for Chats no longer present. Account change clears all
-state. The limit evicts the least recently touched Chat before accepting another key, so
-Chat churn cannot grow these dictionaries indefinitely.
+`list_chats` cycle prunes empty markers, marker clock watermarks,
+visible-window/history observations, continuity observations, and pending windows for
+Chats no longer present. Account change clears all state. The limit evicts the least
+recently touched Chat before accepting another key, so Chat churn cannot grow these
+dictionaries indefinitely.
 
 Treat these as high-value lifecycle evidence and preserve them before recovery:
 
@@ -169,17 +178,22 @@ rotation/format variation and models the busiest polling container with:
 - five persistent `stop_chat_visible_window_empty` Chats: first/change emits five
   continuity WARNINGs, five chat summaries, and one cycle summary; identical subsequent
   cycles emit zero repeated WARNING/INFO and no periodic reminder;
+- one persistent old Checkpoint with no valid fingerprint, producing
+  `stop_chat_empty_window_marker_unavailable`: first/change emits one WARNING, one chat
+  INFO, and one cycle INFO; identical three-second cycles emit zero repeated WARNING/INFO;
 - a conservative business ceiling of two real-activity chat summaries plus one active
   cycle summary on every three-second cycle;
 - all six stable history windows changing once per hour;
 - all five empty-window continuity signatures changing once per hour;
+- the Marker-unavailable signature changing once per hour;
 - two checkpoint transition records per hour and one worker stop/start per day;
 - both steady-state first-observation bursts rebuilding after each modeled Worker restart;
+- the Marker-unavailable first-observation burst rebuilding after each Worker restart;
 - the Docker `json-file` envelope, eight-digit PID, large counters/IDs, and an extra
   128-byte margin per record.
 
-That model produces 516,859,164 bytes over seven days (about 70.42 MiB/day). Against the
-576 MiB safety budget it estimates 8.18 days, so an initial worker-stop and checkpoint
+That model produces 517,295,964 bytes over seven days (about 70.48 MiB/day). Against the
+576 MiB safety budget it estimates 8.17 days, so an initial worker-stop and checkpoint
 transition remain inside the retained window. Recalculate the busiest container before
 lowering the defaults or increasing traffic:
 

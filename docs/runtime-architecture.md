@@ -102,9 +102,18 @@ emits WARNING; an identical state emits no periodic reminder. Worker restart or 
 change rebuilds the observation and can warn again.
 
 The same lifecycle state owns empty-window markers, pending visible windows, history
-observations, and continuity observations behind one 1,024-Chat bound. Every successful
-`list_chats` cycle prunes all four state kinds for missing Chats. New keys evict the least
-recently touched Chat at the bound, preventing process-lifetime growth under Chat churn.
+observations, continuity observations, and marker clock watermarks behind one 1,024-Chat
+bound. Every successful `list_chats` cycle prunes all state kinds for missing Chats. New
+keys evict the least recently touched Chat at the bound, preventing process-lifetime
+growth under Chat churn.
+
+Full Chat invalidation and Marker-only invalidation are deliberately distinct. Account
+change, Chat disappearance, and ordinary auth/list/parse/database/network failures can
+drop the complete Chat state. Invalid fingerprint, failed/unusable/backwards marker clock,
+or marker identity mismatch drops only empty-marker/pending/history evidence and retains
+the continuity observation. A monotonic clock watermark keeps repeated backwards time
+fail-closed even after the unsafe marker is removed. No invalid Marker can be reused to
+start a live suffix.
 
 Message Store uniqueness remains the final idempotency boundary; the checkpoint is an
 optimization and continuity record, not a substitute for that constraint. Polling can

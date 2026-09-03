@@ -41,6 +41,13 @@ poll cycles share one `WechatPollingLifecycleState`; a new per-cycle state defea
 deduplication. Ordinary auth, list, parse, database, network, and unknown failures are not
 continuity-only and must continue to appear every occurrence.
 
+If `stop_chat_empty_window_marker_unavailable` repeats every cycle, inspect whether
+Marker rejection is calling complete Chat invalidation. Missing/malformed fingerprint,
+clock failure/naive/backwards time, and marker mismatch must use Marker-only invalidation:
+remove empty-marker/pending/history evidence, retain continuity observation and the safe
+clock watermark, and continue fail-closed. Do not manufacture a fingerprint or clear the
+checkpoint to make live-suffix processing start.
+
 If the visible maximum is below the checkpoint, or a saved anchor mismatches at the same
 local ID, one poller should CAS-rewind and increment generation. An empty window does not
 prove reset. A legacy checkpoint without any verified anchor can remain degraded. Do not
