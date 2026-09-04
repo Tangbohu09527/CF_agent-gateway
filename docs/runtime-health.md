@@ -1,146 +1,230 @@
 # Runtime health
 
-## Three different signals
+## Health surfaces
 
-| Endpoint | Success | Failure semantics |
-| --- | --- | --- |
-| `GET /health` | `200 {"status":"ok"}` | HTTP process is not serving. |
-| `GET /ready` | `200 {"status":"ready"}` | `503` while startup, database readiness, or startup schema gate is unavailable. |
-| `GET /health/runtime` | Aggregated business snapshot | `503` only for top-level `unhealthy`; `degraded` remains `200` so operators can read details. |
+The current runtime has four distinct health surfaces:
 
-These endpoints are public only within the current default loopback/private deployment
-boundary. Do not expose them to an untrusted network without a reverse-proxy policy.
+| Surface | Question answered |
+| --- | --- |
+| `GET /health` | Is the Gateway HTTP process alive? |
+| `GET /ready` | Did startup complete, and is the cached database probe fresh/successful? |
+| `GET /health/runtime` | Is the durable business chain healthy or degraded? |
+| Runtime Controller `status` | Are the gated Poll/Delivery containers, heartbeats, and Token File contract ready? |
 
-`/health` is not proof that polling, Hermes execution, or delivery works. Use
-`/health/runtime` for that decision.
+No one surface replaces the others. A live Gateway does not prove database readiness,
+worker freshness, external login, Hermes connectivity, or an empty queue.
 
-## Payload
+## Liveness
 
-The business snapshot has these top-level fields:
+`GET /health`
+
+```json
+{"status":"ok"}
+```
+
+HTTP 200 means only that FastAPI handled the request.
+
+## Readiness
+
+`GET /ready`
+
+Success:
+
+```json
+{"status":"ready"}
+```
+
+Failure:
+
+```json
+{"status":"not_ready"}
+```
+
+Failure uses HTTP 503. Readiness requires:
+
+- application startup completed;
+- database initialization/check completed;
+- the background database probe's most recent result succeeded;
+- the last successful probe is no more than 15 seconds old.
+
+The probe normally runs every five seconds. The HTTP request reads cached state and does
+not issue a database query itself.
+
+## Runtime business health
+
+`GET /health/runtime` returns exactly these top-level fields:
 
 ```json
 {
   "status": "healthy",
-  "checked_at": "2026-08-23T02:00:00Z",
+  "checked_at": "2026-09-03T00:00:00Z",
   "components": {},
   "dispatch": {},
   "delivery": {}
 }
 ```
 
-It is intentionally redacted: no message body, token, cookie, connection string or
-business payload is returned.
+`checked_at` is UTC. The example timestamp illustrates format only.
 
-### Components
+Top-level semantics:
 
-| Component | Representative status | Meaning |
+| Status | HTTP | Meaning |
 | --- | --- | --- |
-| `database` | `ok`, `unavailable` | `SELECT 1` succeeds. |
-| `migration_schema` | `ok`, `mismatch` | Database is at the single packaged Alembic head. |
-| `wechat_worker` | `ok`, `missing`, `stale_or_invalid`, `unknown`, `disabled` | Configured heartbeat file is fresh and healthy. |
-| `dispatch_worker` | Same worker states | Dispatch heartbeat is fresh when worker/Hermes are enabled. |
-| `delivery_worker` | Same worker states | Delivery heartbeat is fresh when WeChat is enabled. |
-| `wechat_auth` | `logged_in`, `logged_out`, `unknown`, `disabled` | Last redacted WeChat worker auth observation. |
-| `hermes` | `ok`, `degraded`, `disabled` | Endpoint/key configuration plus the last real Hermes operation observation. |
-| `wechat_checkpoint_continuity` | `ok`, `degraded`, `unknown` | Count of nonzero checkpoints without a verified serverId-first or content-free fallback anchor. |
+| `healthy` | 200 | Database/schema are healthy and no configured component or durable metric triggers degradation. |
+| `degraded` | 200 | Core database/schema remain usable, but a worker/external observation or queue metric needs attention. |
+| `unhealthy` | 503 | Database is unavailable or the migration schema does not match the packaged head. |
 
-The runtime reads heartbeat paths from:
+There is no top-level `unavailable` status. `unavailable` is a component value used for
+the database. If the runtime health service was not initialized, the endpoint returns
+HTTP 503, top-level `unhealthy`, `checked_at: "unavailable"`, database
+`unavailable`, migration schema `unknown`, and empty metric objects.
 
-```text
-CF_GATEWAY_WECHAT_HEARTBEAT_PATH
-CF_GATEWAY_DISPATCH_HEARTBEAT_PATH
-CF_GATEWAY_DELIVERY_HEARTBEAT_PATH
-CF_GATEWAY_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS
+## Component fields
+
+`components` contains:
+
+| Component | Fields and values |
+| --- | --- |
+| `database` | `status: ok` or `unavailable` |
+| `migration_schema` | `status: ok`, `mismatch`, or `unknown` |
+| `wechat_worker` | `status`; when healthy also `state`, `updated_at`, and selected `details` |
+| `dispatch_worker` | same Worker shape |
+| `delivery_worker` | same Worker shape |
+| `wechat_auth` | `status: logged_in`, `logged_out`, `unknown`, or `disabled` |
+| `hermes` | `status`, `configuration`, and `connectivity` |
+| `wechat_checkpoint_continuity` | `status` and `unverified_checkpoint_count` |
+
+Enabled Worker status values are:
+
+- `ok`: heartbeat exists, parses, and is fresh;
+- `degraded`: heartbeat is fresh but reports a failed last cycle;
+- `missing`: configured heartbeat path does not exist;
+- `stale_or_invalid`: file exists but is stale or invalid;
+- `unknown`: enabled Worker has no configured heartbeat path;
+- `disabled`: the matching adapter/runtime is disabled.
+
+For a valid heartbeat, `state` and `updated_at` are included. Only these detail keys may
+be exposed:
+
+- `phase`
+- `cycle_sequence`
+- `last_cycle_succeeded`
+- `wechat_auth`
+- `last_operation_succeeded`
+- `last_operation_at`
+
+The default freshness threshold is 30 seconds in production Compose.
+
+Hermes component values:
+
+| Situation | Result |
+| --- | --- |
+| Hermes disabled | `status: disabled`, configuration/connectivity `disabled` |
+| Enabled but URL/key unavailable | `status: degraded`, configuration `unconfigured`, connectivity `unverified` |
+| Configured and Dispatch heartbeat healthy, no fresh operation evidence | `status: ok`, connectivity `no_recent_observation` |
+| Fresh successful operation | connectivity `last_operation_succeeded` |
+| Fresh failed operation | `status: degraded`, connectivity `last_operation_failed` |
+
+`no_recent_observation` is not proof that Hermes is reachable. It means no fresh
+success/failure observation is available.
+
+Checkpoint continuity is `degraded` when a nonzero Checkpoint lacks a continuity
+fingerprint; `unverified_checkpoint_count` is the number of such rows. When the database
+cannot be safely queried, its status is `unknown` and the count is null.
+
+## Dispatch fields
+
+`dispatch` always uses these fields:
+
+- `queued`
+- `running`
+- `failed`
+- `uncertain`
+- `dead`
+- `stale_running`
+- `blocked_threads`
+- `missing_delivery`
+- `reconciliation_backlog`
+- `reconciliation_deferred`
+- `reconciliation_poison`
+- `oldest_uncertain_age_seconds`
+- `oldest_backlog_age_seconds`
+- `oldest_reconciliation_age_seconds`
+
+`stale_running` counts running Dispatch leases that have expired. `blocked_threads`
+counts AI Threads where an `uncertain` Dispatch has later nonterminal work.
+`missing_delivery` counts successful Dispatches with a persisted Hermes response but no
+Delivery row. Reconciliation fields describe successful WeChat Dispatches still missing a
+normalized Response or Delivery, including deferred and quarantined candidates.
+
+Any nonzero `failed`, `uncertain`, `dead`, `stale_running`, `blocked_threads`, or
+`reconciliation_poison` degrades top-level status. Queued/running work and a normal
+reconciliation backlog are reported but do not alone change status.
+
+## Delivery fields
+
+`delivery` always uses:
+
+- `queued`
+- `delivering`
+- `delivered`
+- `failed`
+- `uncertain`
+- `stale_delivering`
+- `missing_delivery`
+- `oldest_backlog_age_seconds`
+
+A Delivery is stale when it remains `delivering` with a claim at least 300 seconds old.
+Any nonzero `failed`, `uncertain`, `stale_delivering`, or `missing_delivery`
+degrades top-level status.
+
+## Runtime Controller status
+
+Keep the operator out of the Docker group. Begin the interactive administrative session
+once, define the absolute Controller path, and use non-interactive sudo:
+
+```bash
+sudo -v
+export RELEASE_DIR="/opt/cf-agent-gateway"
+export CONTROLLER="${RELEASE_DIR}/deploy/wechat-runtime-control"
+sudo -n "${CONTROLLER}" status --timeout-seconds 30
 ```
 
-Each enabled service must point the Gateway health process at the same heartbeat file
-the corresponding worker writes. A missing path produces `unknown`, not fabricated
-health.
+The JSON object has exactly:
 
-In production Compose, `heartbeat-init` prepares the shared directory as `10001:10001`
-with mode `0750`; each Worker then atomically replaces only its own `0600` file. The Gateway
-uses the same numeric identity for read access but its volume mount is read-only. The first
-publish is a startup gate: failure prevents the Worker from entering its business loop.
-After startup, three consecutive write failures request a bounded graceful exit and surface
-a process failure to the supervisor. A successful publish resets that consecutive-failure
-budget.
+- `worker_health`
+- `delivery_health`
+- `heartbeat_age`
+- `token_contract_valid`
+- `ready`
 
-The Hermes component reports `configuration` separately as `configured`,
-`unconfigured`, or `disabled`. Its `connectivity` is
-`last_operation_succeeded`, `last_operation_failed`, `no_recent_observation`,
-`unverified`, or `disabled`. The dispatch worker publishes an observation only after a
-real Hermes call returns or fails; process liveness alone never proves upstream
-connectivity.
+`worker_health` and `delivery_health` are Docker health states:
+`healthy`, `starting`, `unhealthy`, `stopped`, `not_created`, or `unknown`.
+`heartbeat_age` is the larger Poll/Delivery heartbeat age in seconds, rounded to
+milliseconds, or null when either cannot be read.
 
-A configured worker with no recent business call is `ok/no_recent_observation`, including
-after an old success expires. Normal low traffic therefore does not degrade Runtime Health.
-A recent explicit failure remains `degraded/last_operation_failed`. Missing or stale
-dispatch-worker evidence still degrades its worker component, and missing Hermes
-configuration is `degraded/unconfigured/unverified`. This endpoint does not send a
-synthetic Hermes request or claim upstream connectivity during idle time.
+`token_contract_valid` verifies:
 
-### Dispatch metrics
+- the protected host Token source is a valid regular file;
+- neither controlled container receives the development Token environment value;
+- each receives exactly the Token File environment path;
+- each has one read-only bind from the validated host source.
 
-| Field | Interpretation |
-| --- | --- |
-| `queued` | Waiting thread heads/tails. |
-| `running` | Currently claimed records. |
-| `failed` | Definite failures eligible for bounded retry or finalization. |
-| `uncertain` | Ambiguous Hermes effects requiring manual recovery. |
-| `dead` | Terminal records that did not succeed. |
-| `stale_running` | Running records whose lease has expired. |
-| `blocked_threads` | Distinct threads where an uncertain head blocks later work. |
-| `missing_delivery` | Successful dispatches with persisted dispatch response but no delivery row. |
-| `reconciliation_backlog` | Successful WeChat dispatch responses still missing normalized response or delivery facts. |
-| `reconciliation_deferred` | Backlog records whose persistent next-attempt time is still in the future. |
-| `reconciliation_poison` | Backlog records quarantined after five failed reconciliation attempts. |
-| `oldest_uncertain_age_seconds` | Time since the oldest record entered `uncertain` (its terminal transition timestamp), or null. |
-| `oldest_backlog_age_seconds` | Age of the oldest queued/running/failed/uncertain record, or null. |
-| `oldest_reconciliation_age_seconds` | Age of the oldest reconciliation backlog record, or null. |
+`ready` is true only when both controlled containers are Docker-healthy, both heartbeats
+are within the configured maximum age, and the Token Contract is valid. The status command
+exits nonzero when `ready` is not true.
 
-### Delivery metrics
+`token_contract_valid`, `worker_health`, and `delivery_health` are Controller fields,
+not `/health/runtime` fields.
 
-| Field | Interpretation |
-| --- | --- |
-| `queued`, `delivering`, `delivered`, `failed`, `uncertain` | Existing outbox status counts. |
-| `stale_delivering` | Deliveries claimed longer than the runtime stale threshold. |
-| `missing_delivery` | Same reconciliation signal as the dispatch section. |
-| `oldest_backlog_age_seconds` | Oldest nonterminal delivery age, or null. |
+## Operator interpretation
 
-## Overall status
+1. Check `/health` for process liveness.
+2. Check `/ready` for database/startup readiness.
+3. Read `/health/runtime` and classify every degraded component or nonzero failure metric.
+4. Read Controller `status` for the Poll/Delivery gate and Token Contract.
+5. Compare aggregate counts and oldest ages with the release baseline.
+6. Follow [Runtime recovery](runtime-recovery.md) for any ambiguous or failed state.
 
-- `unhealthy`: database unavailable or migration schema mismatch; returns HTTP `503`.
-- `degraded`: infrastructure is queryable but a worker/config/checkpoint component is
-  missing, stale, unknown or degraded, or nonzero failure/uncertain/dead/stale/blocked/
-  missing-delivery/reconciliation-poison metrics require attention; returns HTTP `200`.
-- `healthy`: no current degradation predicate is present; returns HTTP `200`.
-
-A `dead` count remains a degraded historical signal until the site's retention and
-acknowledgement policy accounts for it. Do not delete history merely to turn health green.
-
-## Alerting guidance
-
-Page immediately for `unhealthy`, a stale enabled worker, any `uncertain` dispatch,
-blocked thread, stale running/delivery claim, or missing delivery. Alert on sustained
-backlog age rather than only queue count. Treat `wechat_auth=logged_out` as an external
-login incident. Treat checkpoint continuity `degraded` as a migration/session-continuity
-investigation, not permission to rewind manually.
-
-Treat Hermes `last_operation_failed` as observed upstream failure. Treat
-`no_recent_observation` as healthy idle runtime with no current upstream evidence, not a
-connectivity success. Treat `unverified` as missing configuration/connectivity evidence.
-Use a controlled end-to-end validation under the deployment checklist rather than assuming
-the heartbeat proves Hermes works.
-
-Alert when `reconciliation_deferred` remains beyond its scheduled retry or
-`oldest_reconciliation_age_seconds` breaches the site objective. Page/assign every
-`reconciliation_poison`; quarantined candidates do not auto-retry and must not be cleared
-with ad-hoc SQL.
-
-The GitHub Actions unit tests validate payload behavior with controlled fixtures. The
-separate production Compose job is configured to validate heartbeat ownership/mode, Worker
-health, Gateway read-only access, API/Admin token boundaries, stale-heartbeat degradation,
-restart recovery, and clean stop in real Linux containers with synthetic dependencies. A
-green run ID in pull request #4 is the execution evidence. Actual alert thresholds,
-dashboard conversion to `Asia/Shanghai`, and CFserver endpoint monitoring are external
-responsibilities and were not validated against production.
+Do not print response bodies that may contain Admin archive data into broad-access logs.
+The health surfaces above are designed to be redacted aggregate evidence.

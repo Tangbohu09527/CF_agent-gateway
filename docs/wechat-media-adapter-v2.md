@@ -1,38 +1,74 @@
-# WeChat Media Adapter V2
+# WeChat outbound media adapter
 
-## Boundary
+## Status and boundary
 
-`WechatMediaSender.send_media` is the unified Gateway boundary for outbound `image` and
-`file` messages. `WechatHttpMediaSender` implements that boundary and retains the inherited
-text sender without changing `WechatMessageSender` or its `send_text` contract.
+The outbound Media Adapter V2 is implemented and automated-test covered. The Delivery
+Worker uses it for response-owned Artifact parts whose kind is `image` or `file`.
+Ordered text and Artifact parts are persisted before delivery.
 
-Both media types call `POST /api/messages/send` with the same Bearer token configuration as
-text delivery. The V2 wire payloads are:
+The recorded CFserver production acceptance did not exercise a real outbound media
+Message. This document therefore does not claim live production media acceptance.
 
-```json
-{"chatId":"...","image":{"data":"<base64>","mimeType":"image/png"}}
+This adapter does not provide general inbound image/file understanding, OCR, archive
+processing, or arbitrary attachment ingestion. The lower-level `agent-wechat` media
+client capability is not a general polling-to-Hermes file workflow.
+
+## Outbound contract
+
+`WechatMediaSender.send_media` is the Gateway sender boundary.
+`WechatHttpMediaSender` implements it while retaining the text sender contract.
+
+Both media types call:
+
+```text
+POST /api/messages/send
 ```
 
+using the same protected Bearer configuration as text delivery.
+
+Image payload:
+
 ```json
-{"chatId":"...","file":{"data":"<base64>","filename":"report.pdf"}}
+{"chatId":"<target>","image":{"data":"<base64>","mimeType":"image/png"}}
 ```
 
-The upstream file schema does not accept a MIME field. Gateway still requires and validates
-the declared file MIME type before sending it.
+File payload:
+
+```json
+{"chatId":"<target>","file":{"data":"<base64>","filename":"report.pdf"}}
+```
+
+The upstream file payload has no MIME field. The Gateway still validates the Artifact's
+declared MIME type and filename before sending it.
 
 ## Validation
 
-- `media_type` is exactly `image` or `file`.
-- Callers may provide raw bytes or canonical RFC 4648 Base64. Base64 is length-checked before
-  decode, strictly decoded, and re-encoded to reject non-canonical padding and pad bits.
-- Decoded media is limited to 25 MiB. Its Base64 representation remains below the upstream
-  50 MiB request-body limit with JSON overhead.
-- Images are restricted to PNG, JPEG, and GIF. The declared MIME type must match the content
-  signature.
-- Files require a cross-platform safe basename of at most 255 UTF-8 bytes. Known filename
-  extensions require their concrete MIME type; unknown extensions use
-  `application/octet-stream` for opaque data.
-- Validation and adapter errors never include media data, response bodies, or Bearer tokens.
+- `media_type` must be exactly `image` or `file`.
+- Callers may supply raw bytes or canonical RFC 4648 Base64.
+- Base64 length is bounded before decode, strictly decoded, and re-encoded to reject
+  non-canonical padding or pad bits.
+- Decoded media is limited to 25 MiB by the adapter.
+- Images are restricted to PNG, JPEG, and GIF; declared MIME must match the signature.
+- Files require a cross-platform safe basename no longer than 255 UTF-8 bytes.
+- Known filename extensions require the matching concrete MIME type; unknown extensions
+  use `application/octet-stream` for opaque data.
+- Validation and adapter errors do not include media bytes, response bodies, Bearer
+  values, or target identifiers.
 
-This adapter establishes the outbound HTTP capability only. It does not wire media into the
-current Hermes text response flow and does not claim live WeChat media-delivery validation.
+## Delivery semantics
+
+The Delivery Worker reads a ready Artifact from durable storage and verifies:
+
+- the Artifact exists and belongs to the current Response;
+- status is `ready`;
+- stored content passes integrity validation;
+- the sender supports media delivery.
+
+Image Artifacts are sent without a filename. File Artifacts include the persisted safe
+filename. Every send is part of the durable Delivery attempt/receipt state machine.
+Ambiguous channel effects become Delivery `uncertain`; they do not change Dispatch
+success and do not call Hermes again.
+
+See [Domain architecture](architecture.md#artifact-and-media-boundary) for the broader
+capability boundary and [Production status](production-status.md#operational-limitations)
+for the current acceptance limitation.

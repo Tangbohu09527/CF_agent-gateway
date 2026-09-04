@@ -1,4 +1,13 @@
-# systemd production deployment
+# Archived systemd deployment
+
+> **ARCHIVED ALTERNATIVE RUNBOOK**
+>
+> This file documents a historical systemd topology. It is retained for reference to the
+> checked-in unit assets but is not the current production lifecycle. Current production
+> uses Compose and the Runtime Controller; use
+> [Production status](production-status.md) and
+> [Production deployment](deployment/production.md). Do not mix these systemd commands
+> with the active Compose deployment.
 
 This deployment runs database migrations, the HTTP gateway, the WeChat polling
 worker, the Hermes dispatch worker, and the response delivery worker as separate
@@ -43,7 +52,7 @@ Set `CF_AGENT_GATEWAY_DATABASE_URL` and the optional dispatch worker overrides
 in `gateway.env`, for example:
 
 ```text
-CF_AGENT_GATEWAY_DATABASE_URL=postgresql+psycopg://cf_agent_gateway:password@database.internal:5432/cf_agent_gateway?connect_timeout=5
+CF_AGENT_GATEWAY_DATABASE_URL=<protected-postgresql-url>
 CF_GATEWAY_WORKER_CONCURRENCY=4
 CF_GATEWAY_WORKER_LEASE_SECONDS=60
 CF_GATEWAY_WORKER_RETRY_LIMIT=3

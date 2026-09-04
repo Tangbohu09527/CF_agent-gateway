@@ -1,12 +1,25 @@
 # Migrations
 
 Alembic owns the Gateway schema through the packaged migration tree under
-`src/cf_agent_gateway/migrations/`. Application startup upgrades an empty or already-versioned
-database to the current head. The same tree can be run explicitly with:
+`src/cf_agent_gateway/migrations/`. The current packaged and production head is
+`20260823_04`; the deployed release is recorded in
+[Production status](../docs/production-status.md).
+
+Development startup can initialize an empty or already-versioned database through the
+packaged tree. Production long-running services use migration check mode and never upgrade
+schema during normal startup. The one-shot production migration service, or this explicit
+runner in an approved exclusive window, performs the upgrade:
 
 ```console
 cf-agent-gateway-migrate
 ```
+
+For the current rootful-Docker production topology, do not run that command directly from
+an ordinary operator shell. Use the fully defined `sudo -v`/`sudo -n`, absolute
+`--project-directory`, explicit `--env-file`, and `COMPOSE` array procedure in
+[Production deployment](../docs/deployment/production.md#operator-variables), followed by
+its documented migration step. The direct CLI examples below are for local development or
+a separately approved non-Compose maintenance environment.
 
 The runner reads `config/config.yaml` by default, honors `CF_GATEWAY_CONFIG`, and upgrades
 to the latest packaged revision. It does not depend on the current working directory.
@@ -176,8 +189,10 @@ a nonzero legacy checkpoint, populated Message/admission/dispatch/delivery facts
 row/relationship preservation, conservative admission backfill, reconciliation tuples,
 direct-SQL audit immutability, recovery constraints, downgrade and partial-schema
 fail-closed behavior. The final exact local test result and GitHub Actions run ID are
-release evidence in pull request #4; they are not a substitute for the external production
-backup, restore proof, lock/scale review, or CFserver validation.
+historical migration and CI evidence in merged PR #4. Current production Release authority
+remains [Production status](../docs/production-status.md); the historical PR evidence is not
+a substitute for production backup, restore proof, lock/scale review, or CFserver
+validation.
 
 Installed deployments can use the packaged tree without a source checkout. A custom startup
 configuration may be selected with `CF_AGENT_GATEWAY_ALEMBIC_CONFIG` or

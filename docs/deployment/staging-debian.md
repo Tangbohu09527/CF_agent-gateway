@@ -1,5 +1,14 @@
 # Debian staging deployment preparation
 
+> **ARCHIVED HISTORICAL RUNBOOK**
+>
+> This file describes the unexecuted Debian/systemd staging preparation for the historical
+> `v2-enterprise-runtime-20260811` release. It is not the current production topology and
+> must not be used for a production change. Current production uses
+> `docker-compose.prod.yml`, `/opt/cf-agent-gateway`, and the Runtime Controller. See
+> [Production status](../production-status.md) and
+> [Production deployment](production.md).
+
 This document prepares the `v2-enterprise-runtime-20260811` release for a Debian
 staging host. It is a runbook only: no staging deployment was performed while
 preparing this release.

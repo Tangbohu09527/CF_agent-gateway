@@ -1,157 +1,224 @@
 # HTTP API
 
-## Exposure and authentication
+## Boundary
 
-The checked-in deployment binds the Gateway to `127.0.0.1` by default. Keep it behind
-the site's authenticated reverse proxy or private network policy.
+This document lists the routes registered by the current FastAPI application. Reserved
+packages or planned capabilities are not APIs.
 
-| Surface | Authentication | Intended use |
-| --- | --- | --- |
-| `GET /health` | Public at the current deployment boundary | HTTP process liveness only |
-| `GET /ready` | Public at the current deployment boundary | Infrastructure/startup readiness |
-| `GET /health/runtime` | Public at the current deployment boundary | Redacted business-runtime health |
-| Message API | Bearer token named by `api.token_env` | Trusted internal message clients |
-| `/admin/*` | Trusted `admin` role or fixed Admin bearer token | Restricted operations and recovery |
+Production binds the Gateway according to the protected deployment configuration. Health
+routes are unauthenticated and must remain inside the approved network boundary. Message
+and Admin routes fail closed when their configured Bearer secret is missing or invalid.
 
-Message endpoints fail closed when the configured environment variable is unset, empty,
-malformed, or does not match `Authorization: Bearer <token>`. The default name is
-`CF_GATEWAY_API_TOKEN`. The token value is never read from a request parameter or YAML.
+## Request limits and validation
 
-For a deployment without trusted role middleware, Admin endpoints require:
+The global request-body middleware applies to every HTTP request. Production configures
+`api.max_request_body_bytes: 1048576`.
+
+- A body over the configured limit returns `413 {"detail":"request body too large"}`.
+- A duplicate, non-decimal, negative, or otherwise invalid `Content-Length` returns
+  `400 {"detail":"invalid content length"}`.
+- Chunked/streamed input is counted while it is read and receives the same 413 limit.
+- Pydantic validation errors return 422 with only `type`, `loc`, and `msg`; rejected
+  input values are not echoed.
+- Admin mutation requests have an additional fixed 1,048,576-byte limit and return
+  `413 {"detail":"admin request body too large"}` when exceeded.
+
+## System routes
+
+| Method | Path | Authentication | Success response |
+| --- | --- | --- | --- |
+| GET | `/health` | None | `200 {"status":"ok"}` |
+| GET | `/ready` | None | `200 {"status":"ready"}` |
+| GET | `/health/runtime` | None | Runtime health snapshot |
+
+`/ready` returns `503 {"status":"not_ready"}` before application startup completes or
+when the cached database probe is not fresh and successful.
+
+`/health/runtime` returns `status`, `checked_at`, `components`, `dispatch`, and
+`delivery`. It returns HTTP 503 only when top-level status is `unhealthy`; a
+`degraded` snapshot is HTTP 200. Exact fields and meanings are in
+[Runtime health](runtime-health.md).
+
+## Message authentication
+
+The following routes require:
 
 ```text
-CF_AGENT_GATEWAY_ADMIN_TOKEN=<separate-random-secret>
-Authorization: Bearer <same-secret>
+Authorization: Bearer <message-api-secret>
 ```
 
-Missing or invalid Admin configuration/header returns `401`; an authenticated principal
-without the `admin` role returns `403`. Do not reuse the Message API token. Authentication
-errors do not echo the Authorization header or configured value.
-
-## Request boundaries
-
-- The application-wide body limit defaults to 1 MiB and is configurable with
-  `api.max_request_body_bytes` from 1 through 67,108,864 bytes.
-- Chunked bodies are counted while received; a declared or observed oversize body
-  returns `413` before application parsing.
-- Multiple, malformed, or negative `Content-Length` values fail closed.
-- Admin requests use the same pre-parse/chunk-aware application body limit (1 MiB in the
-  checked-in production/default configuration).
-- Conversation-message and Admin archive page sizes are at most 100 per request.
-- IDs and path components have explicit positive/length bounds.
-- Pydantic rejects unexpected recovery request fields.
-
-## Message API
-
-| Method and path | Result |
-| --- | --- |
-| `POST /internal/messages` | Persist a normalized message idempotently; `201` when created, `200` when already present. |
-| `GET /messages/{message_id}` | Return one stored message and attachment metadata. |
-| `GET /sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages` | Return one fully scoped conversation page in event order. |
-
-All three require the Message API bearer token. A duplicate `event_id` or stable physical
-source-message identity returns the existing Message without overwriting it.
-
-## Admin archive API
-
-| Method and path | Purpose |
-| --- | --- |
-| `GET /admin/conversations` | Filter and page stored conversation summaries. |
-| `GET /admin/messages` | Filter and page Message/dispatch/response facts. |
-| `GET /admin/threads/{thread_id}` | Inspect one authorized thread timeline and delivery summary. |
-| `GET /admin/deliveries` | Filter and page delivery facts. |
-
-Supported filters include bounded source/account/conversation/identity IDs and a UTC
-half-open time interval. `limit` is 1 through 100 and defaults to 50; `offset` is
-non-negative. The start time must precede the end time.
-
-## Dispatch recovery API
-
-### Inspect
-
-```http
-GET /admin/dispatches/{dispatch_record_id}
-Authorization: Bearer <admin-token>
-```
-
-The response contains only operational facts:
+The expected value is read from the environment variable named by `api.token_env`
+(`CF_GATEWAY_API_TOKEN` in the checked-in production configuration). A missing
+configured value, malformed header, empty/non-visible-ASCII secret, or mismatch returns:
 
 ```json
-{
-  "dispatch_record_id": 42,
-  "status": "uncertain",
-  "message_id": 120,
-  "ai_thread_id": "thread-id",
-  "attempt_count": 1,
-  "last_error_code": "hermes_timeout",
-  "has_dispatch_response": false,
-  "has_hermes_response": false,
-  "has_delivery": false,
-  "blocks_following_dispatch": true,
-  "created_at": "2026-08-23T01:00:00Z",
-  "updated_at": "2026-08-23T01:01:00Z",
-  "claimed_at": "2026-08-23T01:00:01Z",
-  "completed_at": "2026-08-23T01:01:00Z",
-  "lease_expires_at": null
-}
+{"detail":"authentication required"}
 ```
 
-### Resolve
+with HTTP 401 and `WWW-Authenticate: Bearer`.
 
-All recovery actions use the same body:
+## Message routes
 
-```json
-{
-  "operator": "on-call-user-id",
-  "reference": "INC-2026-00123",
-  "reason": "Verified against the upstream audit trail"
-}
-```
+### Create or resolve a Message
 
-| Field | Length | Rules |
+`POST /internal/messages`
+
+Request fields:
+
+| Field | Type and rule |
+| --- | --- |
+| `event_id` | non-empty string, maximum 255 |
+| `source` | non-empty string, maximum 64 |
+| `source_account_id` | non-empty string, maximum 255 |
+| `source_message_id` | non-empty string, maximum 255 |
+| `conversation_id` | non-empty string, maximum 255 |
+| `conversation_type` | `private` or `group` |
+| `is_mentioned` | must be null for private; group defaults to false when omitted |
+| `is_self` | required boolean |
+| `conversation_name` | optional string, maximum 255 |
+| `sender_type` | `human` or `system`; defaults to `human` |
+| `sender_id` | required for human senders; optional for system senders; maximum 255 |
+| `sender_name` | optional string, maximum 255 |
+| `message_type` | non-empty string, maximum 64 |
+| `raw_type` | optional strict integer |
+| `content` | string preserved without whitespace stripping |
+| `timestamp` / `occurred_at` | at least one required; both must match when supplied |
+| `received_at` | optional timestamp; defaults to current UTC |
+| `direction` | optional; derived from sender/self facts when absent |
+| `source_local_id`, `source_server_id` | optional non-empty strings, maximum 255 |
+| `source_message_id_is_fallback` | boolean, defaults to false |
+| `reply_context` | optional verified reply summary |
+| `reply_to_message_id` | optional string, maximum 255 |
+| `attachments` | optional list of metadata objects |
+| `raw_payload` | optional finite JSON object |
+
+Each attachment metadata object contains `filename`, `file_type`, `mime_type`,
+`file_size`, `storage_path`, and `hash`. This route does not upload attachment
+content or fetch the storage path.
+
+The response is `{"id": <positive-integer>}`:
+
+- HTTP 201 when a new Message is created;
+- HTTP 200 when an existing idempotent Message is returned;
+- HTTP 409 with a structured `conversation_type_conflict` detail when an existing
+  account-scoped Conversation has a different type.
+
+Idempotency is enforced independently by:
+
+- unique `event_id`;
+- unique `(source, source_account_id, conversation_id, source_message_id)`.
+
+A duplicate returns the existing Message and does not overwrite normalized fields,
+raw payload, or attachment rows.
+
+### Get one Message
+
+`GET /messages/{message_id}`
+
+`message_id` must be at least 1. HTTP 404 returns
+`{"detail":"message not found"}`.
+
+The response fields are:
+
+`id`, `event_id`, `source`, `source_account_id`, `source_message_id`,
+`conversation_id`, `conversation_type`, `is_mentioned`, `is_self`,
+`sender_type`, `sender_id`, `sender_name`, `message_type`, `raw_type`,
+`content`, `timestamp`, `occurred_at`, `received_at`, `direction`,
+`source_local_id`, `source_server_id`, `source_message_id_is_fallback`,
+`reply_context`, `reply_to_message_id`, `created_at`, and `attachments`.
+
+Each attachment response adds `id`, `message_id`, and `created_at` to the submitted
+metadata fields. `reply_context` may contain `source_local_id`, `source_server_id`,
+`sender_id`, `sender_name`, `raw_type`, and `content`.
+
+### List a scoped Conversation
+
+`GET /sources/{source}/accounts/{source_account_id}/conversations/{conversation_id}/messages`
+
+The source/account/conversation path is mandatory; no unscoped conversation route exists.
+
+- `limit`: 1 through 100, default 100
+- `offset`: 0 through 1,000,000, default 0
+- response: a JSON list of the Message response shape above, ordered by stored event time
+
+## Admin authentication
+
+All `/admin` routes require an authenticated `admin` role. When trusted role middleware
+has not populated `request.state.roles`, the application authenticates the Bearer value
+from the environment variable named by `api.admin_token_env`
+(`CF_AGENT_GATEWAY_ADMIN_TOKEN` in the production configuration).
+
+- Missing or invalid fallback authentication returns HTTP 401 with
+  `{"detail":"administrator authentication required"}`.
+- Authenticated roles without `admin` return HTTP 403 with
+  `{"detail":"administrator role required"}`.
+- The Message token and Admin token are separate boundaries.
+
+## Admin archive routes
+
+Common optional query fields are:
+
+- `start_time`, `end_time`; when both exist, start must be earlier than end;
+- `identity_id` (maximum 36);
+- `source` (maximum 64);
+- `source_account_id`, `conversation_id` (maximum 255);
+- `limit` 1 through 100, default 50;
+- `offset` at least 0, default 0.
+
+Paged responses contain `items`, `total`, `limit`, and `offset`.
+
+| Method | Path | Response fields |
 | --- | --- | --- |
-| `operator` | 1..128 | Required operator identity/reference, not a secret. |
-| `reference` | 1..255 | Required unique incident/change reference used for idempotency. |
-| `reason` | 1..1024 | Required evidence summary, not message content or credentials. |
+| GET | `/admin/conversations` | Conversation identity/type/name, message count, first/last message time, created/updated time |
+| GET | `/admin/messages` | Message response plus `identity_id`, `ai_thread_id`, Dispatch status, Response ID/status |
+| GET | `/admin/threads/{thread_id}` | Thread/workspace/profile/type/policy/key/status/Hermes binding/timestamps, source bindings, paged Timeline, delivery summary |
+| GET | `/admin/deliveries` | Delivery/Response/Message/Identity/Workspace/Thread/channel target, status, ordinal, attempts, availability/claim/completion/error/timestamps |
 
-Unicode control characters, including C0, DEL, and C1, are rejected. Values containing credential markers such as
-`authorization`, `bearer`, `token`, `secret`, `password`, `passwd`, or `api-key` are
-rejected. Never put real business content in these fields.
+A missing Thread returns HTTP 404 with `{"detail":"thread not found"}`.
 
-```http
-POST /admin/dispatches/{id}/retry-approved
-POST /admin/dispatches/{id}/mark-dead
-POST /admin/dispatches/{id}/confirm-success
-```
+The Thread Timeline embeds each Message, ordered response parts
+(`ordinal`, `part_type`, `text`, `artifact_id`), and Delivery summaries
+(`id`, `status`, `attempt_count`, `completed_at`, `last_error_code`).
+Delivery summary counts are `total`, `queued`, `delivering`, `delivered`,
+`failed`, and `uncertain`.
 
-The expected current state is always `uncertain`. Each operation performs a database
-CAS and appends an audit row in the same transaction. PostgreSQL and SQLite database
-triggers reject UPDATE or DELETE of that row, including direct SQL, and check constraints
-enforce each action's exact before/after/evidence tuple. A successful response is:
+## Admin Dispatch inspection and recovery
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/admin/dispatches/{dispatch_record_id}` | Inspect one Dispatch and its evidence boundaries |
+| POST | `/admin/dispatches/{dispatch_record_id}/retry-approved` | Authorize retry after proving non-execution |
+| POST | `/admin/dispatches/{dispatch_record_id}/mark-dead` | Terminate ambiguous work without a fake response |
+| POST | `/admin/dispatches/{dispatch_record_id}/confirm-success` | Confirm success from matching persisted response evidence |
+
+`dispatch_record_id` must be at least 1. Inspection returns:
+
+`dispatch_record_id`, `status`, `message_id`, `ai_thread_id`, `attempt_count`,
+`last_error_code`, `has_dispatch_response`, `has_hermes_response`, `has_delivery`,
+`blocks_following_dispatch`, `created_at`, `updated_at`, `claimed_at`,
+`completed_at`, and `lease_expires_at`.
+
+Every recovery POST accepts exactly:
 
 ```json
 {
-  "dispatch_record_id": 42,
-  "action": "mark_dead",
-  "status": "dead",
-  "audit_id": 9,
-  "idempotent": false
+  "operator": "<approved-operator-reference>",
+  "reference": "<change-or-incident-reference>",
+  "reason": "<evidence-based-reason>"
 }
 ```
 
-Replaying the same action/reference/operator/reason returns the original audit result
-with `idempotent: true`. Reusing the reference with different operator/reason or racing
-a different action returns `409`. A missing dispatch is `404`.
+Lengths are 1-128, 1-255, and 1-1024 respectively. Extra fields and control characters
+are rejected. Secret-like words or any configured secret value in these fields are
+rejected with HTTP 422. Do not put a Token, password, connection string, message body, or
+personal account identifier in recovery metadata.
 
-`retry-approved` is a manual assertion that Hermes did not execute. `mark-dead` records
-that safe retry is impossible. `confirm-success` accepts no assistant content and
-requires a valid claim-fenced persisted dispatch response; any normalized response
-already present must match the message, Workspace, AIThread and stable response ID.
-The action does not create another delivery.
+A successful response contains `dispatch_record_id`, `action`, resulting `status`,
+`audit_id`, and `idempotent`. The action/reference boundary is idempotent. State,
+evidence, or reference conflicts return HTTP 409 with a stable recovery error code; a
+missing Dispatch returns HTTP 404.
 
-`retry-approved` is the only action that can set `manual_retry_approved=true`, and the
-database permits that flag only while dispatch status is `failed`. `confirm-success`
-requires non-null matching dispatch-response evidence at the database as well as
-application validation. Do not disable the audit trigger or delete audit data for rollback.
-
-Follow [runtime-recovery.md](runtime-recovery.md) before using any mutating route.
+Recovery uses compare-and-swap transitions and creates an immutable database audit row.
+`confirm-success` cannot accept operator-supplied assistant text and succeeds only when
+the required persisted evidence matches the Dispatch. No API exists to delete queue,
+Checkpoint, recovery-audit, or Message rows as a recovery mechanism.

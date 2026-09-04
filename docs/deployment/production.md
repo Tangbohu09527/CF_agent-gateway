@@ -1,334 +1,308 @@
-# V2 production deployment
+# Production deployment
 
-## Validation boundary
+## Purpose and authority
 
-This runbook prepares and validates a release without changing a real CFserver,
-production PostgreSQL database, WeChat account, or Hermes installation. Repository
-implementation and automated tests are separate from site acceptance:
+This is the reusable production deployment runbook for the current Compose topology. It
+does not itself prove that a release is accepted. The deployed release, immutable image,
+evidence, and rollback record are maintained in
+[Production status](../production-status.md).
 
-| Gate | Status owner |
-| --- | --- |
-| Implemented code, migration and configuration | Repository |
-| Local full-suite result | Pull request #4 |
-| GitHub Actions result and run ID | Pull request #4/check run |
-| Isolated production-Compose container proof | GitHub Actions `container-e2e` job |
-| CFserver smoke test | External deployment owner; not performed by this change |
-| Production backup, credentials, DNS/TLS and rollback authorization | External deployment owner |
-| Resolving any `uncertain` record | Authenticated human operator |
+Current production assets are:
 
-## Required topology
+- release path: `/opt/cf-agent-gateway`;
+- Compose file: `docker-compose.prod.yml`;
+- protected environment file: `.env` or `CF_GATEWAY_ENV_FILE`;
+- protected rendered configuration: `config/production.yaml` or
+  `CF_GATEWAY_CONFIG_FILE`;
+- Runtime Controller: `deploy/wechat-runtime-control`;
+- external protected `agent-wechat` Token File;
+- external PostgreSQL lifecycle.
 
-Production requires external PostgreSQL plus these independent application services:
+Do not put a Token, password, Cookie, Authorization header, database URL, message body,
+personal identity, or raw account/chat/conversation ID in commands, terminal capture,
+screenshots, pull requests, or general-access logs.
 
-1. Gateway API
-2. `wechat-worker`
-3. `dispatch-worker`
-4. `delivery-worker`
+## Runtime ownership
 
-`docker-compose.prod.yml` contains a bounded heartbeat-volume initializer, an exclusive
-migration job and the four long-running services. PostgreSQL, agent-wechat and Hermes are
-external dependencies. The Compose `worker` service is the resident WeChat poller; it is
-intentionally not an inline dispatcher.
+The Compose application services are Gateway, Poll Worker, Dispatch Worker, and Delivery
+Worker. Long-running application containers run as `10001:10001`, use a read-only root
+filesystem, and inherit Docker `json-file` logging with `64m` x `10` files.
 
-## Release inputs
+PostgreSQL is external to the production Compose lifecycle. `agent-wechat` and Hermes are
+also external services. Do not use `--remove-orphans` against this topology without a
+review of the external PostgreSQL and adjacent container ownership.
 
-Use an immutable image digest or tag and a root-owned environment file. At minimum,
-provide:
+The Runtime Controller is the only formal start/stop/status entry for the Poll and Delivery
+Workers. It intentionally does not control Gateway, Dispatch Worker, migration, or external
+PostgreSQL.
 
-```text
-CF_GATEWAY_IMAGE=<immutable-image>
-CF_AGENT_GATEWAY_DATABASE_URL=postgresql+psycopg://...
-CF_GATEWAY_API_TOKEN=<random-client-token>
-CF_AGENT_GATEWAY_ADMIN_TOKEN=<separate-random-admin-token>
-CF_AGENT_WECHAT_TOKEN_HOST_FILE=/srv/storage/cf-agent-wechat/secrets/auth-token
-HERMES_API_KEY=<hermes-api-key>
-```
+## Operator variables
 
-The API and Hermes values are read from their configured environment variables. The
-agent-wechat Token is read only from the protected host file above, mounted read-only at
-`/run/secrets/cf-agent-wechat-auth-token` on `worker` and `delivery-worker`. Provision it
-as UID/GID `10001:10001`, mode `0400` or `0600`, with visible ASCII content and no
-newline. Remove `CF_AGENT_WECHAT_TOKEN` from the production environment file; setting
-both sources fails closed. See the [runtime contract](../wechat-runtime-contract.md).
-Never store a secret value in YAML, a Compose command, labels, healthchecks, logs,
-screenshots, a recovery reason/reference, or a pull request.
+The site process must create the protected evidence directory and grant the approved
+administrative identity access before this session. Begin one interactive administrative
+session with `sudo -v`; every later privileged command uses `sudo -n`.
 
-### Runtime-control execution identity
-
-`contract` does not call Docker or read the Token. Any user who can read the
-deployed repository may run it without elevated privileges.
-
-`stop`, `start`, and `status` must be run by `root` or by a trusted
-administrative identity that can access the host's rootful Docker daemon, read
-the protected host Token File, and read the production Compose file and its
-env-file. Missing any required access fails closed.
-
-For the current CFserver operating model, keep `linxi` out of the `docker`
-group. Establish sudo credentials once, then use non-interactive sudo for each
-control operation:
-
-```console
+```bash
 sudo -v
-sudo -n /opt/cf-agent-gateway/deploy/wechat-runtime-control <stop|start|status>
+
+export RELEASE_DIR="/opt/cf-agent-gateway"
+export COMPOSE_FILE="${RELEASE_DIR}/docker-compose.prod.yml"
+export CF_GATEWAY_ENV_FILE="${CF_GATEWAY_ENV_FILE:-${RELEASE_DIR}/.env}"
+export CF_GATEWAY_CONFIG_FILE="${CF_GATEWAY_CONFIG_FILE:-${RELEASE_DIR}/config/production.yaml}"
+export CONTROLLER="${RELEASE_DIR}/deploy/wechat-runtime-control"
+export GATEWAY_URL="http://127.0.0.1:8080"
+export EVIDENCE_DIR="/path/to/protected/evidence"
+
+COMPOSE=(
+  sudo -n env
+  "CF_GATEWAY_ENV_FILE=${CF_GATEWAY_ENV_FILE}"
+  "CF_GATEWAY_CONFIG_FILE=${CF_GATEWAY_CONFIG_FILE}"
+  docker compose
+  --project-directory "${RELEASE_DIR}"
+  --env-file "${CF_GATEWAY_ENV_FILE}"
+  -f "${COMPOSE_FILE}"
+  --profile worker
+)
+
+sudo -n test -d "${EVIDENCE_DIR}"
+sudo -n test -w "${EVIDENCE_DIR}"
+sudo -n test -r "${COMPOSE_FILE}"
+sudo -n test -r "${CF_GATEWAY_ENV_FILE}"
+sudo -n test -r "${CF_GATEWAY_CONFIG_FILE}"
+sudo -n test -x "${CONTROLLER}"
 ```
 
-Do not add ordinary users to the `docker` group or loosen the Token File's
-established ownership or mode to make it readable.
+Do not source or print the protected environment file merely to populate an interactive
+shell. The `COMPOSE` array fixes the project directory, passes the protected env-file
+explicitly, preserves the optional file overrides for Compose interpolation, and retains
+the `worker` profile. Do not redefine it with an ordinary-user Docker command.
 
-Render a site-specific copy of `config/production.yaml`:
+## Required configuration
 
-- retain `runtime.v2_routing_enabled: true`;
-- enable WeChat and set its HTTPS/controlled internal endpoint;
-- enable Hermes and set its HTTPS/controlled internal endpoint;
-- retain `worker.enabled: true`;
-- set the artifact path to durable shared storage;
-- keep `CF_GATEWAY_STARTUP_MIGRATION_MODE=check` for normal services.
+The protected environment/configuration must supply, without exposing values:
 
-The production template disables external adapters by default. Enabling them and
-supplying their credentials is an external manual action.
+- one immutable `CF_GATEWAY_IMAGE` tag or digest;
+- the external PostgreSQL URL through `CF_AGENT_GATEWAY_DATABASE_URL`;
+- separate Message API and Admin API Bearer secrets;
+- the Hermes endpoint and API-key environment reference when Hermes is enabled;
+- the `agent-wechat` endpoint and protected host Token File path when WeChat is enabled;
+- durable Artifact storage and runtime heartbeat volumes;
+- `runtime.v2_routing_enabled: true`;
+- `worker.enabled: true`, with approved concurrency, lease, and retry settings.
 
-The Gateway aggregates worker health from files, so all four processes must agree on
-three paths:
+Production Compose injects `CF_AGENT_WECHAT_TOKEN_FILE` only into Poll and Delivery
+Workers and bind-mounts the host file read-only. Remove the development
+`CF_AGENT_WECHAT_TOKEN` value from production. If both sources are present, startup fails
+closed.
 
-```text
-CF_GATEWAY_WECHAT_HEARTBEAT_PATH
-CF_GATEWAY_DISPATCH_HEARTBEAT_PATH
-CF_GATEWAY_DELIVERY_HEARTBEAT_PATH
+Never display `.env`, the Token File, a rendered connection string, or the full expanded
+Compose configuration. Safe preflight commands inspect names and metadata only:
+
+```bash
+sudo -n test -r "${COMPOSE_FILE}"
+"${COMPOSE[@]}" config --services
+"${COMPOSE[@]}" config --profiles
 ```
 
-Compose must mount one shared heartbeat volume into the Gateway and workers; a
-container-private `/run` tmpfs cannot be observed by the Gateway container. With systemd,
-use distinct files in the host's `/run` tree and grant the Gateway service read access.
-Never point two workers at the same file.
-
-The image and long-running Compose services use fixed identity `10001:10001`. The one-shot
-`heartbeat-init` dependency runs before migration with no network, no runtime Secret
-environment and only `CHOWN`/`FOWNER`; it repairs both new and existing heartbeat volumes to
-owner/group `10001:10001` and mode `0750`, then exits. It is the only root container in this
-Compose topology and is never resident. Workers create atomic heartbeat files with mode
-`0600`; the Gateway mounts the volume read-only. Do not replace this with `0777`, a resident
-root process, or a writable Gateway mount.
-
-Do not rely on a Docker daemon's raw named-volume owner or copy-up behavior. A fresh or
-reused volume is usable only after `heartbeat-init` asserts the postcondition above. The
-real-container CI creates the named volume, runs that initializer, and independently checks
-directory and file UID/GID/modes inside the running stack.
-
-Set `CF_GATEWAY_CONFIG_FILE` only when the site-specific YAML lives somewhere other than
-`./config/production.yaml`; the container target remains read-only at
-`/app/config/production.yaml`.
-
-## Log noise and retention
-
-Production INFO excludes successful `httpx`/`httpcore` request lines, Alembic
-`Context impl`/transactional-DDL setup lines, poll-cycle starts, and completely idle
-per-chat/cycle summaries. Gateway polling records remain available at DEBUG. The
-`httpx`, `httpcore`, `alembic`, and `alembic.runtime.migration` loggers remain
-explicitly pinned to WARNING even when the root Gateway level is DEBUG; this release has
-no production environment override for them. A reviewed diagnostic build must set those
-logger levels explicitly and only for a bounded capture window.
-
-New/duplicate/failed messages, bootstrap, self skips, authentication failure, or other
-failure activity remains INFO or above. A non-empty window containing only messages already
-inside the checkpoint logs one INFO summary when first observed or when its local-ID
-sequence/count changes; an identical repeated window and checkpoint-skip count is DEBUG.
-Known continuity-only fail-closed states such as
-`stop_chat_visible_window_empty` emit one `checkpoint continuity unverified` WARNING,
-one chat INFO, and one cycle INFO on first observation or signature change. An identical
-state emits no repeated WARNING/INFO on later three-second cycles. There is no periodic
-reminder; account change or Worker restart creates a new process-lifetime observation.
-Continuity signatures include checkpoint local ID/generation/fingerprint, remote bounds,
-recovery action, and failure code within the account/conversation scope.
-
-Marker evidence and continuity observation have separate invalidation boundaries. Missing
-or malformed checkpoint fingerprint, unavailable/naive/backwards marker clock, or marker
-identity mismatch removes the empty-window marker plus pending/history helper state but
-preserves the unchanged continuity signature. The Chat remains fail-closed with
-`stop_chat_empty_window_marker_unavailable`; no invalid marker can start live-suffix
-processing. Account change, Chat disappearance, or ordinary auth/list/parse/database/network
-failure may still invalidate the complete Chat state.
-Library WARNING/ERROR records and exception stacks are not suppressed.
-
-Process-lifetime polling state is limited to 1,024 Chat keys. Each successful
-`list_chats` cycle prunes empty markers, marker clock watermarks,
-visible-window/history observations, continuity observations, and pending windows for
-Chats no longer present. Account change clears all state. The limit evicts the least
-recently touched Chat before accepting another key, so Chat churn cannot grow these
-dictionaries indefinitely.
-
-Treat these as high-value lifecycle evidence and preserve them before recovery:
-
-- checkpoint regression detected/rebased/live-suffix, continuity failed-closed and CAS
-  conflict records;
-- worker start/stop and heartbeat-write failure;
-- dispatch uncertainty, quarantine, reconciliation and operator recovery transitions;
-- delivery uncertainty and recovery transitions; and
-- runtime controller start/stop success, failure and rollback/rollback-failure output.
-
-Production Compose keeps the `json-file` driver, so `docker logs` and
-`docker compose logs` remain available. The per-container defaults are
-`CF_GATEWAY_LOG_MAX_SIZE=64m` and `CF_GATEWAY_LOG_MAX_FILES=10`, or 640 MiB of
-configured capacity for each service. `tests/test_log_retention.py` reserves 10% for
-rotation/format variation and models the busiest polling container with:
-
-- a three-second polling interval for 201,600 cycles over seven days;
-- the production steady shape of 21 chats/95 visible messages, with non-empty counts
-  9/14/20/50/1/1: the first/changed shape emits six chat summaries and one cycle summary,
-  while identical subsequent cycles emit zero repeated INFO;
-- five persistent `stop_chat_visible_window_empty` Chats: first/change emits five
-  continuity WARNINGs, five chat summaries, and one cycle summary; identical subsequent
-  cycles emit zero repeated WARNING/INFO and no periodic reminder;
-- one persistent old Checkpoint with no valid fingerprint, producing
-  `stop_chat_empty_window_marker_unavailable`: first/change emits one WARNING, one chat
-  INFO, and one cycle INFO; identical three-second cycles emit zero repeated WARNING/INFO;
-- a conservative business ceiling of two real-activity chat summaries plus one active
-  cycle summary on every three-second cycle;
-- all six stable history windows changing once per hour;
-- all five empty-window continuity signatures changing once per hour;
-- the Marker-unavailable signature changing once per hour;
-- two checkpoint transition records per hour and one worker stop/start per day;
-- both steady-state first-observation bursts rebuilding after each modeled Worker restart;
-- the Marker-unavailable first-observation burst rebuilding after each Worker restart;
-- the Docker `json-file` envelope, eight-digit PID, large counters/IDs, and an extra
-  128-byte margin per record.
-
-That model produces 517,295,964 bytes over seven days (about 70.48 MiB/day). Against the
-576 MiB safety budget it estimates 8.17 days, so an initial worker-stop and checkpoint
-transition remain inside the retained window. Recalculate the busiest container before
-lowering the defaults or increasing traffic:
-
-`retention_days = (max_size_bytes * max_files * safety_ratio) / modeled_bytes_per_day`.
-
-Increase either environment value when the site model does not clear seven days, and
-confirm host disk capacity for the sum across containers. All six Compose services inherit
-the policy, so their theoretical combined maximum is 3.75 GiB at the defaults. Log
-retention is operational evidence, not a replacement for immutable dispatch recovery
-audits, delivery attempts, Messages, Admission Outcomes, checkpoints, or other
-authoritative database facts.
-
-Never log or paste Token values, Authorization/Cookie headers, message bodies, raw
-account/chat/conversation IDs, database credentials, or raw upstream responses. Use only
-hashed `*_id_ref` fields and aggregate counters in retained logs.
+Expected services include `heartbeat-init`, `migration`, `gateway`, `worker`,
+`dispatch-worker`, and `delivery-worker`. The `worker` profile is required whenever
+Poll, Dispatch, or Delivery Worker services are referenced.
 
 ## Pre-deployment gate
 
-1. Confirm the intended commit, immutable image digest and pull request #4's green
-   GitHub Actions run ID.
-2. Verify the database URL points to the intended PostgreSQL database without printing
-   the password.
-3. Take and test a restorable backup. Record the backup identifier outside the repo.
-4. Record the current Alembic revision and table/row-count checks from the migration
-   runbook, including `message_admission_outcomes` and recovery audits.
-5. Confirm there is one Alembic head and no unversioned or unexpected schema.
-6. Stop the Gateway and all three workers, or otherwise enforce an exclusive migration
-   window.
-7. Confirm durable artifact storage is mounted read/write for response/delivery
-   processes.
-8. Confirm agent-wechat and Hermes endpoints are reachable, but do not send a business
-   message during the migration window.
+Before changing state:
 
-Do not proceed if the backup cannot be restored, the schema is not at a known revision,
-or migration preflight reports partial/incompatible V2 tables.
+1. Record the approved Git authority, immutable image digest, change owner, window, and
+   rollback authority.
+2. Verify the previous release directory remains intact and its immutable image is locally
+   usable or has a verified archive.
+3. Record the current Alembic revision and aggregate Message/Admission/Dispatch/Response/
+   Delivery/Checkpoint counts through an approved read-only procedure.
+4. Create the approved PostgreSQL backup and record its identifier. This repository does
+   not claim a restore drill unless one was separately executed and evidenced.
+5. Record read-only Gateway health, runtime health, Controller status, Compose process
+   state, and Docker log configuration.
+6. Preserve relevant structured logs in the protected evidence directory before any
+   container recreation.
+7. Classify every `uncertain`, stale claim, blocked Thread, reconciliation poison item,
+   missing Delivery, or unverified Checkpoint. Do not deploy through unexplained state.
+8. Confirm protected files have the approved owner/mode without reading their content.
+9. Confirm host free space covers image, backup, Artifact, database, and log-retention
+   needs.
 
-## Migration and startup
+The accepted log capacity model is maintained only in
+[Production status](../production-status.md#log-retention-record).
 
-For Compose:
+## Deployment sequence
+
+### 1. Close the Poll/Delivery Gate
 
 ```bash
-docker compose -f docker-compose.prod.yml --profile worker pull
-docker compose -f docker-compose.prod.yml run --rm migration
-docker compose -f docker-compose.prod.yml --profile worker up -d \
-  gateway worker dispatch-worker delivery-worker
+sudo -n "${CONTROLLER}" stop --timeout-seconds 30
 ```
 
-For systemd, follow [systemd-deployment.md](../systemd-deployment.md). Use this order:
+Success is `{"stopped":true}`. This stops exactly `worker` and `delivery-worker`.
+Verify they are stopped before migration. Do not replace this command with ad hoc
+`docker restart` or direct container deletion.
 
-1. PostgreSQL, agent-wechat and Hermes are reachable.
-2. `heartbeat-init` exits zero after enforcing heartbeat volume ownership and mode.
-3. The exclusive migration unit upgrades to the packaged head.
-4. Gateway starts and passes `/ready`.
-5. WeChat polling worker starts and publishes a fresh heartbeat.
-6. Dispatch worker starts and publishes a fresh heartbeat.
-7. Delivery worker starts and publishes a fresh heartbeat.
+### 2. Stop the remaining application processes
 
-The migration job is allowed to upgrade schema. All long-running services use check
-mode and fail closed on a head mismatch. Do not use `Base.metadata.create_all()`, an
-ad-hoc SQL file, or a second Alembic branch. This release has one packaged head,
-`20260823_04`.
+```bash
+"${COMPOSE[@]}" stop dispatch-worker gateway
+```
 
-Revision `20260823_03` creates one durable admission authority per Message. Existing
-dispatch-backed Messages are backfilled completed/allowed with their exact targets;
-Messages without dispatch become completed/`legacy_unresolved` and are never
-automatically reevaluated. Revision `20260823_04` adds persistent reconciliation
-backoff/quarantine fields, exact recovery transition checks, and PostgreSQL/SQLite triggers
-that reject recovery-audit UPDATE/DELETE. Both upgrades validate source data and fail closed
-on partial or inconsistent state.
+This establishes the exclusive application window. Do not stop or recreate the external
+PostgreSQL service as part of this Compose command.
 
-## Post-deployment validation
+### 3. Activate the approved release and image
 
-Complete [the production validation checklist](../production-validation.md). At a
-minimum, verify:
+The active release directory must be complete and immutable for the deployment window.
+Verify the configured image identity without printing environment-file contents:
 
-- `/health` proves the HTTP process is alive;
-- `/ready` proves startup/database/schema readiness;
-- runtime business health reports all three enabled worker heartbeats;
-- Hermes configuration and the last real operation result are reported separately;
-- configured, healthy Hermes with no recent call is `ok/no_recent_observation`, not
-  degraded and not proof of connectivity;
-- checkpoint continuity is not ambiguous/degraded;
-- queued/running/failed/uncertain/dead, reconciliation, and delivery counts are understood;
-- no stale lease, blocked thread, or missing delivery is unexplained;
-- legacy admission outcomes and any pending/stale claims have an owner;
-- recovery audit triggers reject an authorized test UPDATE/DELETE in staging;
-- a controlled synthetic message creates exactly one Message, one dispatch, one
-  response, one delivery and one outbound reply.
+```bash
+"${COMPOSE[@]}" images
+```
 
-The repository's real-container CI job uses production Compose plus a minimal override. It
-builds the actual image, starts PostgreSQL 16, migration, Gateway, and all three Workers,
-and verifies non-root/read-only isolation, one-shot initializer restrictions, heartbeat
-owner/group/mode, Gateway write denial, Worker Docker health, Runtime Health, API/Admin
-token separation, stale-heartbeat degradation, restart recovery, clean shutdown, and
-volume cleanup. It uses an empty synthetic WeChat service, seeds no dispatch, makes no
-Hermes call, and does not exercise a real account. Only a green Actions run ID is evidence
-that this job executed. The controlled business-message end-to-end test above remains an
-external manual action and was not performed on a real CFserver by this repository change.
+Do not deploy a mutable convenience tag whose content has not been matched to the approved
+digest.
 
-## Rollback
+### 4. Run the migration job
 
-Application rollback and database rollback are separate decisions.
+```bash
+"${COMPOSE[@]}" run --rm migration
+```
 
-1. Stop all four application processes.
-2. Preserve logs, worker heartbeats, queue counts and recovery audit evidence.
-3. If the new schema remains backward-compatible with the prior image, redeploy the
-   prior immutable image and keep the database at the new head.
-4. Use Alembic downgrade only online, when the revision documents a supported downgrade
-   and a restore test proves the prior application accepts it. Offline `--sql` downgrade
-   is globally rejected before DDL because database evidence cannot be inspected.
-5. If downgrade is unsafe or irreversible, restore the pre-deployment database backup
-   into a separately verified target and repoint only after change approval.
-6. Never delete messages, dispatches, responses, delivery attempts or recovery audits
-   to make rollback appear clean.
+Only this one-shot service may use migration mode. All long-running services use
+`CF_GATEWAY_STARTUP_MIGRATION_MODE=check` and fail closed when the schema is not the
+packaged head. The current head is `20260823_04`.
 
-Checkpoint generation/anchor columns are operational evidence. A legacy nonzero
-checkpoint with no anchor is not proof of continuity and must not be fabricated during
-rollback.
+After the job, use the approved read-only Alembic check and aggregate count comparison.
+Do not use `Base.metadata.create_all()`, ad hoc DDL, a second migration branch, or a
+manual stamp on an unknown database. See [Migration runbook](../../migrations/README.md).
 
-`20260823_03` refuses downgrade once runtime admission evidence exists. `20260823_04`
-refuses downgrade while any recovery audit or reconciliation failure/quarantine evidence
-exists. Prefer application rollback while retaining the forward-compatible schema. If an
-older schema is mandatory, restore the approved pre-upgrade backup into a separately
-verified database; never delete authoritative admission or audit evidence to force
-downgrade.
+### 5. Start Gateway and Dispatch Worker with the gate closed
 
-## Time settings
+```bash
+"${COMPOSE[@]}" up -d gateway dispatch-worker
+```
 
-Configure the Debian host as `Asia/Shanghai`. Keep containers, PostgreSQL and persisted
-timestamps in UTC. Convert for operator display at the presentation layer. Do not modify
-the PostgreSQL timezone to solve a display discrepancy.
+Gateway and Dispatch Worker can be brought online while Poll and Delivery remain stopped.
+Verify:
 
-## Responsibility after handoff
+```bash
+curl --fail --silent --show-error --max-time 3 "${GATEWAY_URL}/health"
+curl --fail --silent --show-error --max-time 3 "${GATEWAY_URL}/ready"
+curl --fail --silent --show-error --max-time 5 "${GATEWAY_URL}/health/runtime"
+"${COMPOSE[@]}" ps
+```
 
-The deployment owner is responsible for secret injection and rotation, PostgreSQL
-backup/restore, TLS and network policy, agent-wechat login, Hermes capacity, alerting,
-and CFserver acceptance. Repository CI verifies code and migration behavior but cannot
-certify those external systems.
+At this point, stale Poll/Delivery heartbeat degradation is expected while the gate is
+closed. Database and migration components must be `ok`. Classify any Dispatch queue state
+before opening the gate.
+
+### 6. Complete the external agent-wechat lifecycle
+
+`agent-wechat` login/session lifecycle is separate from the Gateway Worker gate.
+
+- For a Gateway-only deployment that does not restart or recreate `agent-wechat`, the
+  existing active Session can remain in place; this is the boundary under which the P1
+  deployment preserved its Session.
+- After a CFserver/Debian reboot or any `agent-wechat` container recreation, the external
+  service does not auto-start (`restart="no"`) and the old Session does not return as an
+  active Session. Run the formal Controller stop and confirm `{"stopped":true}` before
+  the external owner starts `agent-wechat` and completes a fresh QR.
+- An AI/Hermes host-only reboot does not require a fresh QR when CFserver and
+  `agent-wechat` were not restarted; restore and verify Hermes separately.
+- Do not start Poll or Delivery merely because `agent-wechat` has a running process.
+- Do not place QR/session evidence, real account identity, Cookie, or Token material in
+  repository or general logs.
+
+The protected Token File must be ready before the Controller start.
+
+### 7. Open the Poll/Delivery Gate
+
+```bash
+sudo -n "${CONTROLLER}" start --timeout-seconds 180
+sudo -n "${CONTROLLER}" status --timeout-seconds 30
+```
+
+Controller `start` succeeds only after both controlled containers are Docker-healthy,
+both heartbeats are fresh, and the Token Contract is valid. The status result must have:
+
+- `worker_health: "healthy"`;
+- `delivery_health: "healthy"`;
+- a non-null heartbeat age within the configured limit;
+- `token_contract_valid: true`;
+- `ready: true`.
+
+### 8. Complete acceptance
+
+Follow [Production validation](../production-validation.md). At minimum:
+
+- recheck all health surfaces and Controller status;
+- compare aggregate database and queue totals with the pre-deployment record;
+- account for every Checkpoint continuity signal;
+- run the approved controlled business-path validation when required by the change;
+- confirm no duplicate/replay, stale claim, `uncertain`, missing Delivery, or
+  reconciliation poison state is unexplained;
+- observe structured logs long enough to establish steady behavior;
+- verify rotation is `64m` x `10` without printing log payloads;
+- record the final release, image, schema, evidence, and rollback paths.
+
+Do not mark a future deployment production accepted solely because containers are running
+or GitHub Actions is green.
+
+## Host reboot expectations
+
+Long-running application services use `restart: unless-stopped` and should recover after
+Docker and their dependencies become available. Verify Gateway, Dispatch Worker, all three
+heartbeats, runtime health, and Controller status after reboot.
+
+`agent-wechat` uses `restart="no"`: after a CFserver/Debian reboot it does not
+automatically start, and its old Session does not automatically become active. Do not
+assume the Poll/Delivery Gate remained stopped; Docker may have restarted those Gateway
+containers. Before starting `agent-wechat` or showing a fresh QR, run:
+
+```bash
+sudo -n "${CONTROLLER}" stop --timeout-seconds 30
+```
+
+Require `{"stopped":true}`, then let the external owner start `agent-wechat` and
+complete a fresh QR. Validate the protected Token File and reopen the gate only with:
+
+```bash
+sudo -n "${CONTROLLER}" start --timeout-seconds 180
+sudo -n "${CONTROLLER}" status --timeout-seconds 30
+```
+
+A Gateway-only deployment that leaves `agent-wechat` untouched can preserve its active
+Session. An AI/Hermes host-only reboot does not require a fresh QR when CFserver and
+`agent-wechat` did not restart.
+
+## Formal rollback
+
+Application rollback and database restoration are separate decisions.
+
+1. Stop and preserve: close the Poll/Delivery Gate, stop Dispatch/Gateway, and copy relevant
+   logs and aggregate state into the protected evidence directory.
+2. Select an intact approved previous release directory and its immutable image. Do not
+   reconstruct a rollback from a partial working tree.
+3. Determine whether the previous application accepts the current forward schema. Prefer
+   application rollback while retaining `20260823_04` when compatible.
+4. If an older schema is mandatory, restore the approved pre-upgrade backup into a
+   separately verified target. Do not force an Alembic downgrade through admission,
+   recovery-audit, Checkpoint, or reconciliation evidence.
+5. Start Gateway and Dispatch Worker from the previous release while keeping the
+   Poll/Delivery Gate closed.
+6. Verify readiness, schema compatibility, aggregate queue/database state, and the
+   external `agent-wechat` session.
+7. Open the gate only through the previous release's approved Controller and complete the
+   rollback acceptance record.
+
+Never delete Message, Admission, Dispatch, Response, Delivery, Checkpoint, or recovery-audit
+rows to make rollback appear clean. Never hand-edit a Checkpoint to bypass fail-closed
+continuity.
+
+The exact preserved rollback and image archive for the current production release are
+release evidence in [Production status](../production-status.md#rollback-and-evidence);
+they are not universal future paths.

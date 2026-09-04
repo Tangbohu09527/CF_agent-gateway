@@ -1,5 +1,14 @@
 # V1 Staging Validation
 
+> **ARCHIVED HISTORICAL RECORD**
+>
+> This file records the V1 text-only staging result associated with commits
+> `9a473b3`, `b20a9f2`, and `3028b5c`. It predates the production V2 runtime,
+> independent Dispatch/Delivery Workers, P1 observability, and Alembic head
+> `20260823_04`. It is retained as historical evidence only. Use
+> [Production status](production-status.md), [Runtime architecture](runtime-architecture.md),
+> and [Production validation](production-validation.md) for the current system.
+
 ## Record status
 
 - Validation state: completed

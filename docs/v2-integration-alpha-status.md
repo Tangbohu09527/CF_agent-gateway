@@ -1,9 +1,14 @@
 # V2 Integration Alpha Status
 
-> Historical snapshot: this document records `feat/v2-integration` at `afb90d4`.
-> It predates V2 routing runtime `0850eb2` and the standalone dispatch worker.
-> See [architecture.md](architecture.md) and the root README for the current runtime.
-
+> **ARCHIVED HISTORICAL RECORD**
+>
+> This document records the August 7, 2026 `feat/v2-integration` Alpha snapshot at
+> `afb90d4` with validated baseline `a8a2625` and Alembic head `20260806_04`.
+> It predates the completed V2 routing/runtime, independent Workers, recovery hardening,
+> P1 observability, and production acceptance. Retain its old branch/SHA/schema statements
+> as historical facts only. Use [Production status](production-status.md),
+> [Domain architecture](architecture.md), and
+> [Production validation](production-validation.md) for the current system.
 
 ## Current Version
 
