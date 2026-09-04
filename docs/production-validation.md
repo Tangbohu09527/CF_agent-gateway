@@ -9,6 +9,11 @@ The current deployed facts are authoritative in
 [Production status](production-status.md). A future checklist does not change that record
 until a new release is actually accepted.
 
+Repository `main` later advanced to `c5518aed12b90235f118ed81bb3cef75d0463443`
+through the docs-only PR #8 merge. That merge did not rebuild or redeploy production, so
+the completed acceptance record below retains its original production Release authority,
+image, release label, database revision, rollback paths, and evidence run ID.
+
 ## Completed production acceptance record
 
 ### Candidate failure and rollback
@@ -49,7 +54,7 @@ state changes.
 
 - [x] PR #7 merged into `main`.
 - [x] Issue #6 was completed and closed.
-- [x] Git authority is merge commit
+- [x] Production Release Git authority is the PR #7 merge commit
   `b488cf452584e73bc9b752564bf90ea153aa8d18`.
 - [x] Production image code snapshot is
   `f36c798294368263433f6132366ac9a864d9482b`.

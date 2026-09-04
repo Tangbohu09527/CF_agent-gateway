@@ -8,17 +8,24 @@ entry services and the external Hermes execution service.
 The V2 runtime and P1 observability changes are production validated. Production is
 online on the release recorded in [Production status](docs/production-status.md).
 
-- Git authority: merged `main` SHA
+- Repository main: `c5518aed12b90235f118ed81bb3cef75d0463443`
+  (PR #8 docs-only merge commit)
+- Production Release Git authority:
   `b488cf452584e73bc9b752564bf90ea153aa8d18` (PR #7 merge commit)
-- Production-validated code snapshot:
+- Production image code snapshot:
   `f36c798294368263433f6132366ac9a864d9482b`
+- Production image:
+  `sha256:b9341ca7df6f952b4d81028c497574c1e22478e4408f98791a28bd9514b215f1`
 - Release label: `p1-observability-main-b488cf452584-20260903`
 - Database head: `20260823_04`
 - Production log policy: Docker `json-file`, `64m` x `10` files per Compose service
-- P1 Git authority is the merged `main` SHA; no new P1 Git release tag was created
+- No new P1 Git release tag was created
 
-The merge commit is the repository authority. The earlier code SHA identifies the exact
-snapshot built into the production image and is an ancestor of the merge commit.
+PR #8 only updated documentation. It advanced repository `main` to `c5518aed12b9` but did
+not rebuild or deploy the production image, change the database revision or release label,
+or create a production tag. Current production remains defined by the Production Release
+Git authority `b488cf452584`, the image code snapshot `f36c79829436`, and the immutable
+image digest above. Repository `main` advancing does not mean production was redeployed.
 
 ## Responsibility boundary
 
