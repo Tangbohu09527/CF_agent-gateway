@@ -9,10 +9,13 @@ The current deployed facts are authoritative in
 [Production status](production-status.md). A future checklist does not change that record
 until a new release is actually accepted.
 
-Repository `main` later advanced to `c5518aed12b90235f118ed81bb3cef75d0463443`
-through the docs-only PR #8 merge. That merge did not rebuild or redeploy production, so
-the completed acceptance record below retains its original production Release authority,
-image, release label, database revision, rollback paths, and evidence run ID.
+The PR #8 documentation closeout merge baseline is
+`c5518aed12b90235f118ed81bb3cef75d0463443`. This historical baseline is not a permanently
+current repository `main` tip; query the live tip from GitHub or with
+`git rev-parse origin/main`. The docs-only PR #8 merge did not rebuild or redeploy
+production, so the completed acceptance record below retains its original production
+Release authority, image, release label, database revision, rollback paths, and evidence
+run ID.
 
 ## Completed production acceptance record
 

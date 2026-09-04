@@ -10,8 +10,10 @@ release. It records completed acceptance facts; it is not a generic deployment r
 | Field | Authority or status value |
 | --- | --- |
 | Repository status updated | `2026-09-04` |
-| Repository main | `c5518aed12b90235f118ed81bb3cef75d0463443` |
-| Repository main CI | Run `33853221731` succeeded |
+| Repository branch authority | `main` |
+| Documentation closeout baseline | PR #8 merge commit `c5518aed12b90235f118ed81bb3cef75d0463443` |
+| PR #8 baseline CI | Run `33853221731` succeeded |
+| Live repository tip | Query GitHub or `git rev-parse origin/main`; intentionally not hard-coded |
 | Deployment date | September 3, 2026 |
 | Repository | `Tangbohu09527/CF_agent-gateway` |
 | Release label | `p1-observability-main-b488cf452584-20260903` |
@@ -28,11 +30,15 @@ PR #7 is merged and Issue #6 is closed. Its merge commit is the current Producti
 Git authority; no new P1 Git release tag was created. The validated image code snapshot is
 the PR head used to build the production image and is an ancestor of that release commit.
 
-PR #8 subsequently merged documentation only and advanced repository `main` to
-`c5518aed12b90235f118ed81bb3cef75d0463443`. No production redeployment occurred: PR #8
-did not rebuild the production image, change Alembic revision `20260823_04`, change the
-release label, or create a production tag. Current production remains defined by Release
-Git authority `b488cf452584e73bc9b752564bf90ea153aa8d18`, validated image code snapshot
+PR #8 subsequently merged documentation only. Its merge commit,
+`c5518aed12b90235f118ed81bb3cef75d0463443`, is the documentation closeout baseline, not
+a permanently current repository `main` tip. The live tip changes as later pull requests
+merge and must be queried from GitHub or with `git rev-parse origin/main`.
+
+No production redeployment occurred: PR #8 did not rebuild the production image, change
+Alembic revision `20260823_04`, change the release label, or create a production tag.
+Current production remains defined by Release Git authority
+`b488cf452584e73bc9b752564bf90ea153aa8d18`, validated image code snapshot
 `f36c798294368263433f6132366ac9a864d9482b`, and image digest
 `sha256:b9341ca7df6f952b4d81028c497574c1e22478e4408f98791a28bd9514b215f1`.
 Repository `main` advancing does not mean production was redeployed.

@@ -8,8 +8,9 @@ entry services and the external Hermes execution service.
 The V2 runtime and P1 observability changes are production validated. Production is
 online on the release recorded in [Production status](docs/production-status.md).
 
-- Repository main: `c5518aed12b90235f118ed81bb3cef75d0463443`
-  (PR #8 docs-only merge commit)
+- Repository branch authority: `main`
+- PR #8 documentation closeout baseline:
+  `c5518aed12b90235f118ed81bb3cef75d0463443`
 - Production Release Git authority:
   `b488cf452584e73bc9b752564bf90ea153aa8d18` (PR #7 merge commit)
 - Production image code snapshot:
@@ -21,7 +22,10 @@ online on the release recorded in [Production status](docs/production-status.md)
 - Production log policy: Docker `json-file`, `64m` x `10` files per Compose service
 - No new P1 Git release tag was created
 
-PR #8 only updated documentation. It advanced repository `main` to `c5518aed12b9` but did
+The live `main` tip changes whenever a merge advances the branch, so long-lived production
+documentation does not hard-code it. Query the current tip in the GitHub branch view or
+with `git rev-parse origin/main`. The PR #8 merge commit is the documentation closeout
+baseline, not a permanent current-`main` value. PR #8 only updated documentation; it did
 not rebuild or deploy the production image, change the database revision or release label,
 or create a production tag. Current production remains defined by the Production Release
 Git authority `b488cf452584`, the image code snapshot `f36c79829436`, and the immutable
