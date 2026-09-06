@@ -16,6 +16,11 @@ from cf_agent_gateway.adapters.wechat import (
     RawWechatMessage,
     WechatSyncCheckpoint,
 )
+from cf_agent_gateway.admission import (
+    AdmissionOutcomeState,
+    AdmissionReason,
+    MessageAdmissionOutcomeStore,
+)
 from cf_agent_gateway.agent_profile import AgentProfileStore
 from cf_agent_gateway.artifact import ArtifactKind, ArtifactRepository, ArtifactStatus
 from cf_agent_gateway.config import (
@@ -719,7 +724,7 @@ def test_duplicate_source_message_is_archived_dispatched_and_delivered_once(
         assert_text_responses_delivered(session, messages=[message])
 
 
-def test_worker_recovers_archived_message_after_private_route_is_configured(
+def test_worker_keeps_route_denial_and_only_executes_new_message_after_binding(
     tmp_path: Path,
 ) -> None:
     harness = RuntimeHarness(tmp_path)
@@ -734,7 +739,7 @@ def test_worker_recovers_archived_message_after_private_route_is_configured(
         server_id=4001,
         conversation_id=conversation_id,
         sender_id=sender_id,
-        content="recover this archived request",
+        content="retain this unconfigured request without replay",
     )
     first_stop_event = Event()
     first_results: list[PollResult] = []
@@ -756,15 +761,24 @@ def test_worker_recovers_archived_message_after_private_route_is_configured(
 
     assert len(first_results) == 1
     first_result = first_results[0]
-    assert first_result.messages_processed == 0
-    assert first_result.chats_failed == 1
-    assert len(first_result.failures) == 1
-    assert first_result.failures[0].stage.value == "sink"
-    assert first_result.failures[0].code == "wechat_sink_error"
+    assert first_result.messages_processed == 1
+    assert first_result.chats_failed == 0
+    assert first_result.failures == []
+    assert harness.hermes.calls == []
+    assert harness.sender_factory.send_calls == []
 
     with harness.session() as session:
+        rejected_message = session.scalar(select(Message))
+        assert rejected_message is not None
+        rejected_message_id = rejected_message.id
+        denied = MessageAdmissionOutcomeStore(session).get_by_message_id(rejected_message_id)
+        assert denied is not None and denied.state is AdmissionOutcomeState.COMPLETED
+        assert denied.admission_reason == AdmissionReason.ROUTE_UNAVAILABLE.value
+        assert denied.should_create_task is False
+        assert denied.enterprise_identity_id == identity_id
+        denied_outcome_id = denied.id
         checkpoint = session.scalar(select(WechatSyncCheckpoint))
-        assert checkpoint is not None and checkpoint.last_local_id == 0
+        assert checkpoint is not None and checkpoint.last_local_id == 1
         assert session.scalar(select(func.count()).select_from(Message)) == 1
         assert session.scalar(select(func.count()).select_from(AIThread)) == 0
         assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
@@ -789,10 +803,48 @@ def test_worker_recovers_archived_message_after_private_route_is_configured(
     )
 
     assert len(restarted_results) == 1
-    recovered_result = restarted_results[0]
-    assert recovered_result.messages_processed == 1
-    assert recovered_result.chats_failed == 0
-    assert recovered_result.failures == []
+    restarted_result = restarted_results[0]
+    assert restarted_result.messages_processed == 0
+    assert restarted_result.messages_skipped_by_checkpoint == 1
+    assert restarted_result.chats_failed == 0
+    assert restarted_result.failures == []
+    assert harness.hermes.calls == []
+    assert harness.sender_factory.send_calls == []
+
+    # A changed local ID cannot bypass the refusal for the same server message.
+    refused_duplicate = raw_wechat_message(
+        2,
+        server_id=4001,
+        conversation_id=conversation_id,
+        sender_id=sender_id,
+        content="duplicate must not replace the refused archive",
+    )
+    duplicate_denial = harness.poll(refused_duplicate)
+    assert duplicate_denial.messages_duplicate == duplicate_denial.messages_processed == 1
+    assert duplicate_denial.failures == []
+    assert harness.hermes.calls == []
+    assert harness.sender_factory.send_calls == []
+
+    fresh = raw_wechat_message(
+        3,
+        server_id=4002,
+        conversation_id=conversation_id,
+        sender_id=sender_id,
+        content="execute this new request after binding",
+    )
+    new_result = harness.poll(fresh)
+    assert new_result.messages_new == new_result.messages_processed == 1
+    assert new_result.failures == []
+    delivered_duplicate = raw_wechat_message(
+        4,
+        server_id=4002,
+        conversation_id=conversation_id,
+        sender_id=sender_id,
+        content="duplicate must not replace the delivered archive",
+    )
+    duplicate_result = harness.poll(delivered_duplicate)
+    assert duplicate_result.messages_duplicate == duplicate_result.messages_processed == 1
+    assert duplicate_result.failures == []
     assert len(harness.hermes.calls) == 1
     assert harness.hermes.close_calls == 0
     assert harness.hermes_factory_calls == []
@@ -801,25 +853,39 @@ def test_worker_recovers_archived_message_after_private_route_is_configured(
         (
             SOURCE_ACCOUNT_ID,
             conversation_id,
-            "Hermes reply: recover this archived request",
+            "Hermes reply: execute this new request after binding",
         )
     ]
 
     with harness.session() as session:
-        message = session.scalar(select(Message))
-        payload = session.scalar(select(MessageRawPayload))
+        message = session.scalar(select(Message).where(Message.id != rejected_message_id))
+        assert message is not None
+        payload = session.scalar(
+            select(MessageRawPayload).where(MessageRawPayload.message_id == message.id)
+        )
+        rejected_payload = session.scalar(
+            select(MessageRawPayload).where(MessageRawPayload.message_id == rejected_message_id)
+        )
+        denied = MessageAdmissionOutcomeStore(session).get_by_message_id(rejected_message_id)
         thread = session.scalar(select(AIThread))
         record = session.scalar(select(HermesDispatchRecord))
         checkpoint = session.scalar(select(WechatSyncCheckpoint))
-        assert message is not None
-        assert payload is not None and payload.payload == raw
+        assert payload is not None and payload.payload == fresh
+        assert rejected_payload is not None and rejected_payload.payload == raw
+        assert denied is not None and denied.id == denied_outcome_id
+        assert denied.state is AdmissionOutcomeState.COMPLETED
+        assert denied.admission_reason == AdmissionReason.ROUTE_UNAVAILABLE.value
+        assert denied.should_create_task is False and denied.ai_thread_id is None
         assert thread is not None
         assert record is not None
-        assert checkpoint is not None and checkpoint.last_local_id == 1
-        assert session.scalar(select(func.count()).select_from(Message)) == 1
-        assert session.scalar(select(func.count()).select_from(MessageRawPayload)) == 1
+        assert checkpoint is not None and checkpoint.last_local_id == 4
+        assert session.scalar(select(func.count()).select_from(Message)) == 2
+        assert session.scalar(select(func.count()).select_from(MessageRawPayload)) == 2
         assert session.scalar(select(func.count()).select_from(AIThread)) == 1
         assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
+        assert record.message_id == message.id
+        assert record.ai_thread_id == thread.id
+        assert record.enterprise_identity_id == identity_id
         assert record.status is HermesDispatchStatus.SUCCESS
         assert record.attempt_count == 1
         assert_v2_hermes_call(

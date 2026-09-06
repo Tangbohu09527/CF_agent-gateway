@@ -48,6 +48,17 @@ Controller-only 权限说成业务写入权限。
    不在已安装设备重跑只接受空白状态的 before-reboot。CI 的[VM流程](../../tests/deployment/booted-vm.md)
    另验证正式开通后的第二次真实重启与授权持久化。
 
+## 候选回归记录
+
+首个候选 `3361eef4cbf7f2538614d65d6ef180325ed54dda` 的
+[A/B 主运行](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/34030725880)与
+[独立 push 运行](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/34030722239)
+均通过。该候选[原 CI](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/34030725793)
+为 1399 passed / 1 failed / 1 skipped：唯一失败是旧 V2 E2E 仍要求补好私聊路由后自动
+执行已归档消息，与本轮禁止自动重放的产品要求冲突。该用例改为明确检查持久拒绝、
+绑定后旧消息仍无执行、随后新消息完成关联与投递。最终 Head 重新执行完整 CI 和 A/B，
+不沿用这个候选的通过结论；实际最终结果以 PR 验证段为准。
+
 ## 证据边界与剩余项
 
 - A 使用真实 Debian 包、独立 Docker、PostgreSQL、Gateway、固定 Controller 和 WeChat
