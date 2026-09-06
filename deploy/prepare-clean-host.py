@@ -397,6 +397,79 @@ def validate_inputs(raw: dict) -> dict:
     return result
 
 
+def preflight_external_database(image_id: str, database_url: str) -> None:
+    """Authenticate and check the existing migrations' privileges before saving input.
+
+    The approved image reads a short-lived, owner-only Docker env file. The only
+    database statement inspects privileges; it creates no roles, schema or data.
+    Use a known created container ID so timeout/failure cleanup cannot target any
+    unrelated component, and disable container logs for credential-safe errors.
+    """
+    safe_parents(STATE)
+    fd, temporary = tempfile.mkstemp(prefix=".external-db-preflight-", dir=STATE)
+    container_id = None
+    script = """
+import os
+from sqlalchemy import create_engine, text
+engine = create_engine(
+    os.environ['CF_AGENT_GATEWAY_DATABASE_URL'],
+    hide_parameters=True,
+    connect_args={'connect_timeout': 5},
+)
+try:
+    with engine.connect() as connection:
+        permitted = connection.execute(text(
+            "SELECT current_schema() IS NOT NULL "
+            "AND current_setting('transaction_read_only') = 'off' "
+            "AND has_database_privilege(current_user, current_database(), 'CONNECT') "
+            "AND has_schema_privilege(current_user, current_schema(), 'USAGE') "
+            "AND has_schema_privilege(current_user, current_schema(), 'CREATE') "
+            "AND has_language_privilege(current_user, 'plpgsql', 'USAGE')"
+        )).scalar_one()
+        if permitted is not True:
+            raise RuntimeError('external_database_migration_privileges_required')
+finally:
+    engine.dispose()
+"""
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            # docker --env-file uses literal values, unlike Compose's dotenv parser.
+            stream.write("CF_AGENT_GATEWAY_DATABASE_URL=" + database_url + "\n")
+        identifier = docker(
+            [
+                "create",
+                "--network",
+                "cf-internal",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--log-driver",
+                "none",
+                "--env-file",
+                temporary,
+                "--entrypoint",
+                "python",
+                image_id,
+                "-c",
+                script,
+            ],
+            timeout=30,
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", identifier):
+            fail("external_database_preflight_container_invalid")
+        container_id = identifier
+        docker(["start", "--attach", container_id], timeout=30)
+    finally:
+        try:
+            if container_id is not None:
+                docker(["rm", "--force", container_id], timeout=30)
+        finally:
+            os.unlink(temporary)
+
+
 def configure(options) -> None:
     if not options.inputs:
         fail("configure_requires_inputs_file")
@@ -449,6 +522,7 @@ def configure(options) -> None:
             for item in query
         ):
             fail("external_postgresql_requires_explicit_tls")
+        preflight_external_database(image_id, database_url)
     else:
         database_url = ""
     # Input conflicts are detected before generating any new credentials.

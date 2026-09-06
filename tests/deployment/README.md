@@ -24,7 +24,11 @@ bash tests/deployment/run_clean_device.sh
 入口安装系统/Docker及生命周期所需的真实 systemctl 包，再启动空白 daemon。A 检查该
 依赖确实由正式入口提供，并记录 systemd 包版本；不启动 PID 1 systemd，也不计作 B 通过。镜像、网络、目录、凭据、空库迁移及业务身份均由
 正式安装入口和固定 WeChat `configure`/Bootstrap 创建。测试仅供应必要输入及测试管理账户的真实密码认证，使用该隔离账户的全局 sudo
-时间戳衔接非交互子进程；保留 Debian sudo 组的密码认证规则。测试镜像通过隔离本地 registry 的 digest 引用进入真实 WeChat 管理流程。
+时间戳衔接非交互子进程；保留 Debian sudo 组的密码认证规则。另有独立 PTY 检查临时恢复
+默认 `timestamp_type=tty`、确认 `use_pty` 开启并清除缓存，实际调用正式 B helper 认证后读取
+真实 Controller Contract；只有密码提示出现且终端关闭回显后才输入测试密码，不记录终端内容，
+最后核对 A sudoers 文件字节/属主/权限恢复。`sudo-default-tty-probe.json` 只证明此认证流程，
+不证明 systemd 启动或宿主重启。测试镜像通过隔离本地 registry 的 digest 引用进入真实 WeChat 管理流程。
 
 验证顺序及证据：
 
@@ -36,6 +40,8 @@ bash tests/deployment/run_clean_device.sh
 6. 唯一标记文本通过真实 Poll、授权、路由、Dispatch、响应和 Delivery；只读 Admin API 核对关联身份/Profile/线程/状态，重复轮询不重复调用/投递。
 7. 配置/凭据/Token/数据库/初始化重跑保护；独立 PostgreSQL 重启保留文本；停止 WeChat 只关闭 Poll/Delivery，Dispatch 不受 Controller 管理。
 8. 证据检查不包含生成的 Secret。输出 `A-result.json`、`text-chain.json`、固定提交与 stage 日志。
+   文本链记录模拟 Hermes 的 V2 请求、会话与幂等键；counts 中模型执行次数仅指合成服务，
+   不代表真实扫码、真实 Hermes 或模型供应商调用。
 
 CI 从 GitHub 固定 PR Head 执行安装，记录 WeChat PR #7 的合并结果并使用
 `67cbbb04ce15703428ce165ac38effac19f4b701`。本地执行也要求该 Gateway Commit 可从 GitHub 获取；
@@ -43,9 +49,12 @@ CI 从 GitHub 固定 PR Head 执行安装，记录 WeChat PR #7 的合并结果�
 
 ## B：启动了 systemd 的隔离 Debian 13 主机/VM
 
-必须先提供可用管理账户访问（非 root、非 root/docker 组，具备 sudo）。输入配置及固定版本
-准备方式见正式教程。`before-reboot` 拒绝已有项目目录或安装状态；不覆盖既有设备。
-以下命令由 Debian 初始安装 root 执行，变量均是操作者的必要输入，不能保留尖括号占位值：
+必须先提供已设置密码、获准使用标准 sudo 规则的管理账户（非 root，非 root/docker 组）。
+初始 root 操作者必须在真实交互 TTY 中运行 `before-reboot` 和 `after-reboot`，不能从无 TTY
+的 CI、管道或重定向输出启动；入口在首次安装变化或重启后报告修改之前检查
+stdin/stdout/stderr，缺少 TTY 时明确停止。
+输入配置及固定版本准备方式见正式教程。`before-reboot` 拒绝已有项目目录或安装状态；
+不覆盖既有设备。变量均是操作者的必要输入，不能保留尖括号占位值：
 
 ```bash
 python3 tests/deployment/accept_booted_debian.py before-reboot \
@@ -55,11 +64,31 @@ python3 tests/deployment/accept_booted_debian.py before-reboot \
   --wechat-runtime-uid "$WECHAT_UID" --wechat-runtime-gid "$WECHAT_GID"
 ```
 
+正式 `system` 完成后，入口先运行 `sudo -H -u "$MANAGER" -- sudo -v`，由 sudo
+直接在终端提示操作者输入**管理账户密码**。每个 WeChat 管理阶段随后使用一次外层
+`sudo -H -u "$MANAGER" -- python3 ...`：其中先执行继承 stdio 的 `sudo -v`，再由同一
+管理用户进程捕获执行正式脚本，认证与脚本共用该终端/session 的标准 sudo 时间戳。
+阶段间可能再次提示密码，不能假定先前另一条外层 sudo 的时间戳仍可复用。
+
+这是为兼容 Debian 默认 `use_pty`：不同外层 sudo 可能创建不同 PTY，单纯先验证再启动
+另一条外层 sudo 不能保证时间戳可用。参见 [Debian sudoers 手册](https://manpages.debian.org/trixie/sudo/sudoers.5.en.html)。
+认证调用完整继承 stdio/控制 TTY，不读取、保存或记录密码；管理脚本的捕获仅发生在认证
+完成之后。不要使用 `sudo -S`、`NOPASSWD: ALL`、关闭 `use_pty` 或调整全局时间戳代替认证。
+认证失败时停止并检查账户授权。
+`after-reboot` 也在单个管理用户 helper/session 内先交互 `sudo -v`，再执行
+`sudo -n -- /opt/cf-agent-gateway/deploy/wechat-runtime-control status`，要求退出码为 1
+且 JSON 的 `ready` 严格为 false。首次安装并不创建 NOPASSWD 规则；此处依赖管理账户
+真实获准的标准 sudo 权限和当前 TTY 认证，不扩展为免密码权限。
+
 此入口调用正式 `system`、固定 Controller、WeChat configure/Bootstrap、Gateway 配置/构建/
 数据库/迁移/初始化/启动/默认无业务诊断和 `boot-service`。不启用 WeChat 自动开机，不扫码。
-记录位于 `/var/lib/cf-agent-gateway-install/boot-acceptance.json`（root 0600）。
+记录位于 `/var/lib/cf-agent-gateway-install/boot-acceptance.json`：父目录要求 root:root 0700，
+报告从临时文件创建时即为 root:root 0600，文件与目录 fsync 后原子替换。读取/更新拒绝
+符号链接、硬链接、错误属主或权限；不会先写出可公开读取的报告再补权限。报告只含固定
+版本、状态及配置/凭据摘要，不含密码或 Token 正文。
 
-确认这是可重启的隔离测试设备后，由操作者执行宿主重启。重连后 Debian root 执行：
+确认这是可重启的隔离测试设备后，由操作者执行宿主重启。重连后 Debian root 在真实
+交互 TTY 执行，并在 sudo 提示时输入管理账户密码：
 
 ```bash
 python3 /opt/cf-agent-gateway/tests/deployment/accept_booted_debian.py after-reboot \

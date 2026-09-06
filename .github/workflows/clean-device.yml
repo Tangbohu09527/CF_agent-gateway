@@ -25,6 +25,41 @@ jobs:
         shell: bash
         run: |
           while IFS= read -r -d '' file; do bash -n "$file"; done < <(git ls-files -z '*.sh')
+      - name: Record read-only capability for a possible B virtual machine
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/clean-device-evidence
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          flags = set()
+          try:
+              for line in Path('/proc/cpuinfo').read_text().splitlines():
+                  if line.startswith('flags') and ':' in line:
+                      flags.update(line.split(':', 1)[1].split())
+              cpuinfo_readable = True
+          except OSError:
+              cpuinfo_readable = False
+          payload = {
+              'purpose': 'capability_only_not_B_acceptance',
+              'kvm': {
+                  'exists': Path('/dev/kvm').exists(),
+                  'readable': os.access('/dev/kvm', os.R_OK),
+                  'writable': os.access('/dev/kvm', os.W_OK),
+              },
+              'commands': {
+                  name: shutil.which(name) is not None
+                  for name in ('qemu-system-x86_64', 'qemu-img')
+              },
+              'cpuinfo_readable': cpuinfo_readable,
+              'cpu_virtualization_flags': {name: name in flags for name in ('vmx', 'svm')},
+              'vm_boot_tested': False,
+          }
+          evidence = Path(os.environ['EVIDENCE_DIR'])
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / 'B-runner-capability.json').write_text(json.dumps(payload, indent=2) + '\n')
+          print('B capability metadata recorded; no VM was booted.')
+          PY
       - name: Verify fixed WeChat PR merge evidence
         env:
           GH_TOKEN: ${{ github.token }}

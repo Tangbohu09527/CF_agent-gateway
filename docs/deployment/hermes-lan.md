@@ -29,14 +29,14 @@
 
 | 键 | 输入与含义 |
 | --- | --- |
-| `hermes.enabled` | 仅在已确认外部服务时启用；来源未确定时保持关闭 |
+| `hermes.enabled` | 应用支持开关；正式安装器的 `configure` 生成 `true`，必须先取得真实 Hermes 输入。来源未确定时停在独立准备/构建阶段，不填假地址或 Key |
 | `hermes.base_url` | 批准 AI 主机的 HTTP(S) origin 和必要路径前缀；客户端自行追加 `v1/chat/completions`，不要再加 `/v1` |
 | `hermes.api_key_env` | 环境变量名称，默认 `HERMES_API_KEY`；YAML 禁止 `hermes.api_key` 明文 |
 | `hermes.model` | 外部契约规定的模型/服务路由名称，默认 `hermes-agent`；不是 provider 支持承诺 |
 
 Gateway 安装配置必须输入 AI 主机地址；Windows 防火墙必须另输入获准 Gateway Debian 主机的 LAN 地址。不要把历史现场 IP 写入配置模板。同机 WeChat 使用 `http://cf-agent-wechat:6174`；AI 主机是独立设备，不能使用 Gateway 容器内的 `127.0.0.1`。
 
-模型供应商 Key 仅配置在正确 Hermes 的 provider 配置内；Hermes API Key 由 AI 主机认证服务与 Gateway 共享。Gateway 普通 API Token、Admin Token、WeChat Token 和 PostgreSQL 密码分别独立生成/管理，不得互相替用。Secret 通过正式安装器的隐藏输入/受限配置传入，不加在命令行，不执行 `env` 或输出 Compose 完整渲染结果。
+模型供应商 Key 仅配置在正确 Hermes 的 provider 配置内；Hermes API Key 由 AI 主机认证服务与 Gateway 共享。Gateway 普通 API Token、Admin Token、WeChat Token 和 PostgreSQL 密码分别独立生成/管理，不得互相替用。安装管理员先用受控编辑器创建 root 或管理账户持有、模式为 0600 的 Secret 文件；安装 JSON 只填写其绝对路径，正式安装器校验权限后读取。安装器没有交互式隐藏 Secret 提示。不要把 Key 值放在命令行，不执行 `env` 或输出 Compose 完整渲染结果。具体文件格式见 [首次安装配置](clean-device.md)。
 
 [生产客户端](../../src/cf_agent_gateway/hermes/client.py)发送：
 
@@ -80,7 +80,7 @@ Get-NetTCPConnection -State Listen -LocalPort $hermesPort |
 
 ## 4. 从真实 Gateway 容器逐层验证
 
-先完成正式安装入口的数据库迁移和 Gateway/Dispatch 启动，Poll/Delivery 保持关闭。以下 Debian 命令由具有一次性部署权限的安装管理员执行；日常管理账户仍无需 root/docker 组。实际诊断进程在已有 Gateway 容器内，以 Compose 服务的 UID/GID 运行，复用其 `CF_GATEWAY_CONFIG`、网络和环境密钥。
+先按正式安装入口完成数据库迁移、最小业务身份/授权/V2 Profile 与私聊路由初始化及检查，再启动 Gateway/Dispatch，Poll/Delivery 保持关闭。初始化所需的批准 `account_id`、`sender_id`、私聊 `chatId` 必须在 fresh QR 前已知；未知时遵循 [初始化入口的外部阻断说明](initial-identity.md)，不能先扫码再假定脚本会暂停等待配置。以下 Debian 命令由具有一次性部署权限的安装管理员执行；日常管理账户仍无需 root/docker 组。实际诊断进程在已有 Gateway 容器内，以 Compose 服务的 UID/GID 运行，复用其 `CF_GATEWAY_CONFIG`、网络和环境密钥。
 
 ```bash
 # Debian / 安装管理员；默认仅 TCP，不发 HTTP、不调用模型、不读取业务数据库
@@ -102,7 +102,7 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
   exec -T gateway python -m cf_agent_gateway.hermes.diagnose --check-auth
 ```
 
-`--check-auth` 是独立可选检查，不是模型调用前提。若正确包装层没有这个只读契约，本检查会报告不支持，不能改写为成功；这也不表示其 chat 接口不兼容。可依据真实契约单独执行下面的 POST 验证；若需要其他非业务诊断，应取得包装层接口证据后补充适配。认证读取接口通过不证明 POST 认证或 Profile 语义。下面显式业务探测也会先验证错误 Key 的 POST 被 401/403 拒绝，再使用正确 Key。
+`--check-auth` 是独立可选检查，不是模型调用前提。若正确包装层没有这个只读契约，本检查会失败；错误码可能是端点不可用或错误 Key 未按预期被拒绝，不能改写为成功，也不能仅据此判定 chat 接口不兼容。可依据真实契约单独执行下面的 POST 验证；若需要其他非业务诊断，应取得包装层接口证据后补充适配。认证读取接口通过不证明 POST 认证或 Profile 语义。下面显式业务探测也会先验证错误 Key 的 POST 被 401/403 拒绝，再使用正确 Key。
 
 下面业务探测需要单独批准，可能发生模型费用和外部执行。先配置一个无业务权限/工具的真实测试 Profile；诊断中的“不要使用工具”文本不是权限隔离。Profile 引用/版本必须来自正式初始化配置与正确 Hermes 包装层，不能填任意字符串假装通过。
 
@@ -126,13 +126,13 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
 
 | 检查结果 | 下一步 |
 | --- | --- |
-| `hermes_disabled_or_unconfigured` | 确认来源后通过正式配置启用；不要填虚假 ready |
+| `hermes_disabled_or_unconfigured` | 尚未完成有效 Hermes 配置；首次安装须确认来源和真实输入后再执行 `configure`，不要填虚假 ready |
 | `connect_failed` / `connect_timeout` | 在 AI 主机确认进程与实际 listener；核对两端地址、路由和精确源规则；不要打开公网 |
 | `hermes_api_key_or_client_invalid` | 确认受限环境文件有独立 Hermes API Key，禁止打印它 |
-| `configured_key_rejected` | 检查正确实例/端口/Profile 与密钥配对，不替换为 Gateway Admin Token |
+| `configured_key_rejected` / `http_401_authentication` / `http_403_authentication` | 检查正确实例/端口/Profile 与密钥配对，不替换为 Gateway Admin Token |
 | `wrong_key_not_rejected` / `wrong_post_key_not_rejected` | 服务认证或端点契约不符，停止应用验收；不能以200放行 |
 | `models_contract_unavailable` / `models_response_invalid` | 核对正确固定版本和路径；代理登录页、health JSON不是协议通过 |
-| `http_transport_failed` / `http_timeout` | 核对 TLS 信任/服务进程/代理与超时，不关闭证书验证 |
+| `http_transport_failed` / `http_timeout` / `hermes_transport_error` / `hermes_timeout_error` | 核对 TLS 信任/服务进程/代理与超时，不关闭证书验证 |
 | `hermes_response_error` / `probe_marker_mismatch` | 会话头、响应格式、明确部分失败或实际应用结果不符；核对包装层和 provider |
 | 模型调用超时 | 外部结果可能不明；保留隔离证据，不自动重试，不用重复模型调用修复 Delivery |
 
@@ -140,11 +140,13 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
 
 C 层审批后的执行顺序：
 
-1. 填完第 1 节来源清单并核对固定 Gateway/WeChat/Hermes/包装层 SHA 和镜像记录；在新隔离主机按正式安装入口执行。
+1. 填完第 1 节来源清单并核对固定 Gateway/WeChat/Hermes/包装层 SHA 和镜像记录。先确认已掌握批准的机器人 `account_id`、员工 `sender_id`、私聊 `chatId`；在新隔离主机按正式入口迁移、初始化最小身份/授权/V2 Profile 与私聊路由并检查，再启动 Gateway/Dispatch，保持 Poll/Delivery 关闭。
 2. 在批准 AI 测试主机配置正确服务与精确网络限制；从真实 Gateway 容器执行本页网络和获准 POST 模型探测；只有确认支持 models 端点时才另外执行可选只读认证检查。
 3. 完成服务进程和 AI 主机重启，重复上述检查；此时若 Debian 和 WeChat 未动，不强制 fresh QR。
-4. 按 WeChat 正式脚本 fresh QR，认证及消息 API 均通过，使用正式业务接口配置最小测试身份、授权和 V2 Profile/路由，再由 Controller 开组合 Poll/Delivery Gate。
+4. 确认初始化检查及真实 Hermes 验证均已通过后，才运行固定 WeChat 正式 fresh QR 脚本并人工扫码。该脚本在认证和消息 API 检查通过后立即调用既有 Controller 打开组合 Poll/Delivery Gate；这里没有额外的扫码后初始化暂停步骤。
 5. 发一条唯一标记的真实微信文本，核对 Message → Admission Allowed → Thread/Profile → Dispatch → Response → Delivery 与微信回执，重放来源事件不产生第二次模型执行或微信效果。
 6. 用获准测试请求核对错误 POST 认证、服务停止、不可达、超时与恢复；保留关联ID、状态、数量及脱敏错误码，排除业务正文、Secret、QR和Session文件。
+
+如果扫码前无法取得上述批准账号 ID，第 1 步的业务初始化和后续 fresh QR 流程必须暂停，保留为外部接口阻断。已核对的 WeChat 固定提交没有 post-auth hold 入口；所需最小配套范围见 [初始化说明](initial-identity.md)。本任务没有修改 WeChat 或实现该选项，不能用假 ID、空路由或假 ready 继续开 Gate。
 
 本 PR 单元测试和任何外部替身链路均属于 A 层。B 需要启动 systemd 的干净 Debian 主机及整机重启，C 需要真实微信、真实 AI 主机和正确 Hermes；本页不把上述待执行步骤写成通过记录。

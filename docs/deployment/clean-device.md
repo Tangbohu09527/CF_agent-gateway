@@ -119,7 +119,7 @@ Bootstrap 是 WeChat Token、`cf-internal`、storage/secrets/archive 目录的�
 
 URL 文件仍为 0600，使用独立角色、空的新数据库和允许创建应用 schema 的迁移权限。
 地址须从容器访问；明确 `sslmode=verify-full`/`verify-ca`/`require`，优先校验服务证书。
-外部模式执行真实连接检查，迁移沿用同一 URL；不会管理外部服务器或恢复其数据。
+外部模式在保存任何配置前，从已构建镜像真实连接并只读检查迁移所需的 schema/语言权限；错误凭据可修正输入文件后重试，不会先固化无效配置。临时 0600 环境文件及本次前检容器用后清理；迁移沿用同一 URL，不会管理外部服务器或恢复其数据。
 
 ## 4. 配置、构建、数据库与核心启动（Debian，初始 root 控制台）
 
@@ -236,5 +236,5 @@ boot 前绝无 Worker 自动运行；批准 reboot 前先正常 WeChat stop，bo
 - B：启动了 systemd 的干净 Debian 13 amd64 主机/VM正式安装与真实 reboot。
 - C：正确来源 Hermes 的 Windows/实际环境安装、认证/LAN/模型、真实微信扫码和唯一文本回复。
 
-本次结果、CI链接、固定SHA、具体阻断另记在 `docs/validation/` 下的任务记录；
+本次结果、CI链接、固定SHA、具体阻断见[任务验证记录](../validation/2026-09-06-clean-device-deploy-lan.md)；
 历史生产截图/日志不替代本次 A/B/C。

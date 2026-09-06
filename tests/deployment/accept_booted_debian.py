@@ -10,7 +10,9 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path("/opt/cf-agent-gateway")
@@ -28,6 +30,138 @@ def run(command: list[str]) -> str:
             + "; inspect the official stage diagnostic locally"
         )
     return result.stdout.strip()
+
+
+def require_interactive_terminal() -> None:
+    if not all(os.isatty(descriptor) for descriptor in (0, 1, 2)):
+        raise SystemExit(
+            "B acceptance requires a real interactive TTY for manager sudo authentication"
+        )
+
+
+def authenticate_manager(manager: str) -> None:
+    require_interactive_terminal()
+    print("B: authenticate the management account through sudo on this terminal.", flush=True)
+    # Inherit all stdio and the controlling TTY. Never read/capture/log a password,
+    # use sudo -S, create a session, or alter sudo's standard tty timestamp policy.
+    result = subprocess.run(["sudo", "-H", "-u", manager, "--", "sudo", "-v"], timeout=300)
+    if result.returncode:
+        raise SystemExit("B requires successful interactive manager sudo authentication")
+
+
+# One outer sudo session owns both validation and the captured management stage.
+# Debian's default use_pty may otherwise create a different terminal/session on
+# each sudo invocation, invalidating an earlier per-TTY credential timestamp.
+MANAGER_STAGE = """
+import json
+import subprocess
+import sys
+validation = subprocess.run(["sudo", "-v"], timeout=300)
+if validation.returncode:
+    raise SystemExit("B manager sudo authentication failed")
+stage = subprocess.run(sys.argv[2:], capture_output=True, text=True, timeout=1800)
+if sys.argv[1] == "closed-gate":
+    try:
+        payload = json.loads(stage.stdout)
+    except (ValueError, TypeError):
+        raise SystemExit("B Controller status did not return valid JSON")
+    if stage.returncode != 1 or not isinstance(payload, dict) or payload.get("ready") is not False:
+        raise SystemExit("B Poll/Delivery gate must remain closed after host reboot")
+elif stage.returncode:
+    raise SystemExit("B management stage failed; inspect the official stage diagnostic locally")
+"""
+
+
+def run_manager_stage(
+    manager: str,
+    command: list[str],
+    *,
+    controller_status: bool = False,
+) -> None:
+    require_interactive_terminal()
+    print("B: validate manager sudo and execute this stage in one terminal session.", flush=True)
+    result = subprocess.run(
+        [
+            "sudo",
+            "-H",
+            "-u",
+            manager,
+            "--",
+            "python3",
+            "-c",
+            MANAGER_STAGE,
+            "closed-gate" if controller_status else "stage",
+            *command,
+        ],
+        timeout=2100,
+    )
+    if result.returncode:
+        raise SystemExit("B management authentication or stage failed")
+
+
+def report_location() -> None:
+    for path in (STATE, *STATE.parents):
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (info.st_uid, info.st_gid) != (0, 0)
+            or info.st_mode & 0o022
+            or (path == STATE and stat.S_IMODE(info.st_mode) != 0o700)
+        ):
+            raise SystemExit(
+                "B report requires a protected root:root 0700 installation state directory"
+            )
+
+
+def report_status():
+    info = REPORT.lstat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or (info.st_uid, info.st_gid) != (0, 0)
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise SystemExit("B report must be a root:root 0600 single-link regular file")
+    return info
+
+
+def read_report() -> dict:
+    report_location()
+    expected = report_status()
+    descriptor = os.open(REPORT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+        opened = os.fstat(stream.fileno())
+        if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise SystemExit("B report changed while opening")
+        return json.load(stream)
+
+
+def write_report(payload: dict, *, update: bool = False) -> None:
+    report_location()
+    if REPORT.exists() or REPORT.is_symlink():
+        report_status()
+        if not update:
+            raise SystemExit("B report already exists; existing evidence retained")
+    elif update:
+        raise SystemExit("B report disappeared; no replacement evidence created")
+    descriptor, temporary = tempfile.mkstemp(prefix=".boot-acceptance-", dir=STATE)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            os.fchown(stream.fileno(), 0, 0)
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, REPORT)
+        directory_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        # The only cleanup target is the exact temporary file created above.
+        Path(temporary).unlink(missing_ok=True)
 
 
 def files() -> dict[str, str]:
@@ -62,6 +196,7 @@ def main() -> None:
         raise SystemExit("B forbids Bootstrap test overrides")
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     if args.phase == "before-reboot":
+        require_interactive_terminal()
         required = (
             args.gateway_commit,
             args.wechat_commit,
@@ -99,13 +234,15 @@ def main() -> None:
             print("B official stage passed: " + name, flush=True)
 
         stage("system")
-        # A root provisioned manager must already have interactive/passwordless
-        # sudo access for lifecycle steps; this script never changes sudo policy.
-        run(["sudo", "-H", "-u", args.manager, "--", "sudo", "-n", "--", "true"])
+        authenticate_manager(args.manager)
         stage("controller")
         public = Path("/usr/local/libexec/cf-agent-wechat-prepare")
-        prefix = ["sudo", "-H", "-u", args.manager, "--", "bash"]
-        run(
+        prefix = ["bash"]
+
+        def manager_run(command: list[str]) -> None:
+            run_manager_stage(args.manager, command)
+
+        manager_run(
             [
                 *prefix,
                 str(public),
@@ -117,7 +254,7 @@ def main() -> None:
             ]
         )
         wechat = Path("/opt/cf-agent-wechat/scripts")
-        run(
+        manager_run(
             [
                 *prefix,
                 str(wechat / "prepare-clean-host.sh"),
@@ -134,7 +271,7 @@ def main() -> None:
                 args.wechat_runtime_gid,
             ]
         )
-        run([*prefix, str(wechat / "bootstrap-cfserver.sh")])
+        manager_run([*prefix, str(wechat / "bootstrap-cfserver.sh")])
         stage("build", ["--inputs", args.inputs])
         stage("configure", ["--inputs", args.inputs])
         for name in (
@@ -146,25 +283,22 @@ def main() -> None:
             "boot-service",
         ):
             stage(name)
-        REPORT.write_text(
-            json.dumps(
-                {
-                    "before_boot_id": boot_id,
-                    "files": files(),
-                    "manager": args.manager,
-                    "gateway_commit": args.gateway_commit,
-                    "wechat_commit": args.wechat_commit,
-                    "layer": "B",
-                    "result": "awaiting operator reboot",
-                    "C": "pending separately approved real WeChat/Windows AI/Hermes acceptance",
-                },
-                indent=2,
-            )
+        write_report(
+            {
+                "before_boot_id": boot_id,
+                "files": files(),
+                "manager": args.manager,
+                "gateway_commit": args.gateway_commit,
+                "wechat_commit": args.wechat_commit,
+                "layer": "B",
+                "result": "awaiting operator reboot",
+                "C": "pending separately approved real WeChat/Windows AI/Hermes acceptance",
+            }
         )
-        REPORT.chmod(0o600)
         print("B preparation passed. Reboot this disposable host manually, then run after-reboot.")
         return
-    previous = json.loads(REPORT.read_text())
+    require_interactive_terminal()
+    previous = read_report()
     if previous["manager"] != args.manager or previous["before_boot_id"] == boot_id:
         raise SystemExit("recorded manager must match and a real host reboot must have occurred")
     if files() != previous["files"]:
@@ -181,24 +315,11 @@ def main() -> None:
         previous["wechat_commit"],
     ]
     run(["bash", str(ROOT / "deploy/install-clean-device.sh"), "diagnose", *common])
-    result = subprocess.run(
-        [
-            "sudo",
-            "-H",
-            "-u",
-            args.manager,
-            "--",
-            "sudo",
-            "-n",
-            "--",
-            str(ROOT / "deploy/wechat-runtime-control"),
-            "status",
-        ],
-        capture_output=True,
-        text=True,
+    run_manager_stage(
+        args.manager,
+        ["sudo", "-n", "--", str(ROOT / "deploy/wechat-runtime-control"), "status"],
+        controller_status=True,
     )
-    if result.returncode != 1 or json.loads(result.stdout).get("ready") is not False:
-        raise SystemExit("Poll/Delivery gate must remain closed after host reboot")
     running = run(["docker", "ps", "-q", "--filter", "name=^cf-agent-wechat$"])
     if running:
         raise SystemExit("WeChat must await fresh QR after reboot")
@@ -215,7 +336,7 @@ def main() -> None:
             ],
         }
     )
-    REPORT.write_text(json.dumps(previous, indent=2))
+    write_report(previous, update=True)
     print("B booted-host installation and reboot passed; C remains pending.")
 
 

@@ -12,6 +12,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -253,18 +254,146 @@ def test_source_version_conflict_stops_before_checkout_or_external_command(
     monkeypatch.setattr(installer, "directory", supplied_state_directory)
     monkeypatch.setattr(installer, "regular", regular_as_test_owner)
     monkeypatch.setattr(installer, "run", forbidden_external_command)
-    code = installer.main(
-        [
-            "build",
-            "--manager",
-            "operator",
-            "--gateway-commit",
-            "c" * 40,
-            "--wechat-commit",
-            "b" * 40,
-        ]
-    )
+    previous_umask = os.umask(0o077)
+    try:
+        code = installer.main(
+            [
+                "build",
+                "--manager",
+                "operator",
+                "--gateway-commit",
+                "c" * 40,
+                "--wechat-commit",
+                "b" * 40,
+            ]
+        )
+    finally:
+        os.umask(previous_umask)
     assert code == 1
     assert "existing_asset_differs" in capsys.readouterr().err
     assert json.loads(versions.read_text()) == existing
     assert set(state.iterdir()) == {versions, state / "install.lock"}
+
+
+@pytest.mark.parametrize("failure", [None, "create", "start", "rm"])
+def test_external_database_preflight_keeps_credentials_temporary_and_cleans_on_failure(
+    installer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    preserved = tmp_path / "unrelated-record"
+    protected_file(preserved, b"must remain")
+    database_url = "postgresql+psycopg://operator:literal-'$%5C@192.0.2.20/gateway?sslmode=require"
+    container_id = "a" * 64
+    calls = []
+    temporary_files = []
+
+    def docker_preflight(arguments, *, timeout):
+        calls.append(arguments)
+        assert database_url not in " ".join(str(value) for value in arguments)
+        assert timeout == 30
+        if arguments[0] == "create":
+            temporary = Path(arguments[arguments.index("--env-file") + 1])
+            temporary_files.append(temporary)
+            metadata = temporary.stat()
+            assert stat.S_IMODE(metadata.st_mode) == 0o600
+            assert (metadata.st_uid, metadata.st_gid) == local_owner()
+            assert metadata.st_nlink == 1
+            assert temporary.parent == tmp_path
+            assert temporary.read_text() == "CF_AGENT_GATEWAY_DATABASE_URL=" + database_url + "\n"
+            assert arguments[arguments.index("--log-driver") + 1] == "none"
+            assert arguments[arguments.index("--network") + 1] == "cf-internal"
+            compile(arguments[-1], "external-database-preflight", "exec")
+        else:
+            # Cleanup must identify only the ephemeral container we just created.
+            assert arguments[-1] == container_id
+        if arguments[0] == failure:
+            installer.fail("injected_" + failure + "_failure")
+        return container_id if arguments[0] == "create" else ""
+
+    monkeypatch.setattr(installer, "docker", docker_preflight)
+    if failure:
+        with pytest.raises(installer.InstallError, match="injected_" + failure) as error:
+            installer.preflight_external_database("sha256:" + "b" * 64, database_url)
+        assert database_url not in str(error.value)
+    else:
+        installer.preflight_external_database("sha256:" + "b" * 64, database_url)
+    assert temporary_files and all(not path.exists() for path in temporary_files)
+    assert set(tmp_path.iterdir()) == {preserved}
+    assert preserved.read_bytes() == b"must remain"
+    assert [call[0] for call in calls] == (
+        ["create"] if failure == "create" else ["create", "start", "rm"]
+    )
+
+
+def test_external_database_failed_first_credentials_do_not_freeze_configuration(
+    installer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    inputs = valid_inputs()
+    inputs["database"] = {"mode": "external", "external_url_file": "/approved/postgres-url"}
+    options = SimpleNamespace(inputs="/approved/install.json", manager="operator")
+    image_id = "sha256:" + "b" * 64
+    current_url = "postgresql+psycopg://operator:wrong-password@192.0.2.20/gateway?sslmode=require"
+    accepted_url = current_url.replace("wrong-password", "correct-password")
+    preflight_urls = []
+    writes = []
+
+    def administrator_input(path, manager):
+        assert manager == "operator"
+        return json.dumps(inputs if path == options.inputs else {"identity": "input"}).encode()
+
+    def secret_input(path, manager):
+        assert manager == "operator"
+        return current_url if path == "/approved/postgres-url" else "independent-hermes-key"
+
+    def image_record(path):
+        if path.name == "gateway-image.json":
+            return {"image_id": image_id}
+        assert path.name == "python-image.json"
+        return {"requested_reference": "python:3.12-slim-bookworm"}
+
+    def image_only_validation(arguments, *, data):
+        assert arguments[0] == "run" and arguments[arguments.index("--network") + 1] == "none"
+        assert image_id in arguments
+        assert json.loads(data)["model"] == inputs["hermes_model"]
+        return ""
+
+    def connection_preflight(image, url):
+        assert image == image_id
+        assert not writes
+        preflight_urls.append(url)
+        if url != accepted_url:
+            installer.fail("external_database_authentication_failed")
+
+    class FirstPersistentWrite(Exception):
+        pass
+
+    def first_write(path, content, **kwargs):
+        writes.append(path)
+        raise FirstPersistentWrite
+
+    def forbidden_secret_generation(*args):
+        pytest.fail("rejected database input must not generate credentials")
+
+    monkeypatch.setattr(installer, "administrator_input", administrator_input)
+    monkeypatch.setattr(installer, "secret_input", secret_input)
+    monkeypatch.setattr(installer, "read_json", image_record)
+    monkeypatch.setattr(installer, "docker", image_only_validation)
+    monkeypatch.setattr(installer, "preflight_external_database", connection_preflight)
+    monkeypatch.setattr(installer, "once", first_write)
+    monkeypatch.setattr(installer.secrets, "token_urlsafe", forbidden_secret_generation)
+    with pytest.raises(installer.InstallError, match="authentication_failed"):
+        installer.configure(options)
+    assert not writes
+    assert list(tmp_path.iterdir()) == []
+
+    # Changing the administrator's protected input is enough to retry. The first
+    # persistent write is reachable only after the corrected credential passes.
+    current_url = accepted_url
+    with pytest.raises(FirstPersistentWrite):
+        installer.configure(options)
+    assert preflight_urls == [
+        accepted_url.replace("correct-password", "wrong-password"),
+        accepted_url,
+    ]
+    assert writes == [tmp_path / "inputs.json"]

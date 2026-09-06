@@ -269,6 +269,11 @@ def main() -> None:
     assert contract["contract_version"] == 1 and not TOKEN.exists()
     CHECKS.append("real static Contract before Token/database/Gateway; root:root 0750")
 
+    from sudo_tty_probe import probe
+
+    probe(GATEWAY, EVIDENCE, MANAGER)
+    CHECKS.append("real B helper authentication with default sudo tty/use_pty; A rule restored")
+
     entrypoint = Path("/usr/local/libexec/cf-agent-wechat-prepare")
     manager(
         "wechat-checkout",
@@ -527,7 +532,8 @@ def main() -> None:
         {"chatId": "wxid_clean_device_operator", "text": f"Synthetic reply: {marker}"}
     ]
     calls = request("http://127.0.0.1:18765/__test/state", key_file.read_text())[1]["calls"]
-    assert len([call for call in calls if call["request"]["messages"][0]["content"] == marker]) == 1
+    marker_calls = [call for call in calls if call["request"]["messages"][0]["content"] == marker]
+    assert len(marker_calls) == 1
     (EVIDENCE / "text-chain.json").write_text(
         json.dumps(
             {
@@ -536,6 +542,13 @@ def main() -> None:
                 "thread": thread,
                 "delivery": deliveries,
                 "external": external,
+                "synthetic_hermes_execution_records": marker_calls,
+                "counts": {
+                    "gateway_messages": messages["total"],
+                    "gateway_delivery_records": len(deliveries),
+                    "synthetic_wechat_text_deliveries": len(external["deliveries"]),
+                    "synthetic_hermes_model_executions_for_marker": len(marker_calls),
+                },
             },
             indent=2,
         )
