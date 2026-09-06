@@ -77,13 +77,14 @@ def _run_runtime_control(
     environment: dict[str, str],
     *,
     timeout_seconds: int,
+    runtime_control: Path = RUNTIME_CONTROL,
 ) -> subprocess.CompletedProcess[str]:
     return _run(
         [
             "sudo",
             "--non-interactive",
             f"--preserve-env={','.join(RUNTIME_CONTROL_ENVIRONMENT)}",
-            str(RUNTIME_CONTROL),
+            str(runtime_control),
             action,
             "--timeout-seconds",
             str(timeout_seconds),
@@ -92,6 +93,41 @@ def _run_runtime_control(
         capture_output=True,
         check=False,
     )
+
+
+def _prepare_runtime_control_fixture(
+    compose: list[str],
+    environment: dict[str, str],
+    fixture_root: Path,
+) -> Path:
+    """Give the unchanged Controller the exact effective E2E configuration.
+
+    The Controller deliberately reads one fixed Compose file below its root.
+    Its test installation must therefore contain the fully rendered E2E model,
+    including the isolated project network, instead of the production-only file.
+    This is the legacy Compose regression fixture, not clean-device acceptance.
+    """
+    result = _run(
+        [*compose, "config", "--format", "json"],
+        environment=environment,
+        capture_output=True,
+    )
+    rendered = json.loads(result.stdout)
+    network = rendered.get("networks", {}).get("default", {})
+    if network.get("name") != environment["COMPOSE_PROJECT_NAME"] + "_default" or network.get(
+        "external", False
+    ):
+        raise AssertionError("Controller E2E fixture requires its isolated project network")
+    fixture_root.mkdir(mode=0o700)
+    compose_file = fixture_root / "docker-compose.prod.yml"
+    compose_file.write_text(json.dumps(rendered), encoding="utf-8")
+    compose_file.chmod(0o600)
+    deployment = fixture_root / "deploy"
+    deployment.mkdir(mode=0o755)
+    controller = deployment / "wechat-runtime-control"
+    controller.write_bytes(RUNTIME_CONTROL.read_bytes())
+    controller.chmod(0o755)
+    return controller
 
 
 def _prepare_token_file_for_container(
@@ -631,6 +667,8 @@ def _assert_runtime_control_failed_release_and_recovery(
     port: int,
     token_file: Path,
     token_sentinel: str,
+    *,
+    runtime_control: Path = RUNTIME_CONTROL,
 ) -> None:
     protected_services = ("gateway", "dispatch-worker", "postgres", "migration")
     protected = {
@@ -653,10 +691,13 @@ def _assert_runtime_control_failed_release_and_recovery(
 
     failing_environment = environment.copy()
     failing_environment["CF_GATEWAY_WORKER_HEARTBEAT_MAX_AGE_SECONDS"] = "1e-9"
-    failed = _run_runtime_control("start", failing_environment, timeout_seconds=30)
+    failed = _run_runtime_control(
+        "start", failing_environment, timeout_seconds=30, runtime_control=runtime_control
+    )
     assert failed.returncode == 1
     assert failed.stdout == ""
-    assert json.loads(failed.stderr) == {"error_code": "runtime_start_ready_timeout"}
+    failure = json.loads(failed.stderr)
+    assert failure == {"error_code": "runtime_start_ready_timeout"}, failure.get("error_code")
     serialized_failure = failed.stdout + failed.stderr
     for protected_value in (
         token_sentinel,
@@ -670,7 +711,9 @@ def _assert_runtime_control_failed_release_and_recovery(
         assert inspected["State"]["Running"] is False
     assert_protected_services_unchanged()
 
-    recovered = _run_runtime_control("start", environment, timeout_seconds=90)
+    recovered = _run_runtime_control(
+        "start", environment, timeout_seconds=90, runtime_control=runtime_control
+    )
     assert recovered.returncode == 0
     assert recovered.stderr == ""
     payload = json.loads(recovered.stdout)
@@ -884,6 +927,9 @@ def main() -> int:
         primary_error: BaseException | None = None
         try:
             _run([*compose, "config", "--quiet"], environment=environment)
+            runtime_control = _prepare_runtime_control_fixture(
+                compose, environment, Path(temporary) / "controller-installation"
+            )
             _run([*compose, "build", "heartbeat-init"], environment=environment)
             _prepare_token_file_for_container(token_file, environment)
             _run(
@@ -915,6 +961,7 @@ def main() -> int:
                 port,
                 token_file,
                 token_sentinel,
+                runtime_control=runtime_control,
             )
             _assert_clean_shutdown(compose, environment)
         except BaseException as error:

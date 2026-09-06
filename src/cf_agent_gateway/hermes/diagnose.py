@@ -92,10 +92,13 @@ def diagnose(
         return _failed(result, "configuration", "hermes_api_key_or_client_invalid")
 
     with client:
-        auth_error = _check_auth(settings, api_key, timeout=timeout, transport=transport)
-        if auth_error is not None:
-            return _failed(result, "authentication", auth_error)
-        result["authentication"] = "models_authenticated_and_wrong_key_rejected"
+        # /v1/models is an optional, separately verified endpoint. Chat acceptance
+        # only depends on the production client's actual POST contract.
+        if check_auth:
+            auth_error = _check_auth(settings, api_key, timeout=timeout, transport=transport)
+            if auth_error is not None:
+                return _failed(result, "authentication", auth_error)
+            result["authentication"] = "models_authenticated_and_wrong_key_rejected"
         if not allow_model_call:
             result["ok"] = True
             return result
@@ -144,7 +147,11 @@ def diagnose(
             return _failed(result, "authentication", exc.code)
         else:
             return _failed(result, "authentication", "wrong_post_key_not_rejected")
-        result["authentication"] = "models_authenticated_and_wrong_post_key_rejected"
+        result["authentication"] = (
+            "models_authenticated_and_wrong_post_key_rejected"
+            if check_auth
+            else "wrong_post_key_rejected"
+        )
         try:
             response = client.chat(content, **invocation)
         except HermesAPIError as exc:
@@ -153,6 +160,11 @@ def diagnose(
             return _failed(result, "protocol", exc.code)
         except ValueError:
             return _failed(result, "protocol", "invalid_invocation")
+        result["authentication"] = (
+            "models_and_post_authenticated_and_wrong_keys_rejected"
+            if check_auth
+            else "post_authenticated_and_wrong_key_rejected"
+        )
         result["protocol"] = "gateway_response_and_session_header_valid"
         if response.assistant_content.strip() != marker:
             return _failed(result, "application", "probe_marker_mismatch")
@@ -228,7 +240,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=os.getenv("CF_GATEWAY_CONFIG", "config/config.yaml"))
     parser.add_argument("--timeout", type=float, default=5.0)
-    parser.add_argument("--check-auth", action="store_true", help="GET /v1/models; no model call")
+    parser.add_argument(
+        "--check-auth",
+        action="store_true",
+        help="Optional GET /v1/models; use only after verifying this endpoint; no model call",
+    )
     parser.add_argument(
         "--allow-model-call", action="store_true", help="Opt in to a potentially billable POST"
     )

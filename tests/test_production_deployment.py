@@ -231,6 +231,10 @@ def test_production_heartbeat_volume_initializer_is_bounded_and_least_privilege(
 def test_container_e2e_uses_isolated_postgresql_and_synthetic_adapters() -> None:
     e2e = yaml.safe_load(CONTAINER_E2E_COMPOSE_PATH.read_text(encoding="utf-8"))
     services = e2e["services"]
+    assert e2e["networks"]["default"] == {
+        "external": False,
+        "name": "${COMPOSE_PROJECT_NAME}_default",
+    }
 
     assert services["postgres"]["image"] == "postgres:16-alpine"
     assert services["postgres"]["restart"] == "no"

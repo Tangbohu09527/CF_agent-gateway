@@ -405,6 +405,8 @@ def configure(options) -> None:
     hermes_key = secret_input(settings["hermes_api_key_file"], options.manager)
     identity = administrator_input(settings["initial_identity_file"], options.manager)
     image_id = read_json(STATE / "gateway-image.json")["image_id"]
+    if read_json(STATE / "python-image.json")["requested_reference"] != settings["python_image"]:
+        fail("built_python_image_input_conflict")
     # Validate the real application schema before any configuration is committed.
     # This image-only check requires neither database nor network and echoes no input.
     docker(

@@ -102,7 +102,7 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
   exec -T gateway python -m cf_agent_gateway.hermes.diagnose --check-auth
 ```
 
-若正确包装层没有这个只读契约，本检查会报告不支持，不能改写为成功；需提供包装层的真实非业务诊断接口证据后补充适配。认证读取接口通过不证明 POST 认证或 Profile 语义。下面显式业务探测也会先验证错误 Key 的 POST 被 401/403 拒绝，再使用正确 Key。
+`--check-auth` 是独立可选检查，不是模型调用前提。若正确包装层没有这个只读契约，本检查会报告不支持，不能改写为成功；这也不表示其 chat 接口不兼容。可依据真实契约单独执行下面的 POST 验证；若需要其他非业务诊断，应取得包装层接口证据后补充适配。认证读取接口通过不证明 POST 认证或 Profile 语义。下面显式业务探测也会先验证错误 Key 的 POST 被 401/403 拒绝，再使用正确 Key。
 
 下面业务探测需要单独批准，可能发生模型费用和外部执行。先配置一个无业务权限/工具的真实测试 Profile；诊断中的“不要使用工具”文本不是权限隔离。Profile 引用/版本必须来自正式初始化配置与正确 Hermes 包装层，不能填任意字符串假装通过。
 
@@ -118,7 +118,7 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
   --profile-reference "$probe_profile" --profile-revision "$probe_revision"
 ```
 
-探测先认证，只在付费 opt-in 内向业务 POST 发送随机错误 Key（认证损坏时也可能执行/收费）；确认 401/403 后，再用正确 Key 的生产 HermesClient 发送 V2 字段、独立诊断会话和唯一幂等键，要求合法响应、会话头及准确回显唯一标记。仅输出阶段、稳定错误码和非业务 probe ID。合成 metadata 不引用真实业务身份、会话或数据库；因此本探测是容器到应用的协议与响应检查，**不能取代正式身份/路由/微信文本链**。
+单独 `--allow-model-call` 不请求 `/v1/models` 或其他 GET。它只在付费 opt-in 内向业务 POST 发送随机错误 Key（认证损坏时也可能执行/收费）；确认 401/403 后，再用正确 Key 的生产 HermesClient 发送 V2 字段、独立诊断会话和唯一幂等键，要求合法响应、会话头及准确回显唯一标记。只有另外指定 `--check-auth` 才会先执行 models GET；成功 JSON 的 `authentication` 区分实际检查过的 POST 与 models+POST。仅输出阶段、稳定错误码和非业务 probe ID。合成 metadata 不引用真实业务身份、会话或数据库；因此本探测是容器到应用的协议与响应检查，**不能取代正式身份/路由/微信文本链**。
 
 需要重放检查时，在上一业务命令中额外加 `--check-replay`：同一次运行重复完全相同的请求和幂等键，可能再收费。相同响应只报告 `response_consistent_execution_count_unverified`。必须从获准隔离 Hermes 执行记录证明实际运行次数为 1、Profile 选择正确，再分别核对幂等有效期、相同键不同请求拒绝和服务重启后的行为。不要对生产不确定 Dispatch 重发探测。
 
@@ -141,7 +141,7 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
 C 层审批后的执行顺序：
 
 1. 填完第 1 节来源清单并核对固定 Gateway/WeChat/Hermes/包装层 SHA 和镜像记录；在新隔离主机按正式安装入口执行。
-2. 在批准 AI 测试主机配置正确服务与精确网络限制；从真实 Gateway 容器依次执行本页网络、只读认证、获准模型探测。
+2. 在批准 AI 测试主机配置正确服务与精确网络限制；从真实 Gateway 容器执行本页网络和获准 POST 模型探测；只有确认支持 models 端点时才另外执行可选只读认证检查。
 3. 完成服务进程和 AI 主机重启，重复上述检查；此时若 Debian 和 WeChat 未动，不强制 fresh QR。
 4. 按 WeChat 正式脚本 fresh QR，认证及消息 API 均通过，使用正式业务接口配置最小测试身份、授权和 V2 Profile/路由，再由 Controller 开组合 Poll/Delivery Gate。
 5. 发一条唯一标记的真实微信文本，核对 Message → Admission Allowed → Thread/Profile → Dispatch → Response → Delivery 与微信回执，重放来源事件不产生第二次模型执行或微信效果。

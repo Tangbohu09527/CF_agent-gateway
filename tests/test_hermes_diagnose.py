@@ -124,13 +124,19 @@ def test_model_opt_in_and_v2_profile_fail_before_network(
     assert result["ok"] is False
 
 
+@pytest.mark.parametrize("check_auth", [False, True])
 def test_v2_model_and_replay_preserve_request_without_claiming_dedup(
     connected: list[object],
+    check_auth: bool,
 ) -> None:
     posts: list[httpx.Request] = []
+    methods: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
         if request.method == "GET":
+            if not check_auth:
+                pytest.fail("model-only probe must not require a models endpoint")
             return _models(request)
         if request.headers["authorization"] != f"Bearer {KEY}":
             return httpx.Response(401)
@@ -153,6 +159,7 @@ def test_v2_model_and_replay_preserve_request_without_claiming_dedup(
     result = diagnose(
         SETTINGS,
         environ={"HERMES_API_KEY": KEY},
+        check_auth=check_auth,
         allow_model_call=True,
         check_replay=True,
         profile_reference="approved-test-profile",
@@ -161,6 +168,12 @@ def test_v2_model_and_replay_preserve_request_without_claiming_dedup(
     )
     assert result["ok"] is True
     assert len(posts) == 2
+    assert methods == (["GET", "GET"] if check_auth else []) + ["POST", "POST", "POST"]
+    assert result["authentication"] == (
+        "models_and_post_authenticated_and_wrong_keys_rejected"
+        if check_auth
+        else "post_authenticated_and_wrong_key_rejected"
+    )
     assert posts[0].content == posts[1].content
     assert result["application"] == "unique_marker_returned"
     assert result["replay"] == "response_consistent_execution_count_unverified"
