@@ -232,7 +232,7 @@ boot 前绝无 Worker 自动运行；批准 reboot 前先正常 WeChat stop，bo
 
 完整 B 入口见 [tests/deployment/README.md](../../tests/deployment/README.md)：
 `accept_booted_debian.py before-reboot`/`after-reboot` 记录真实 boot ID、systemd、固定来源、
-目录权限、Gate、数据库和核心 readiness。普通 Debian 容器不能替代 B。Reboot 本身由批准的
+目录权限、Gate、数据库和核心 readiness。普通 Debian 容器不能替代 B。CI 的[隔离 Debian VM 入口](../../tests/deployment/booted-vm.md)也执行同一套 before/after 检查。Reboot 本身由批准的
 操作者执行，之后真实微信重新 fresh QR，再做文本闭环；C 保留待批准人工执行。
 
 ## 7. 分层验收

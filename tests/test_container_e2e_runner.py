@@ -69,10 +69,13 @@ def test_continuous_heartbeat_proof_requires_multiple_complete_renewals(
 def test_stale_heartbeat_proof_pauses_running_file_until_it_ages_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frozen = _heartbeat_set(0)
-    recovered = _heartbeat_set(1)
+    before = _heartbeat_set(0)
+    frozen = _heartbeat_set(1)
+    recovered = _heartbeat_set(2)
     commands: list[list[str]] = []
-    heartbeat_reads = iter((frozen, frozen))
+    # A heartbeat may advance while Docker is still processing pause.
+    heartbeat_reads = iter((before, frozen, frozen))
+    recovery_baselines: list[dict[str, dict[str, Any]]] = []
 
     def run(
         arguments: list[str],
@@ -96,11 +99,19 @@ def test_stale_heartbeat_proof_pauses_running_file_until_it_ages_and_recovers(
         "_wait_for_component_status",
         lambda *args, **kwargs: {"status": "degraded"},
     )
-    monkeypatch.setattr(
-        runner,
-        "_wait_for_heartbeat_advances",
-        lambda *args, **kwargs: recovered,
-    )
+
+    def advance(
+        compose: list[str],
+        environment: dict[str, str],
+        previous: dict[str, dict[str, Any]],
+        **kwargs: object,
+    ) -> dict[str, dict[str, Any]]:
+        del compose, environment
+        assert kwargs["names"] == ("dispatch-worker-heartbeat.json",)
+        recovery_baselines.append(previous)
+        return recovered
+
+    monkeypatch.setattr(runner, "_wait_for_heartbeat_advances", advance)
     monkeypatch.setattr(runner, "_wait_for_healthy", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         runner,
@@ -112,6 +123,7 @@ def test_stale_heartbeat_proof_pauses_running_file_until_it_ages_and_recovers(
 
     assert commands[0][-2:] == ["pause", "dispatch-worker"]
     assert commands[1][-2:] == ["unpause", "dispatch-worker"]
+    assert recovery_baselines == [frozen]
 
 
 @pytest.mark.parametrize("exit_code", [1, 137, 143])

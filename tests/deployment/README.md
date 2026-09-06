@@ -49,6 +49,8 @@ CI 从 GitHub 固定 PR Head 执行安装，记录 WeChat PR #7 的合并结果�
 
 ## B：启动了 systemd 的隔离 Debian 13 主机/VM
 
+CI 自动创建并重启真实 Debian VM 的入口见 [booted-vm.md](booted-vm.md)。它调用下面同一个正式 before/after 入口，使用固定官方镜像与独立 SSH 身份；不能用 A 容器或能力探测代替。
+
 必须先提供已设置密码、获准使用标准 sudo 规则的管理账户（非 root，非 root/docker 组）。
 初始 root 操作者必须在真实交互 TTY 中运行 `before-reboot` 和 `after-reboot`，不能从无 TTY
 的 CI、管道或重定向输出启动；入口在首次安装变化或重启后报告修改之前检查
