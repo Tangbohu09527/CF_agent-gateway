@@ -92,9 +92,9 @@ C未执行，保持待批准人工验收。用户确认Hermes确切来源、版�
 ## 后续真实设备验收步骤
 
 1. 审核PR固定提交；提供干净Debian13 amd64/systemd设备、管理人、固定WeChat镜像和批准身份资料；先补齐正确Hermes来源证据。
-2. 按[正式教程](../deployment/clean-device.md)从固定GitHub提交取得入口，执行system→Controller静态Contract→非root WeChat configure/Bootstrap→build/configure→独立DB→迁移/身份初始化→Gateway/Dispatch就绪，保持Gate关闭。
+2. 按[正式教程](../deployment/clean-device.md)从固定GitHub提交取得源码并准备必要输入；在仍为空白的设备上，以[正式B before-reboot入口](../../tests/deployment/README.md)承载首次安装，执行system→Controller静态Contract→非root WeChat configure/Bootstrap→build/configure→独立DB→迁移/身份初始化→Gateway/Dispatch就绪并生成重启前报告，保持Gate关闭。不要先手工完成安装再运行before-reboot，其已有安装保护会拒绝该设备。
 3. 在批准AI测试主机按确认来源安装正确Hermes，配置独立provider/API凭据、模型/Profile与精确Gateway来源防火墙；从真实Gateway容器默认网络诊断，再显式批准POST模型探测，确认认证、完整协议与应用响应。
-4. 用B before/after复验真实Debian重启；按正确Hermes来源完成AI进程和主机重启、自启及容器复验，分别核对登录启动和无需登录的开机启动。
+4. 重启第2步已生成报告的Debian设备，重连后只执行B after-reboot，验证真实boot ID变化及自动启动；按正确Hermes来源完成AI进程和主机重启、自启及容器复验，分别核对登录启动和无需登录的开机启动。
 5. 运行真实WeChat fresh QR并人工扫码；认证/API通过后打开组合Gate。发送唯一批准文本，核对Message→Admission/Thread/Profile→Dispatch→Response→Delivery及一次实际效果；未授权发送者不得触发AI。
 6. 留存脱敏固定版本/image/依赖记录、状态和计数，核对错误认证、不可达、超时、停服与安全恢复；重复首次安装须保留有效配置、Secret和数据。
 
