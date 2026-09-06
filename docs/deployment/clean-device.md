@@ -52,7 +52,7 @@ bash "$INSTALLER" system "${COMMON[@]}"
 bash "$INSTALLER" controller "${COMMON[@]}"
 ```
 
-`system` 初次只引导缺失的 Python，然后直接执行固定 WeChat 系统安装器；复用它的 Debian/架构、
+`system` 初次只补齐入口缺少的 Python/Git/CA/systemd 工具，然后直接执行固定 WeChat 系统安装器；复用它的 Debian/架构、
 APT 签名、Docker 冲突包、Compose v2、账户和 systemd 检查。不自动删除冲突包、覆盖 daemon
 配置或给管理账户增加 root/docker 组。新建管理账户密码默认锁定，设备管理员自行配置密码/SSH：
 `passwd "$MANAGER"`。安装不创建 NOPASSWD 授权；后续管理脚本沿用有明确授权的 sudo helper。
@@ -204,7 +204,7 @@ bash scripts/status.sh
 | diagnose 网络/认证/超时 | 按 Hermes 教程逐层处理；TCP成功或HTTP200不是应用成功 |
 
 详细版本记录：`/var/lib/cf-agent-gateway-install/{source-versions.json,python-image.json,`
-`gateway-image.json,postgres-image.json,python-packages.txt}`；系统包版本仍由复用安装器保存于
+`gateway-image.json,postgres-image.json,python-packages.txt,launcher-packages.txt}`；系统包版本仍由复用安装器保存于
 `/var/lib/cf-agent-wechat-install/system-packages.txt`。其他该目录文件可能含 Secret，不整体上传、
 不打印 `secrets.json`、`runtime-values.json` 或 `.env`。不要删除 `cf-internal` 或运行
 `--remove-orphans` 清理其他组件。

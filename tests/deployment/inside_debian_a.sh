@@ -26,6 +26,10 @@ bash /acceptance/deploy/install-clean-device.sh system-packages \
   --manager deployoperator --gateway-commit "$GATEWAY_COMMIT" \
   --wechat-commit 67cbbb04ce15703428ce165ac38effac19f4b701 \
   > /evidence/system-packages.log 2>&1
+# The official entrypoint must provide the real lifecycle dependency even for
+# system-packages. Its presence does not establish a booted systemd host or B.
+[ -x /usr/bin/systemctl ]
+dpkg-query -W -f='${Package}=${Version}\n' systemd > /evidence/a-systemd-version.txt
 # Provision actual test-account authentication. The official system stage added
 # the manager to Debian's sudo group; preserve its ordinary password policy.
 # A global timestamp lets each fresh noninteractive test process reuse

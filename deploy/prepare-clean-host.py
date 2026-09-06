@@ -866,6 +866,21 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=1800,
                 )
                 manager_identity(options.manager)
+                once(
+                    STATE / "launcher-packages.txt",
+                    run(
+                        [
+                            "dpkg-query",
+                            "-W",
+                            "-f=${Package}=${Version}\n",
+                            "python3",
+                            "git",
+                            "ca-certificates",
+                            "systemd",
+                        ]
+                    )
+                    + "\n",
+                )
                 directory(Path("/usr/local/libexec"), 0o755)
                 once(
                     Path("/usr/local/libexec/cf-agent-wechat-prepare"),

@@ -12,7 +12,7 @@ case "${1:-}" in
     [ "${ID:-}" = debian ] && [ "${VERSION_ID:-}" = 13 ] &&
       [ "$(dpkg --print-architecture)" = amd64 ] || exit 1
     missing=()
-    for package in python3 git ca-certificates; do
+    for package in python3 git ca-certificates systemd; do
       if [ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" != installed ]; then
         missing+=("$package")
       fi
