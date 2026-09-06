@@ -78,6 +78,7 @@ A原始脱敏stage日志、runtime日志、身份/权限、固定提交、image/
 - `cb90b314`的[真实Compose E2E](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/34025165062/job/101464757496)和质量检查通过。该轮全量1286 passed/1 skipped/1 failed，唯一失败为旧E2E单元夹具只有两次心跳读取，与修复竞态后的三次读取不符。本记录同批已更新夹具，明确模拟pause前后的合法时间推进，相关文件11项本地通过；完整全量结果以最终Head重跑为准。
 - 更早A真实暴露sudo会话前提、systemctl依赖和chatId接口遗漏；正式代码/资产修复后通过。独立审查另发现默认管理UID1000与WeChat重合，已经正式修复并由当前A实际权限拒绝证明。
 - 原Compose冻结检查在`docker pause`前读取时存在合法心跳推进竞态，已改为pause成功后的基准，仍严格检查stale与恢复；没有放宽超时/恢复要求。
+- 候选`05f0a156`的A/B再次通过；原Compose E2E另暴露活动心跳写入期间采样到合法原子临时文件的竞态。现检查初始临时文件集合的常规文件类型、UID/GID和0600权限，并要求该集合在5秒内消失；保留最终JSON、目录权限和停机清理校验。相关单元文件11项通过，最终Head仍需完整CI验证。
 - 首次B在VM启动前因runner不允许直接`sudo -g kvm`失败；改为获准root sudo调用runuser，保持原runner UID和现有kvm组后，当前两次B真实通过。失败运行没有被计为guest安装或重启结果。
 
 ## C与缺少的输入

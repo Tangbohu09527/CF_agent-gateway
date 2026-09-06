@@ -382,6 +382,7 @@ def _assert_heartbeat_permissions(compose: list[str], environment: dict[str, str
     script = f"""
 import json
 import stat
+import time
 from pathlib import Path
 
 directory = Path('/run/cf-agent-gateway')
@@ -394,7 +395,22 @@ for name in expected:
     assert (status.st_uid, status.st_gid, stat.S_IMODE(status.st_mode)) == (10001, 10001, 0o600)
     payload = json.loads(path.read_text(encoding='utf-8'))
     assert payload['state'] in {{'starting', 'running'}}
-assert not list(directory.glob('*.tmp'))
+# Active publishers legitimately use temporary files before atomic replacement.
+# Track this snapshot only; later independent writes must not reset the deadline.
+pending = set(directory.glob('*.tmp'))
+deadline = time.monotonic() + 5
+while pending:
+    for path in tuple(pending):
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            pending.remove(path)
+            continue
+        assert stat.S_ISREG(status.st_mode)
+        assert (status.st_uid, status.st_gid, stat.S_IMODE(status.st_mode)) == (10001, 10001, 0o600)
+    if pending:
+        assert time.monotonic() < deadline, 'observed heartbeat temporary files did not disappear'
+        time.sleep(0.05)
 """
     _run(
         [*compose, "exec", "--no-TTY", "worker", "python", "-c", script],
