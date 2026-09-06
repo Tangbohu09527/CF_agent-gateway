@@ -1,4 +1,9 @@
-FROM python:3.12-slim
+ARG BASE_IMAGE=python:3.12-slim-bookworm
+FROM ${BASE_IMAGE}
+
+ARG SOURCE_COMMIT=unrecorded
+LABEL org.opencontainers.image.source="https://github.com/Tangbohu09527/CF_agent-gateway" \
+    org.opencontainers.image.revision="${SOURCE_COMMIT}"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -13,7 +18,8 @@ RUN groupadd --gid 10001 gateway \
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip install --no-cache-dir .
+RUN python -m pip install --no-cache-dir . \
+    && python -m pip freeze --all > /app/python-packages.txt
 
 COPY alembic.ini ./
 COPY config ./config

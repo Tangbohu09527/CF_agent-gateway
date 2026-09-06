@@ -1,0 +1,20 @@
+[Unit]
+Description=Gateway core and Dispatch (Compose first installation)
+Requires=docker.service
+After=docker.service network-online.target cf-agent-gateway-database.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/cf-agent-gateway
+# Explicitly close the existing combination Gate after Docker is ready.
+ExecStartPre=/opt/cf-agent-gateway/deploy/wechat-runtime-control stop
+ExecStart=/usr/bin/docker compose --env-file /opt/cf-agent-gateway/.env --file /opt/cf-agent-gateway/docker-compose.prod.yml --profile worker up --detach --wait --no-deps gateway dispatch-worker
+ExecStop=/opt/cf-agent-gateway/deploy/wechat-runtime-control stop
+ExecStop=/usr/bin/docker compose --env-file /opt/cf-agent-gateway/.env --file /opt/cf-agent-gateway/docker-compose.prod.yml --profile worker stop gateway dispatch-worker
+TimeoutStartSec=240
+TimeoutStopSec=240
+
+[Install]
+WantedBy=multi-user.target

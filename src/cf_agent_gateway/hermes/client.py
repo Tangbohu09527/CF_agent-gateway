@@ -112,6 +112,8 @@ class HermesClient:
             effective_thread_id = _hermes_thread_id(response.headers.get(HERMES_SESSION_HEADER))
         except (ValueError, ValidationError):
             raise HermesResponseError(operation=operation) from None
+        if _explicit_incomplete_response(response, payload):
+            raise HermesResponseError(operation=operation)
         is_v2_response = isinstance(payload, dict) and (
             "response_id" in payload or "parts" in payload
         )
@@ -151,6 +153,23 @@ class HermesClient:
         if not 200 <= response.status_code < 300:
             raise HermesAPIError(operation=operation, status_code=response.status_code)
         return response
+
+
+def _explicit_incomplete_response(response: httpx.Response, payload: object) -> bool:
+    """A Hermes partial/failed HTTP 200 must not become a successful Dispatch."""
+    if (
+        response.headers.get("X-Hermes-Completed", "").strip().lower() == "false"
+        or response.headers.get("X-Hermes-Partial", "").strip().lower() == "true"
+        or bool(response.headers.get("X-Hermes-Error", "").strip())
+    ):
+        return True
+    metadata = payload.get("hermes") if isinstance(payload, dict) else None
+    return isinstance(metadata, dict) and (
+        metadata.get("completed") is False
+        or metadata.get("partial") is True
+        or metadata.get("failed") is True
+        or bool(metadata.get("error"))
+    )
 
 
 def _base_url(value: object) -> str:

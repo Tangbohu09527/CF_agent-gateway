@@ -11,12 +11,43 @@ from cf_agent_gateway.message.models import (
     Message,
     MessageRawPayload,
 )
-from cf_agent_gateway.message.schemas import MessageEvent
+from cf_agent_gateway.message.schemas import ConversationCreate, MessageEvent
 
 
 class MessageStore:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def get_conversation(
+        self, *, source: str, source_account_id: str, conversation_id: str
+    ) -> Conversation | None:
+        return self._get_conversation(
+            source=source,
+            source_account_id=source_account_id,
+            conversation_id=conversation_id,
+        )
+
+    def prepare_conversation(self, data: ConversationCreate) -> tuple[Conversation, bool]:
+        """Prepare a route target while preserving existing names and messages."""
+        existing = self.get_conversation(
+            source=data.source,
+            source_account_id=data.source_account_id,
+            conversation_id=data.conversation_id,
+        )
+        if existing is not None:
+            if existing.conversation_type != data.conversation_type:
+                raise ConversationTypeConflictError(
+                    source=data.source,
+                    source_account_id=data.source_account_id,
+                    conversation_id=data.conversation_id,
+                    existing_type=existing.conversation_type,
+                    requested_type=data.conversation_type,
+                )
+            return existing, False
+        conversation = Conversation(**data.model_dump())
+        self._session.add(conversation)
+        self._session.commit()
+        return conversation, True
 
     def create(self, event: MessageEvent) -> tuple[Message, bool]:
         existing = self._get_existing_message(event)

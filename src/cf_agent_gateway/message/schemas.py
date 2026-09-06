@@ -29,6 +29,15 @@ class MessageSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class ConversationCreate(MessageSchema):
+    """Explicit conversation configuration without creating a synthetic message."""
+
+    source: str = Field(min_length=1, max_length=64)
+    source_account_id: str = Field(min_length=1, max_length=255)
+    conversation_id: str = Field(min_length=1, max_length=255)
+    conversation_type: Literal["private", "group"]
+
+
 class AttachmentMetadata(MessageSchema):
     filename: str = Field(min_length=1, max_length=255)
     file_type: str = Field(min_length=1, max_length=64)

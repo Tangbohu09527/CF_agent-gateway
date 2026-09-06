@@ -3,6 +3,14 @@
 CF_agent-gateway is the durable message and control plane between enterprise message
 entry services and the external Hermes execution service.
 
+## First installation
+
+For a clean Debian 13 amd64 device, start with [the staged installation entry](docs/deployment/clean-device.md).
+It covers fixed sources, Controller, WeChat Bootstrap, independent PostgreSQL, images,
+credentials and the initial authorized text route. [Hermes LAN setup](docs/deployment/hermes-lan.md)
+records the missing Hermes source/version evidence; real AI-host installation and business
+acceptance remain pending. Existing installations use the separate upgrade runbook.
+
 ## Current status
 
 The V2 runtime and P1 observability changes are production validated. Production is

@@ -234,3 +234,9 @@ services:
 volumes:
   gateway-state:
   runtime-heartbeats:
+
+# The Controller and installer read this same network configuration.
+networks:
+  default:
+    external: true
+    name: ${CF_GATEWAY_NETWORK_NAME:-cf-internal}
