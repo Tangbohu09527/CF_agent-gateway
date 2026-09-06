@@ -221,3 +221,41 @@ def test_after_reboot_status_authenticates_before_checking_closed_gate(
     assert calls[0] == (["sudo", "-v"], {"timeout": 300})
     assert calls[1][0] == command
     assert calls[1][1]["capture_output"] is True
+
+
+def test_reboot_wait_only_observes_pending_units_until_active(monkeypatch):
+    entry = load_entry()
+    states = {
+        "docker.service": iter(["active"]),
+        "cf-agent-gateway-core.service": iter(["activating", "active"]),
+    }
+    calls = []
+
+    def run(command, **kwargs):
+        assert command[:2] == ["systemctl", "is-active"]
+        calls.append(command[-1])
+        state = next(states[command[-1]])
+        return subprocess.CompletedProcess(command, 0 if state == "active" else 3, stdout=state)
+
+    monkeypatch.setattr(entry.subprocess, "run", run)
+    monkeypatch.setattr(entry.time, "sleep", lambda delay: None)
+    entry.wait_boot_services()
+    assert calls.count("docker.service") == 1
+    assert calls.count("cf-agent-gateway-core.service") == 2
+
+
+@pytest.mark.parametrize("failure", ["failed", "timeout"])
+def test_reboot_wait_has_deadline_and_does_not_repair_services(monkeypatch, failure):
+    entry = load_entry()
+    tick = iter([0, 241])
+    if failure == "timeout":
+        monkeypatch.setattr(entry.time, "monotonic", lambda: next(tick))
+
+    def run(command, **kwargs):
+        assert failure == "failed"
+        assert command[:2] == ["systemctl", "is-active"]
+        return subprocess.CompletedProcess(command, 3, stdout="failed")
+
+    monkeypatch.setattr(entry.subprocess, "run", run)
+    with pytest.raises(SystemExit, match="timed out|failed or missing"):
+        entry.wait_boot_services()

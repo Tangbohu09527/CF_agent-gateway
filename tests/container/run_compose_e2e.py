@@ -601,6 +601,10 @@ def _assert_stale_heartbeat_and_recovery(
     assert before[dispatch_name]["state"] == "running"
     _run([*compose, "pause", "dispatch-worker"], environment=environment)
     try:
+        # A live worker may publish between the initial read and Docker's pause.
+        # Only a snapshot read after pause is the frozen/recovery baseline.
+        paused = _heartbeat_payloads(compose, environment)
+        assert paused[dispatch_name]["state"] == "running"
         payload = _wait_for_component_status(
             port,
             "dispatch_worker",
@@ -610,7 +614,7 @@ def _assert_stale_heartbeat_and_recovery(
         frozen = _heartbeat_payloads(compose, environment)
         assert frozen[dispatch_name]["state"] == "running"
         assert _heartbeat_timestamp(frozen[dispatch_name]) == _heartbeat_timestamp(
-            before[dispatch_name]
+            paused[dispatch_name]
         )
         assert datetime.now(UTC) - _heartbeat_timestamp(frozen[dispatch_name]) > timedelta(
             seconds=HEARTBEAT_MAX_AGE_SECONDS
@@ -626,7 +630,7 @@ def _assert_stale_heartbeat_and_recovery(
     _wait_for_heartbeat_advances(
         compose,
         environment,
-        before,
+        paused,
         names=(dispatch_name,),
     )
     _wait_for_healthy(compose, "dispatch-worker", environment)

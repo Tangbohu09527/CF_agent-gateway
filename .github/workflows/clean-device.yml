@@ -88,3 +88,24 @@ jobs:
           name: clean-device-A-${{ github.run_id }}
           path: ${{ runner.temp }}/clean-device-evidence
           retention-days: 14
+
+  booted-vm-b:
+    name: B - Booted Debian 13 VM official install and reboot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Execute formal B entry inside a fresh QEMU guest
+        env:
+          GATEWAY_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVIDENCE_DIR: ${{ runner.temp }}/booted-vm-evidence
+        run: bash tests/deployment/run_booted_vm.sh
+      - name: Upload only scanned B result; no guest disks, seed or credentials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-device-B-${{ github.run_id }}
+          path: ${{ runner.temp }}/booted-vm-evidence/B-result.json
+          retention-days: 14

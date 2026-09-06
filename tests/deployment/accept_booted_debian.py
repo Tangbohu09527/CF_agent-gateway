@@ -13,6 +13,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path("/opt/cf-agent-gateway")
@@ -30,6 +31,30 @@ def run(command: list[str]) -> str:
             + "; inspect the official stage diagnostic locally"
         )
     return result.stdout.strip()
+
+
+def wait_boot_services(timeout: float = 240) -> None:
+    """Observe systemd boot jobs without starting or repairing any service."""
+    deadline = time.monotonic() + timeout
+    pending = {"docker.service", "cf-agent-gateway-core.service"}
+    while pending:
+        for unit in sorted(pending):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SystemExit("B timed out waiting for boot service: " + unit)
+            result = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True,
+                text=True,
+                timeout=min(10, remaining),
+            )
+            state = result.stdout.strip()
+            if state == "active" and result.returncode == 0:
+                pending.remove(unit)
+            elif state in {"failed", "unknown", "not-found"}:
+                raise SystemExit("B boot service failed or missing: " + unit)
+        if pending:
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
 def require_interactive_terminal() -> None:
@@ -303,9 +328,7 @@ def main() -> None:
         raise SystemExit("recorded manager must match and a real host reboot must have occurred")
     if files() != previous["files"]:
         raise SystemExit("configuration or credentials changed across reboot")
-    for unit in ("docker.service", "cf-agent-gateway-core.service"):
-        if run(["systemctl", "is-active", unit]) != "active":
-            raise SystemExit("not active after reboot: " + unit)
+    wait_boot_services()
     common = [
         "--manager",
         args.manager,

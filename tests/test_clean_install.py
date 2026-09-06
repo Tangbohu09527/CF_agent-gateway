@@ -397,3 +397,225 @@ def test_external_database_failed_first_credentials_do_not_freeze_configuration(
         accepted_url,
     ]
     assert writes == [tmp_path / "inputs.json"]
+
+
+@pytest.fixture
+def manager_system(installer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Model account commands only; installer intent uses real protected files."""
+    accounts = {}
+    groups = {
+        "root": SimpleNamespace(gr_name="root", gr_gid=0),
+        "sudo": SimpleNamespace(gr_name="sudo", gr_gid=27),
+    }
+    memberships = {}
+    calls = []
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    monkeypatch.setattr(installer, "WECHAT_ENV", tmp_path / "wechat.env")
+    monkeypatch.setattr(installer.pwd, "getpwnam", lambda name: accounts[name])
+    monkeypatch.setattr(installer.pwd, "getpwall", lambda: list(accounts.values()))
+    monkeypatch.setattr(installer.grp, "getgrnam", lambda name: groups[name])
+    monkeypatch.setattr(installer.grp, "getgrall", lambda: list(groups.values()))
+    monkeypatch.setattr(
+        installer.os, "getgrouplist", lambda name, gid: [gid, *memberships.get(name, [])]
+    )
+    original_regular = installer.regular
+    original_once = installer.once
+    monkeypatch.setattr(
+        installer,
+        "regular",
+        lambda path, **kw: original_regular(
+            path, owner=kw.get("owner", local_owner()), mode=kw.get("mode", 0o600)
+        ),
+    )
+    monkeypatch.setattr(
+        installer,
+        "once",
+        lambda path, content, **kw: original_once(
+            path, content, owner=kw.get("owner", local_owner()), mode=kw.get("mode", 0o600)
+        ),
+    )
+
+    def add_account(name, uid, gid):
+        accounts[name] = SimpleNamespace(
+            pw_name=name, pw_uid=uid, pw_gid=gid, pw_dir="/home/" + name, pw_shell="/bin/bash"
+        )
+        return accounts[name]
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert (tmp_path / "manager-identity.json").exists(), "intent must precede mutation"
+        if args[0] == "groupadd":
+            groups[args[-1]] = SimpleNamespace(gr_name=args[-1], gr_gid=int(args[2]))
+        elif args[0] == "useradd":
+            add_account(args[-1], int(args[2]), int(args[4]))
+        else:
+            pytest.fail("unexpected management account command")
+        return ""
+
+    monkeypatch.setattr(installer, "run", run)
+    return SimpleNamespace(
+        accounts=accounts,
+        groups=groups,
+        memberships=memberships,
+        calls=calls,
+        add_account=add_account,
+        run=run,
+    )
+
+
+def test_new_manager_uses_unoccupied_identity_and_protected_retry_intent(
+    installer, manager_system, tmp_path: Path
+) -> None:
+    manager_system.add_account("other", 20000, 30000)
+    manager_system.groups["occupied"] = SimpleNamespace(gr_name="occupied", gr_gid=20001)
+    assert installer.prepare_manager("newoperator") is True
+    account = manager_system.accounts["newoperator"]
+    assert (account.pw_uid, account.pw_gid) == (20002, 20002)
+    intent = tmp_path / "manager-identity.json"
+    assert stat.S_IMODE(intent.stat().st_mode) == 0o600 and intent.stat().st_nlink == 1
+    assert json.loads(intent.read_text()) == {"manager": "newoperator", "uid": 20002, "gid": 20002}
+    before = intent.read_bytes(), intent.stat().st_ino
+    calls = list(manager_system.calls)
+    assert installer.prepare_manager("newoperator") is True
+    assert manager_system.calls == calls
+    assert (intent.read_bytes(), intent.stat().st_ino) == before
+
+
+def test_manager_creation_resumes_after_group_creation_without_reallocating(
+    installer, manager_system, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(args, **kwargs):
+        if args[0] == "useradd":
+            raise installer.InstallError("injected_account_creation_failure")
+        return manager_system.run(args, **kwargs)
+
+    monkeypatch.setattr(installer, "run", interrupted)
+    with pytest.raises(installer.InstallError, match="injected_account_creation_failure"):
+        installer.prepare_manager("newoperator")
+    saved = (tmp_path / "manager-identity.json").read_bytes()
+    assert manager_system.groups["newoperator"].gr_gid == 20000
+    assert "newoperator" not in manager_system.accounts
+    monkeypatch.setattr(installer, "run", manager_system.run)
+    assert installer.prepare_manager("newoperator") is True
+    assert (tmp_path / "manager-identity.json").read_bytes() == saved
+    assert [call[0] for call in manager_system.calls] == ["groupadd", "useradd"]
+
+
+@pytest.mark.parametrize(
+    "uid,gid,extra_groups",
+    [
+        (1000, 20000, []),
+        (20000, 1000, []),
+        (20000, 20000, [1000]),
+        (10001, 20000, []),
+        (20000, 20000, [10001]),
+    ],
+)
+def test_existing_manager_service_collision_preserves_account_and_creates_no_intent(
+    installer, manager_system, tmp_path: Path, uid, gid, extra_groups
+) -> None:
+    original = manager_system.add_account("operator", uid, gid)
+    manager_system.memberships["operator"] = extra_groups
+    with pytest.raises(
+        installer.InstallError, match="manager_and_service_identity_must_be_separate"
+    ):
+        installer.prepare_manager("operator")
+    assert manager_system.accounts["operator"] is original
+    assert manager_system.calls == []
+    assert not (tmp_path / "manager-identity.json").exists()
+
+
+def test_existing_separate_manager_is_reused_without_account_or_group_changes(
+    installer, manager_system, tmp_path: Path
+) -> None:
+    account = manager_system.add_account("operator", 1500, 1500)
+    assert installer.prepare_manager("operator") is False
+    assert manager_system.accounts["operator"] is account and manager_system.calls == []
+    assert not (tmp_path / "manager-identity.json").exists()
+
+
+def test_wechat_literal_runtime_identity_is_read_without_shell_evaluation(
+    installer, manager_system, tmp_path: Path
+) -> None:
+    manager_system.add_account("operator", os.getuid(), os.getgid())
+    protected_file(
+        tmp_path / "wechat.env",
+        b"OTHER=$(must-never-run)\nCF_AGENT_WECHAT_RUNTIME_UID=21000\n"
+        b"CF_AGENT_WECHAT_RUNTIME_GID=22000\n",
+    )
+    assert installer.wechat_service_identity("operator") == (21000, 22000)
+    assert manager_system.calls == []
+
+
+@pytest.mark.parametrize("kind", ["uid", "gid"])
+def test_actual_wechat_runtime_identity_cannot_overlap_manager(
+    installer, manager_system, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    manager_system.add_account("operator", 21000 if kind == "uid" else 23000, 23000)
+    manager_system.memberships["operator"] = [22000] if kind == "gid" else []
+    monkeypatch.setattr(installer, "wechat_service_identity", lambda manager: (21000, 22000))
+    with pytest.raises(
+        installer.InstallError, match="manager_and_service_identity_must_be_separate"
+    ):
+        installer.manager_identity("operator")
+    assert manager_system.calls == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "CF_AGENT_WECHAT_RUNTIME_UID=1000\nCF_AGENT_WECHAT_RUNTIME_GID=$(id -g)\n",
+        "CF_AGENT_WECHAT_RUNTIME_UID=1000\nCF_AGENT_WECHAT_RUNTIME_UID=2000\nCF_AGENT_WECHAT_RUNTIME_GID=1000\n",
+        "CF_AGENT_WECHAT_RUNTIME_UID=1000\n",
+    ],
+)
+def test_wechat_identity_requires_unique_literal_numeric_fields(
+    installer, manager_system, tmp_path: Path, content: str
+) -> None:
+    manager_system.add_account("operator", os.getuid(), os.getgid())
+    protected_file(tmp_path / "wechat.env", content.encode())
+    with pytest.raises(installer.InstallError, match="wechat_service_identity"):
+        installer.wechat_service_identity("operator")
+    assert manager_system.calls == []
+
+
+def test_recorded_postgres_identity_cannot_overlap_manager_groups(
+    installer, manager_system, tmp_path: Path
+) -> None:
+    manager_system.add_account("operator", 20000, 20000)
+    manager_system.memberships["operator"] = [999]
+    protected_file(tmp_path / "postgres-service-identity.json", b'{"uid":999,"gid":999}')
+    with pytest.raises(
+        installer.InstallError, match="manager_and_service_identity_must_be_separate"
+    ):
+        installer.manager_identity("operator")
+    assert manager_system.calls == []
+
+
+def test_existing_identity_conflict_precedes_source_versions_and_checkout(
+    installer, manager_system, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    manager_system.add_account("operator", 1000, 1000)
+    monkeypatch.setattr(installer, "platform", lambda: None)
+    monkeypatch.setattr(installer, "directory", lambda path, mode=0o700: None)
+    previous_umask = os.umask(0o077)
+    try:
+        result = installer.main(
+            [
+                "system-packages",
+                "--manager",
+                "operator",
+                "--gateway-commit",
+                "a" * 40,
+                "--wechat-commit",
+                "b" * 40,
+            ]
+        )
+    finally:
+        os.umask(previous_umask)
+    assert (
+        result == 1 and "manager_and_service_identity_must_be_separate" in capsys.readouterr().err
+    )
+    assert not (tmp_path / "source-versions.json").exists()
+    assert not (tmp_path / "manager-identity.json").exists()
+    assert manager_system.calls == []

@@ -16,7 +16,7 @@ Gateway 的准备和下述 A 层隔离回归可以独立完成；真实 AI 主�
 | --- | --- |
 | Gateway 提交 | 本 PR 最终审核过的 40 位 Git SHA，安装器从固定 GitHub URL取得并校验；不要填写浮动分支 |
 | WeChat 提交 | `67cbbb04ce15703428ce165ac38effac19f4b701`；PR #7 已合并，merge commit `81d21f451adc61df71077ca3035adeddeca4621f`，本次选择已合并的审查 Head |
-| 管理账户 | 任意合法非 root 账户，例如 `cfoperator`；不在 root/docker 组，且与服务 `10001:10001` 分开 |
+| 管理账户 | 任意合法非 root 账户，例如 `cfoperator`；不在 root/docker 组，UID/所有组均与 Gateway `10001:10001`、WeChat 基线 `1000:1000` 及实际服务身份分开 |
 | WeChat 镜像 | 可拉取的完整 registry digest 和经镜像验证的服务 UID/GID，不能用管理用户名推断 |
 | Hermes | 正确来源与固定版本、批准服务 URL、模型路由名、Profile 引用/版本、独立 API Key 的受保护文件；不要传 provider Key |
 | 初始业务身份 | 一个批准员工 ID、机器人 account_id、员工 sender_id、private chatId；见 [正式初始化入口](initial-identity.md) |
@@ -54,7 +54,14 @@ bash "$INSTALLER" controller "${COMMON[@]}"
 
 `system` 初次只补齐入口缺少的 Python/Git/CA/systemd 工具，然后直接执行固定 WeChat 系统安装器；复用它的 Debian/架构、
 APT 签名、Docker 冲突包、Compose v2、账户和 systemd 检查。不自动删除冲突包、覆盖 daemon
-配置或给管理账户增加 root/docker 组。新建管理账户密码默认锁定，设备管理员自行配置密码/SSH：
+配置或给管理账户增加 root/docker 组。Gateway 只为缺失管理账户选择 20000 起未占用的 UID/GID，
+在 root-only `manager-identity.json` 记录创建意图后建立独立组/账户，再复用 WeChat 的系统依赖准备；
+不会重新实现 Docker 安装。中断后重跑会复用同一组与账户。已有 UID=1000/10001、
+加入对应服务组、或与实际 WeChat 服务身份冲突的管理账户会在固化版本配置前被明确拒绝；
+安装器不会更改旧账户的 UID、GID、文件属主或组成员。请选择另一个独立管理账户。
+后续每个安装阶段只读解析 WeChat 固定 `docker/.env` 的实际服务 UID/GID；managed PostgreSQL
+也在镜像身份检查时验证隔离并记录，任何身份冲突都保留已有配置并停止。
+新建管理账户密码默认锁定，设备管理员自行配置密码/SSH：
 `passwd "$MANAGER"`。安装不创建 NOPASSWD 授权；后续管理脚本沿用有明确授权的 sudo helper。
 
 `controller` 安装 `/opt/cf-agent-gateway`，根目录 `root:root 0750`，`deploy` 和固定

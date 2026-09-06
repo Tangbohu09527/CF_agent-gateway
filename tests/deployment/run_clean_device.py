@@ -190,6 +190,136 @@ def inspect_service(service: str) -> dict:
     return json.loads(subprocess.check_output(["docker", "inspect", identifier], text=True))[0]
 
 
+def assert_management_isolation() -> None:
+    management = {
+        "uid": int(subprocess.check_output(["id", "-u", MANAGER], text=True)),
+        "gid": int(subprocess.check_output(["id", "-g", MANAGER], text=True)),
+        "groups": [
+            int(value)
+            for value in subprocess.check_output(["id", "-G", MANAGER], text=True).split()
+        ],
+    }
+    wechat_env = dict(
+        line.split("=", 1)
+        for line in (WECHAT / "docker/.env").read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+    runtime_root = Path(wechat_env["CF_AGENT_WECHAT_RUNTIME_ROOT"])
+    assert runtime_root == Path("/srv/storage/cf-agent-wechat/runtime")
+    wechat_identity = {
+        "uid": int(wechat_env["CF_AGENT_WECHAT_RUNTIME_UID"]),
+        "gid": int(wechat_env["CF_AGENT_WECHAT_RUNTIME_GID"]),
+    }
+    database_ids = subprocess.check_output(
+        ["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cf-agent-gateway-db"],
+        text=True,
+    ).split()
+    assert len(database_ids) == 1
+
+    def process_identity(identifier: str) -> dict:
+        status = subprocess.check_output(
+            ["docker", "exec", identifier, "cat", "/proc/1/status"], text=True
+        )
+        values = {
+            key: [int(item) for item in value.split()]
+            for line in status.splitlines()
+            if (key := line.partition(":")[0]) in ("Uid", "Gid", "Groups")
+            for value in (line.partition(":")[2],)
+        }
+        return {"uid": values["Uid"][1], "gid": values["Gid"][1], "groups": values["Groups"]}
+
+    processes = {
+        "gateway": process_identity(inspect_service("gateway")["Id"]),
+        "postgres": process_identity(database_ids[0]),
+        "synthetic_wechat_supervisor": process_identity(wechat_env["AGENT_WECHAT_CONTAINER_NAME"]),
+    }
+    assert (processes["gateway"]["uid"], processes["gateway"]["gid"]) == (10001, 10001)
+    assert processes["postgres"]["uid"] != 0 and processes["postgres"]["gid"] != 0
+    manager_intent = json.loads((STATE / "manager-identity.json").read_text())
+    assert manager_intent == {
+        "manager": MANAGER,
+        "uid": management["uid"],
+        "gid": management["gid"],
+    }
+    postgres_intent = json.loads((STATE / "postgres-service-identity.json").read_text())
+    assert postgres_intent == {
+        "uid": processes["postgres"]["uid"],
+        "gid": processes["postgres"]["gid"],
+    }
+    service_ids = {0, 10001, wechat_identity["uid"], wechat_identity["gid"]}
+    service_ids.update((processes["postgres"]["uid"], processes["postgres"]["gid"]))
+    assert management["uid"] not in service_ids and management["gid"] not in service_ids
+    assert not service_ids.intersection(management["groups"])
+    protected = {}
+    for path in (GATEWAY, runtime_root, runtime_root / "data"):
+        metadata = path.stat()
+        protected[str(path)] = {
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": oct(stat.S_IMODE(metadata.st_mode)),
+        }
+        if path != GATEWAY:
+            assert (metadata.st_uid, metadata.st_gid) == (
+                wechat_identity["uid"],
+                wechat_identity["gid"],
+            )
+    # runuser drops to the actual installed account and supplementary groups;
+    # this child never invokes sudo and never emits protected file contents.
+    script = """
+import json, os, pathlib, sys
+checks = []
+for index, value in enumerate(sys.argv[1:]):
+    try:
+        if index < 3:
+            os.chdir(value)
+        else:
+            with pathlib.Path(value).open('rb') as stream:
+                stream.read(1)
+    except PermissionError:
+        checks.append({'path': value, 'access_denied': True})
+    else:
+        raise AssertionError('management account accessed a protected service path')
+print(json.dumps(checks))
+"""
+    denied = run(
+        "manager-without-sudo-private-paths",
+        [
+            "runuser",
+            "-u",
+            MANAGER,
+            "--",
+            "python3",
+            "-c",
+            script,
+            str(GATEWAY),
+            str(runtime_root),
+            str(runtime_root / "data"),
+            str(GATEWAY / "runtime.env"),
+            str(TOKEN),
+        ],
+    )
+    (EVIDENCE / "management-service-identities.json").write_text(
+        json.dumps(
+            {
+                "manager": management,
+                "wechat_configured_runtime_directory_owner": wechat_identity,
+                "actual_container_pid1_identities": processes,
+                "protected_directories": protected,
+                "unprivileged_access_checks": json.loads(denied.stdout),
+                "boundary": (
+                    "WeChat application/process is synthetic; its supervisor is recorded "
+                    "separately from configured runtime ownership"
+                ),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    CHECKS.append(
+        "actual manager and service identities separated; no unprivileged private-path access"
+    )
+
+
 def assert_gate(expected: bool) -> None:
     status = json.loads(
         manager(
@@ -489,6 +619,7 @@ def main() -> None:
         "wechat-synthetic-fresh-qr", ["bash", str(WECHAT / "scripts/start-qr-login.sh")], tty=True
     )
     assert_gate(True)
+    assert_management_isolation()
     wechat_token = TOKEN.read_text().strip()
     runtime = literal_env(GATEWAY / "runtime.env")
     port = literal_env(GATEWAY / ".env").get("CF_GATEWAY_PORT", "8080")
@@ -623,6 +754,8 @@ if __name__ == "__main__":
             "postgres-image.json",
             "python-packages.txt",
             "source-versions.json",
+            "manager-identity.json",
+            "postgres-service-identity.json",
         ):
             record = STATE / name
             if record.is_file():

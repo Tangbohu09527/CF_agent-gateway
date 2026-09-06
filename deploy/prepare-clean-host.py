@@ -24,6 +24,7 @@ ROOT = Path("/opt/cf-agent-gateway")
 STATE = Path("/var/lib/cf-agent-gateway-install")
 DB_ROOT = Path("/var/lib/cf-agent-gateway-postgres")
 WECHAT_SOURCE = STATE / "wechat-source"
+WECHAT_ENV = Path("/opt/cf-agent-wechat/docker/.env")
 TOKEN = Path("/srv/storage/cf-agent-wechat/secrets/auth-token")
 REPO = "https://github.com/Tangbohu09527/CF_agent-gateway.git"
 WECHAT_REPO = "https://github.com/Tangbohu09527/CF_agent-wechat.git"
@@ -278,15 +279,147 @@ def platform() -> None:
         fail("only_debian_13_amd64_supported")
 
 
-def manager_identity(manager: str) -> None:
+def wechat_service_identity(manager: str) -> tuple[int, int]:
+    # The fixed WeChat prepare entry writes literal numeric values. Never source
+    # its environment as shell code or use the management user's ID as a default.
+    safe_parents(WECHAT_ENV)
+    if not WECHAT_ENV.exists():
+        return (1000, 1000)
+    info = WECHAT_ENV.lstat()
+    if info.st_uid not in (0, pwd.getpwnam(manager).pw_uid) or stat.S_IMODE(info.st_mode) not in (
+        0o600,
+        0o640,
+    ):
+        fail("wechat_environment_permission_conflict")
+    content = regular(
+        WECHAT_ENV, owner=(info.st_uid, info.st_gid), mode=stat.S_IMODE(info.st_mode)
+    ).decode()
+    keys = ("CF_AGENT_WECHAT_RUNTIME_UID", "CF_AGENT_WECHAT_RUNTIME_GID")
+    found = {}
+    for line in content.splitlines():
+        key, separator, value = line.partition("=")
+        if key not in keys:
+            continue
+        if not separator or key in found or not re.fullmatch(r"[1-9][0-9]{0,9}", value):
+            fail("wechat_service_identity_requires_unique_literal_positive_ids")
+        found[key] = int(value)
+        if found[key] > 2147483647:
+            fail("wechat_service_identity_out_of_range")
+    if set(found) != set(keys):
+        fail("wechat_service_identity_missing_from_fixed_environment")
+    return (found[keys[0]], found[keys[1]])
+
+
+def manager_identity(manager: str, *, service: tuple[int, int] | None = None) -> None:
     account = pwd.getpwnam(manager)
     groups = os.getgrouplist(manager, account.pw_gid)
-    if account.pw_uid == 0 or account.pw_uid == SERVICE[0] or SERVICE[1] in groups:
+    identities = [SERVICE, (1000, 1000), wechat_service_identity(manager)]
+    postgres_identity = STATE / "postgres-service-identity.json"
+    if postgres_identity.exists():
+        saved = read_json(postgres_identity)
+        if any(type(saved.get(key)) is not int or saved[key] <= 0 for key in ("uid", "gid")):
+            fail("postgres_service_identity_invalid")
+        identities.append((saved["uid"], saved["gid"]))
+    if service is not None:
+        identities.append(service)
+    if account.pw_uid == 0 or any(
+        account.pw_uid == uid or gid in groups for uid, gid in identities
+    ):
         fail("manager_and_service_identity_must_be_separate")
     for name in ("root", "docker"):
         with contextlib.suppress(KeyError):
             if grp.getgrnam(name).gr_gid in groups:
                 fail("manager_must_not_join_root_or_docker")
+
+
+def prepare_manager(manager: str) -> bool:
+    """Own only a newly requested manager's identity, not system package setup.
+
+    Save the unoccupied IDs before creating a group/account, so interruption after
+    either command resumes with the same protected intent. Never change an
+    existing account's UID, primary group, home ownership, or supplementary groups.
+    """
+    intent_path = STATE / "manager-identity.json"
+    try:
+        account = pwd.getpwnam(manager)
+    except KeyError:
+        account = None
+    if account is not None and not intent_path.exists():
+        manager_identity(manager)
+        return False
+    if intent_path.exists():
+        intent = read_json(intent_path)
+        if (
+            set(intent) != {"manager", "uid", "gid"}
+            or intent["manager"] != manager
+            or any(
+                type(intent[key]) is not int or not 20000 <= intent[key] <= 59999
+                for key in ("uid", "gid")
+            )
+        ):
+            fail("manager_identity_intent_conflict")
+    else:
+        try:
+            grp.getgrnam(manager)
+        except KeyError:
+            pass
+        else:
+            fail("existing_manager_group_preserved")
+        home = Path("/home") / manager
+        safe_parents(home)
+        if home.exists():
+            fail("existing_manager_home_preserved")
+        used_uids = {entry.pw_uid for entry in pwd.getpwall()}
+        used_gids = {entry.gr_gid for entry in grp.getgrall()}
+        identifier = next(
+            (value for value in range(20000, 60000) if value not in used_uids | used_gids), None
+        )
+        if identifier is None:
+            fail("no_unoccupied_manager_identity_available")
+        intent = {"manager": manager, "uid": identifier, "gid": identifier}
+        once(intent_path, encoded(intent))
+    uid, gid = intent["uid"], intent["gid"]
+    if account is not None and (
+        account.pw_uid,
+        account.pw_gid,
+        account.pw_dir,
+        account.pw_shell,
+    ) != (uid, gid, "/home/" + manager, "/bin/bash"):
+        fail("existing_manager_account_differs_from_intent")
+    for entry in pwd.getpwall():
+        if entry.pw_uid == uid and entry.pw_name != manager:
+            fail("manager_intended_uid_now_occupied")
+    for entry in grp.getgrall():
+        if (entry.gr_gid == gid and entry.gr_name != manager) or (
+            entry.gr_name == manager and entry.gr_gid != gid
+        ):
+            fail("manager_intended_group_now_occupied")
+    try:
+        grp.getgrnam(manager)
+    except KeyError:
+        run(["groupadd", "--gid", str(gid), manager])
+    if account is None:
+        home = Path("/home") / manager
+        safe_parents(home)
+        if home.exists():
+            fail("existing_manager_home_preserved")
+        run(
+            [
+                "useradd",
+                "--uid",
+                str(uid),
+                "--gid",
+                str(gid),
+                "--create-home",
+                "--home-dir",
+                str(home),
+                "--shell",
+                "/bin/bash",
+                manager,
+            ]
+        )
+    manager_identity(manager)
+    return True
 
 
 def docker(args: list[str | Path], **kwargs) -> str:
@@ -758,6 +891,8 @@ def database() -> None:
     if not match or "0" in match.groups():
         fail("postgres_service_identity_invalid")
     uid, gid = map(int, match.groups())
+    manager_identity(read_json(STATE / "source-versions.json")["manager"], service=(uid, gid))
+    once(STATE / "postgres-service-identity.json", encoded({"uid": uid, "gid": gid}))
     credentials = read_json(STATE / "secrets.json")
     for name, key in (("postgres-password", "postgres_admin"), ("app-password", "postgres_app")):
         once(DB_ROOT / name, credentials[key], owner=(uid, gid), mode=0o400)
@@ -925,9 +1060,21 @@ def main(argv: list[str] | None = None) -> int:
                 "manager": options.manager,
                 "configuration_version": 1,
             }
-            # Refuse conflicting invocations before touching any staged asset.
-            once(STATE / "source-versions.json", encoded(versions))
+            # Refuse changed versions and an existing service/manager collision
+            # before saving configuration or running account/package commands.
+            version_path = STATE / "source-versions.json"
+            if version_path.exists():
+                once(version_path, encoded(versions))
+            try:
+                pwd.getpwnam(options.manager)
+            except KeyError:
+                if options.stage not in ("system", "system-packages"):
+                    fail("manager_missing_run_system_first")
+            else:
+                manager_identity(options.manager)
+            once(version_path, encoded(versions))
             if options.stage in ("system", "system-packages"):
+                owned_manager = prepare_manager(options.manager)
                 fixed_checkout(WECHAT_SOURCE, WECHAT_REPO, options.wechat_commit, mode=0o700)
                 run(
                     [
@@ -939,6 +1086,14 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                     timeout=1800,
                 )
+                if owned_manager:
+                    # WeChat's reused system stage installs sudo but only grants
+                    # its group to accounts it creates. This account is ours.
+                    run(["usermod", "--append", "--groups", "sudo", options.manager])
+                    print(
+                        "A new installer-created manager starts locked; "
+                        "the administrator must provision password/SSH access."
+                    )
                 manager_identity(options.manager)
                 once(
                     STATE / "launcher-packages.txt",
