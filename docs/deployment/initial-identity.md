@@ -23,7 +23,7 @@
 
 本次基线要求在 fresh QR 前已明确批准并掌握机器人 `account_id`、发送者 `sender_id` 与私聊 `chatId`，可以来自受控账户管理记录。这些是必要配置输入；正式安装顺序为迁移、初始化、启动 Gateway/Dispatch、验证 Hermes，再运行 WeChat fresh QR。无需发送一次未授权业务消息来制造数据库中的 conversation。
 
-如果是尚无上述记录的新账号，不能假定扫码之后还会暂停等待配置。已检查的 WeChat 固定提交 `67cbbb04ce15703428ce165ac38effac19f4b701` 中，`scripts/start-qr-login.sh` 第 807–808 行在认证与消息 API 检查后直接启动组合 Gate，没有已实现的 post-auth 暂停参数。该情形是当前跨仓库接口剩余项，不能以空身份运行 Gate 或写一个不存在的暂停命令绕过。最小后续配套范围是 WeChat 原 fresh QR 入口增加显式 hold-gateway 选项：认证与消息 API 检查成功后保留 WeChat 运行、保持组合 Gate 关闭，之后由既有 Gateway Controller 在正式初始化、检查及 Hermes 验证成功后打开 Gate。本任务没有修改 WeChat 仓库或宣称该选项已实现。
+如果是尚无上述记录的新账号，不能假定扫码之后还会暂停等待配置。已检查的 WeChat 固定提交 `67cbbb04ce15703428ce165ac38effac19f4b701` 中，[`scripts/start-qr-login.sh` 第 807–808 行](https://github.com/Tangbohu09527/CF_agent-wechat/blob/67cbbb04ce15703428ce165ac38effac19f4b701/scripts/start-qr-login.sh#L807-L808)在认证与消息 API 检查后直接启动组合 Gate，没有已实现的 post-auth 暂停参数。该情形是当前跨仓库接口剩余项，不能以空身份运行 Gate 或写一个不存在的暂停命令绕过。最小后续配套范围是 WeChat 原 fresh QR 入口增加显式 hold-gateway 选项：认证与消息 API 检查成功后保留 WeChat 运行、保持组合 Gate 关闭，之后由既有 Gateway Controller 在正式初始化、检查及 Hermes 验证成功后打开 Gate。本任务没有修改 WeChat 仓库或宣称该选项已实现。
 
 JSON 拒绝未知字段、空值、通配符和未替换的 `REPLACE_` 值。系统不会默认授权所有微信用户或创建未知群的默认路由。此入口不提供扩展权限、Skills 或群聊开通功能。
 

@@ -65,6 +65,17 @@ def stage(name: str, *, succeeds: bool = True, extra: list[str] | None = None) -
 
 
 def manager(name: str, command: list[str], *, succeeds: bool = True, tty: bool = False) -> str:
+    # A account provisioning supplies the password privately. Real sudo policy
+    # evaluates the named non-root manager; no Controller or Docker call is mocked.
+    authorized = subprocess.run(
+        ["sudo", "-H", "-u", MANAGER, "--", "sudo", "-S", "-p", "", "-v"],
+        input=Path("/root/a-manager-password").read_text(),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if authorized.returncode:
+        raise AssertionError("A manager sudo authentication failed; credentials not logged")
     if tty:
         command = ["script", "--quiet", "--return", "--command", shlex.join(command), "/dev/null"]
     return run(name, ["sudo", "-H", "-u", MANAGER, "--", *command], succeeds=succeeds).stdout
@@ -177,7 +188,7 @@ except HermesAPIError as error:
 except HermesTimeoutError:
     assert expected == 'timeout'
 except HermesTransportError:
-    assert expected == 'unavailable'
+    assert expected in {'unavailable', 'unreachable'}
 else:
     assert expected == 'success'
     assert result.hermes_thread_id == 'a-probe-session'
@@ -370,6 +381,27 @@ def main() -> None:
     CHECKS.append(
         "real PostgreSQL empty migration + V2 identity + Gateway/Dispatch with closed gate"
     )
+    hermes_probe("success")
+    gateway_ip = inspect_service("gateway")["NetworkSettings"]["Networks"]["cf-internal"][
+        "IPAddress"
+    ]
+    rejection = [
+        "-s",
+        gateway_ip,
+        "-p",
+        "tcp",
+        "--dport",
+        "18765",
+        "-j",
+        "REJECT",
+        "--reject-with",
+        "icmp-host-unreachable",
+    ]
+    run("isolate-hermes-source", ["iptables", "-I", "INPUT", "1", *rejection])
+    try:
+        hermes_probe("unreachable")
+    finally:
+        run("restore-hermes-source", ["iptables", "-D", "INPUT", *rejection])
     hermes_probe("success")
     for mode, expected in (("reject_auth", "authentication"), ("timeout", "timeout")):
         assert (

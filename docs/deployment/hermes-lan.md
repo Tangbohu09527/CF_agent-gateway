@@ -57,7 +57,7 @@ Gateway 安装配置必须输入 AI 主机地址；Windows 防火墙必须另输
 # Windows / 管理员 PowerShell；输入批准的单个 IPv4 地址与实际监听端口
 $gatewayLan = [System.Net.IPAddress]::Parse((Read-Host 'Gateway Debian LAN IPv4'))
 $aiLan = [System.Net.IPAddress]::Parse((Read-Host 'AI host LAN IPv4'))
-$hermesPort = [int](Read-Host 'Verified Hermes TCP port')
+$hermesPort = [int] (Read-Host 'Verified Hermes TCP port')
 if ($gatewayLan.AddressFamily -ne 'InterNetwork' -or $aiLan.AddressFamily -ne 'InterNetwork' -or
     $hermesPort -lt 1 -or $hermesPort -gt 65535) { throw 'Invalid approved endpoint' }
 Get-NetConnectionProfile

@@ -152,6 +152,11 @@ def once(
             stream.flush()
             os.fsync(stream.fileno())
         os.link(temporary, path, follow_symlinks=False)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         os.unlink(temporary)
 

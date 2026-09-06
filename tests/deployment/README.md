@@ -22,8 +22,8 @@ bash tests/deployment/run_clean_device.sh
 外层容器只有只读源代码输入和证据输出目录；不挂载宿主 Docker socket，也不预填部署配置。
 内层先检查不存在项目、数据库、Token、Session 和 Docker 存储，通过正式 `system-packages`
 入口安装系统/Docker，再启动空白 daemon。镜像、网络、目录、凭据、空库迁移及业务身份均由
-正式安装入口和固定 WeChat `configure`/Bootstrap 创建。测试仅供应必要输入和测试管理账户
-的 sudo 授权；测试镜像通过隔离本地 registry 的 digest 引用进入真实 WeChat 管理流程。
+正式安装入口和固定 WeChat `configure`/Bootstrap 创建。测试仅供应必要输入及测试管理账户的真实密码认证，使用该隔离账户的全局 sudo
+时间戳衔接非交互子进程；保留 Debian sudo 组的密码认证规则。测试镜像通过隔离本地 registry 的 digest 引用进入真实 WeChat 管理流程。
 
 验证顺序及证据：
 

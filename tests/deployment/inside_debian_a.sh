@@ -26,11 +26,17 @@ bash /acceptance/deploy/install-clean-device.sh system-packages \
   --manager deployoperator --gateway-commit "$GATEWAY_COMMIT" \
   --wechat-commit 67cbbb04ce15703428ce165ac38effac19f4b701 \
   > /evidence/system-packages.log 2>&1
-# Test-only access for the manager the official system stage created. This is
-# login authorization, not a deployment asset or Docker/root group membership.
-printf '%s\n' 'deployoperator ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/a-manager-access
+# Provision actual test-account authentication. The official system stage added
+# the manager to Debian's sudo group; preserve its ordinary password policy.
+# A global timestamp lets each fresh noninteractive test process reuse
+# the real sudo authentication performed privately by manager() in the runner.
+printf '%s\n' 'Defaults:deployoperator timestamp_type=global' > /etc/sudoers.d/a-manager-access
 chmod 440 /etc/sudoers.d/a-manager-access
 visudo -cf /etc/sudoers.d/a-manager-access
+openssl rand -hex 32 > /root/a-manager-password
+A_MANAGER_PASSWORD="$(cat /root/a-manager-password)"
+printf 'deployoperator:%s\n' "$A_MANAGER_PASSWORD" | chpasswd
+unset A_MANAGER_PASSWORD
 install -m 755 /acceptance/tests/deployment/systemd-a-substitute.sh /usr/local/bin/cf-a-systemctl
 dockerd --host unix:///var/run/docker.sock --storage-driver vfs \
   --exec-root /run/a-docker --data-root /var/lib/docker \
