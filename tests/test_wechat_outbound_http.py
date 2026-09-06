@@ -27,13 +27,20 @@ def outbound_sender(
     environment_reader: Callable[[str], str | None] | None = None,
 ) -> WechatHttpMessageSender:
     settings = WechatSettings(base_url=BASE_URL, token_env=TOKEN_ENV)
+
+    def authenticated_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/api/status/auth"):
+            assert request.headers["X-Session-Id"] == "default"
+            return httpx.Response(200, json={"status": "logged_in", "loggedInUser": ACCOUNT_ID})
+        return handler(request)
+
     return WechatHttpMessageSender(
         account_id=ACCOUNT_ID,
         base_url=settings.base_url,
         token_env=settings.token_env,
         environment_reader=environment_reader
         or (lambda name: TOKEN if name == TOKEN_ENV else None),
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(authenticated_handler),
     )
 
 

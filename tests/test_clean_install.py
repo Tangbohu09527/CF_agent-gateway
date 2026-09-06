@@ -619,3 +619,142 @@ def test_existing_identity_conflict_precedes_source_versions_and_checkout(
     assert not (tmp_path / "source-versions.json").exists()
     assert not (tmp_path / "manager-identity.json").exists()
     assert manager_system.calls == []
+
+
+def test_base_inputs_do_not_require_business_identity(installer) -> None:
+    values = valid_inputs()
+    values.pop("initial_identity_file")
+    assert "initial_identity_file" not in installer.validate_inputs(values)
+
+
+@pytest.mark.parametrize("invalid", [None, "", "  ", False, 0, {}])
+def test_explicit_optional_identity_must_be_a_nonempty_path(installer, invalid) -> None:
+    values = {**valid_inputs(), "initial_identity_file": invalid}
+    with pytest.raises(installer.InstallError, match="invalid_optional_input"):
+        installer.validate_inputs(values)
+
+
+def test_business_inputs_do_not_freeze_or_mutate_base_installation(
+    installer, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    original_regular = installer.regular
+    monkeypatch.setattr(
+        installer,
+        "regular",
+        lambda path, **kwargs: original_regular(path, owner=local_owner(), **kwargs),
+    )
+    original_once = installer.once
+    monkeypatch.setattr(
+        installer,
+        "once",
+        lambda path, content: original_once(path, content, owner=local_owner()),
+    )
+    base = installer.validate_inputs(valid_inputs())
+    base.pop("initial_identity_file")
+    installer.preserve_installation_inputs(base)
+    path = tmp_path / "inputs.json"
+    before = path.stat()
+    installer.preserve_installation_inputs({**base, "initial_identity_file": "/new/business.json"})
+    installer.preserve_installation_inputs(base)
+    assert json.loads(path.read_text()) == base
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
+    assert path.stat().st_ino == before.st_ino
+    with pytest.raises(installer.InstallError, match="existing_asset_differs"):
+        installer.preserve_installation_inputs({**base, "hermes_model": "changed-base-model"})
+
+
+def test_legacy_optional_identity_path_is_preserved_but_not_a_base_conflict(
+    installer, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    legacy = installer.validate_inputs(valid_inputs())
+    path = tmp_path / "inputs.json"
+    protected_file(path, installer.encoded(legacy).encode())
+    original_regular = installer.regular
+    monkeypatch.setattr(
+        installer, "regular", lambda target: original_regular(target, owner=local_owner())
+    )
+    saved = path.read_bytes()
+    base = {key: value for key, value in legacy.items() if key != "initial_identity_file"}
+    installer.preserve_installation_inputs(base)
+    assert path.read_bytes() == saved
+
+
+def test_optional_initialize_absence_checks_database_without_business_mutation(
+    installer, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    calls = []
+    monkeypatch.setattr(installer, "database_ready", lambda: calls.append("database_check"))
+    monkeypatch.setattr(installer, "business_status", lambda: calls.append("business_read_only"))
+    monkeypatch.setattr(installer, "compose", lambda *a, **kw: pytest.fail("identity applied"))
+    installer.initialize()
+    assert calls == ["database_check", "business_read_only"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("stage", ["start", "diagnose"])
+def test_core_operations_do_not_apply_or_recheck_business_identity(
+    installer, tmp_path, monkeypatch, stage
+) -> None:
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    # A stored legacy onboarding request is not authority to restore a disabled employee.
+    protected_file(tmp_path / "initial-identity.json", b'{"legacy":"preserve"}')
+    calls = []
+    monkeypatch.setattr(installer, "initialize", lambda **kw: pytest.fail("business was reset"))
+    monkeypatch.setattr(installer, "database_ready", lambda: calls.append("schema_checked"))
+    monkeypatch.setattr(installer, "core_ready", lambda: calls.append("healthy"))
+    monkeypatch.setattr(installer, "business_status", lambda: calls.append("business_read_only"))
+    monkeypatch.setattr(installer, "once", lambda *a, **kw: None)
+    monkeypatch.setattr(installer, "compose", lambda command, **kw: calls.append(command) or "{}")
+    getattr(installer, stage)()
+    assert calls[0] == "schema_checked"
+    assert "healthy" in calls
+    assert (tmp_path / "initial-identity.json").read_bytes() == b'{"legacy":"preserve"}'
+    commands = [call for call in calls if isinstance(call, list)]
+    assert all("cf_agent_gateway.initial_identity" not in command for command in commands)
+    assert all("--allow-model-call" not in command for command in commands)
+    if stage == "diagnose":
+        assert "business_read_only" in calls
+
+
+@pytest.mark.parametrize("invalid_identity", [None, [], False, {}, {"version": 1}])
+def test_explicit_bad_identity_is_rejected_before_configuration_is_saved(
+    installer, tmp_path, monkeypatch, invalid_identity
+) -> None:
+    from cf_agent_gateway.initial_identity import InitialIdentityConfig
+
+    monkeypatch.setattr(installer, "STATE", tmp_path)
+    values = valid_inputs()
+    options = SimpleNamespace(inputs="/approved/install.json", manager="operator")
+    monkeypatch.setattr(
+        installer,
+        "administrator_input",
+        lambda path, manager: json.dumps(
+            values if path == options.inputs else invalid_identity
+        ).encode(),
+    )
+    monkeypatch.setattr(installer, "secret_input", lambda *args: "independent-hermes-key")
+    monkeypatch.setattr(
+        installer,
+        "read_json",
+        lambda path: (
+            {"image_id": "sha256:" + "b" * 64}
+            if path.name == "gateway-image.json"
+            else {"requested_reference": "python:3.12-slim-bookworm"}
+        ),
+    )
+
+    def application_validation(command, *, data):
+        assert command[command.index("--network") + 1] == "none"
+        payload = json.loads(data)
+        assert payload["identity_supplied"] is True
+        InitialIdentityConfig.model_validate(payload["identity"])
+        pytest.fail("invalid application identity was accepted")
+
+    monkeypatch.setattr(installer, "docker", application_validation)
+    monkeypatch.setattr(installer, "once", lambda *a, **kw: pytest.fail("configuration saved"))
+    with pytest.raises(ValueError):
+        installer.configure(options)
+    assert list(tmp_path.iterdir()) == []

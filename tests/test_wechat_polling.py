@@ -3838,3 +3838,37 @@ def test_invalid_bootstrap_mode_is_rejected_without_polling(
         WechatPollingService(client, checkpoint_store, RecordingSink(), bootstrap_mode="surprise")
 
     assert client.auth_calls == 0
+
+
+@pytest.mark.parametrize("account", [None, "", " ", "wxid\ninvalid", "x" * 256])
+def test_missing_or_malformed_authenticated_account_never_reads_or_advances(
+    checkpoint_store: WechatSyncCheckpointStore, account
+) -> None:
+    client = FakeWechatClient(account_id=account, messages={CHAT_ID: [raw_message(1)]})
+    sink = RecordingSink()
+    result = WechatPollingService(
+        client, checkpoint_store, sink, bootstrap_mode="backfill"
+    ).poll_once()
+    assert result.logged_in is False and result.source_account_id is None
+    assert result.failures and result.failures[0].stage is PollFailureStage.AUTH
+    assert client.list_chats_calls == 0 and client.list_message_calls == []
+    assert sink.attempts == [] and checkpoint(checkpoint_store) is None
+
+
+def test_same_account_relogin_reuses_checkpoint_and_does_not_replay(
+    checkpoint_store: WechatSyncCheckpointStore,
+) -> None:
+    client = FakeWechatClient(messages={CHAT_ID: [raw_message(1)]})
+    sink = RecordingSink()
+    service = WechatPollingService(client, checkpoint_store, sink, bootstrap_mode="backfill")
+    first = service.poll_once()
+    saved = checkpoint(checkpoint_store)
+    assert saved is not None
+    identifier = saved.id
+    client.status = "logged_out"
+    assert service.poll_once().logged_in is False
+    client.status = "logged_in"
+    resumed = service.poll_once()
+    assert first.messages_processed == 1 and resumed.messages_processed == 0
+    assert checkpoint(checkpoint_store).id == identifier
+    assert source_ids(sink.handled) == ["1"]

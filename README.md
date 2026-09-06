@@ -7,7 +7,9 @@ entry services and the external Hermes execution service.
 
 For a clean Debian 13 amd64 device, start with [the staged installation entry](docs/deployment/clean-device.md).
 It covers fixed sources, Controller, WeChat Bootstrap, independent PostgreSQL, images,
-credentials and the initial authorized text route. [Hermes LAN setup](docs/deployment/hermes-lan.md)
+credentials and core startup without employee lists or a configured bot ID. After login,
+use the [business CLI](docs/deployment/initial-identity.md) to explicitly approve or disable
+access from observed messages. [Hermes LAN setup](docs/deployment/hermes-lan.md)
 records the missing Hermes source/version evidence; real AI-host installation and business
 acceptance remain pending. Existing installations use the separate upgrade runbook.
 

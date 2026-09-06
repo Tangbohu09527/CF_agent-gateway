@@ -15,7 +15,7 @@ import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 ACCOUNT = "wxid_clean_device_gateway"
 SENDER = "wxid_clean_device_operator"
@@ -26,18 +26,72 @@ WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 class ExternalServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port: int, kind: str, token_file: Path):
-        super().__init__(("0.0.0.0", port), Handler)
+    def __init__(self, port: int, kind: str, token_file: Path, *, host: str = "0.0.0.0"):
+        super().__init__((host, port), Handler)
         self.kind = kind
         self.token = token_file.read_text().strip()
         self.auth = "logged_out"
         self.mode = "normal"
-        self.messages: list[dict[str, object]] = []
+        self.account: object = ACCOUNT
+        self.account_present = True
+        self.allow_login = False
+        self.account_messages: dict[str, list[dict[str, object]]] = {}
+        self.account_sequences: dict[str, int] = {}
+        self.account_chats: dict[str, list[str]] = {}
+        self.conversation_polls: dict[str, int] = {}
+        self.account_polls: dict[str, int] = {}
+        self.auth_requests = 0
         self.deliveries: list[dict[str, object]] = []
         self.calls: list[dict[str, object]] = []
         self.cache: dict[str, tuple[str, dict[str, object]]] = {}
         self.polls = 0
         self.lock = threading.Lock()
+
+    @property
+    def account_key(self) -> str:
+        return json.dumps(self.account, sort_keys=True)
+
+    @property
+    def messages(self) -> list[dict[str, object]]:
+        return self.account_messages.setdefault(self.account_key, [])
+
+    @property
+    def chats(self) -> list[str]:
+        return self.account_chats.setdefault(self.account_key, [CHAT])
+
+    def control(self, payload: dict[str, object]) -> None:
+        with self.lock:
+            if "mode" in payload:
+                self.mode = str(payload["mode"])
+            if "auth" in payload:
+                self.auth = str(payload["auth"])
+            if "account" in payload:
+                self.account = payload["account"]
+                self.account_present = True
+            if "account_present" in payload:
+                self.account_present = bool(payload["account_present"])
+            if "allow_login" in payload:
+                self.allow_login = bool(payload["allow_login"])
+            conversation = str(payload.get("conversation_id", CHAT))
+            if "conversation_id" in payload and conversation not in self.chats:
+                self.chats.append(conversation)
+            if "message" in payload:
+                key = self.account_key
+                sequence = int(payload.get("local_id", self.account_sequences.get(key, 0) + 1))
+                assert sequence > 0
+                self.account_sequences[key] = max(sequence, self.account_sequences.get(key, 0))
+                self.messages.append(
+                    {
+                        "localId": sequence,
+                        "serverId": 10000 + sequence,
+                        "chatId": conversation,
+                        "sender": SENDER,
+                        "senderName": "Synthetic operator",
+                        "type": 1,
+                        "content": str(payload["message"]),
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,6 +123,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             self.respond(401, {"error": "unauthorized"})
             return
+        if (
+            self.server.kind == "wechat"
+            and path.startswith("/api/")
+            and self.headers.get("X-Session-Id") != "default"
+        ):
+            self.respond(400, {"error": "session required"})
+            return
         if path == "/__test/state":
             self.respond(
                 200,
@@ -76,7 +137,14 @@ class Handler(BaseHTTPRequestHandler):
                     "synthetic": True,
                     "kind": self.server.kind,
                     "auth": self.server.auth,
+                    "account": self.server.account,
+                    "account_present": self.server.account_present,
+                    "auth_requests": self.server.auth_requests,
                     "polls": self.server.polls,
+                    "account_polls": self.server.account_polls,
+                    "conversation_polls": self.server.conversation_polls,
+                    "messages": self.server.messages,
+                    "chats": self.server.chats,
                     "calls": self.server.calls,
                     "deliveries": self.server.deliveries,
                 },
@@ -84,15 +152,43 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/ws/login" and self.server.kind == "wechat":
             self.websocket()
         elif path == "/api/status/auth" and self.server.kind == "wechat":
+            self.server.auth_requests += 1
+            if self.server.mode == "reject_auth":
+                self.respond(401, {"error": "synthetic invalid credential"})
+                return
             body = {"status": self.server.auth}
-            if self.server.auth == "logged_in":
-                body["loggedInUser"] = ACCOUNT
+            if self.server.auth == "logged_in" and self.server.account_present:
+                body["loggedInUser"] = self.server.account
             self.respond(200, body)
         elif path == "/api/chats" and self.server.kind == "wechat":
-            self.respond(200, {"chats": [{"chatId": CHAT, "name": "Synthetic operator"}]})
-        elif path == f"/api/messages/{CHAT}" and self.server.kind == "wechat":
+            self.respond(
+                200,
+                {
+                    "chats": [
+                        {"chatId": chat, "name": "Synthetic operator"} for chat in self.server.chats
+                    ]
+                },
+            )
+        elif path.startswith("/api/messages/") and self.server.kind == "wechat":
+            conversation = unquote(path.removeprefix("/api/messages/"))
+            if conversation not in self.server.chats:
+                self.respond(404, {"error": "unknown conversation"})
+                return
             self.server.polls += 1
-            self.respond(200, {"messages": self.server.messages})
+            key = self.server.account_key
+            self.server.account_polls[key] = self.server.account_polls.get(key, 0) + 1
+            chat_key = json.dumps([self.server.account, conversation])
+            self.server.conversation_polls[chat_key] = (
+                self.server.conversation_polls.get(chat_key, 0) + 1
+            )
+            self.respond(
+                200,
+                {
+                    "messages": [
+                        item for item in self.server.messages if item["chatId"] == conversation
+                    ]
+                },
+            )
         else:
             self.respond(404, {"error": "not_found"})
 
@@ -103,21 +199,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body) if body else {}
+        if (
+            self.server.kind == "wechat"
+            and path.startswith("/api/")
+            and self.headers.get("X-Session-Id") != "default"
+        ):
+            self.respond(400, {"error": "session required"})
+            return
         if path == "/__test/control":
-            self.server.mode = str(payload.get("mode", "normal"))
-            if "message" in payload:
-                self.server.messages = [
-                    {
-                        "localId": 1,
-                        "serverId": 10001,
-                        "chatId": CHAT,
-                        "sender": SENDER,
-                        "senderName": "Synthetic operator",
-                        "type": 1,
-                        "content": str(payload["message"]),
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }
-                ]
+            self.server.control(payload)
             self.respond(200, {"synthetic": True})
         elif path == "/api/status/login" and self.server.kind == "wechat":
             if parse_qs(urlsplit(self.path).query).get("newAccount") != ["true"]:
@@ -181,8 +271,15 @@ class Handler(BaseHTTPRequestHandler):
         for event in [
             {"type": "qr", "qrData": "synthetic://clean-device-fresh-qr"},
             {"type": "phone_confirm"},
-            {"type": "login_success", "userId": ACCOUNT},
+            {"type": "login_success", "userId": self.server.account},
         ]:
+            if event["type"] == "phone_confirm":
+                deadline = time.monotonic() + 180
+                while not self.server.allow_login:
+                    if time.monotonic() >= deadline:
+                        self.close_connection = True
+                        return
+                    time.sleep(0.1)
             if event["type"] == "login_success":
                 self.server.auth = "logged_in"
             encoded = json.dumps(event).encode()

@@ -493,9 +493,14 @@ def validate_inputs(raw: dict) -> dict:
     }
     if set(raw) - allowed or raw.get("version") != 1 or isinstance(raw.get("version"), bool):
         fail("installation_inputs_version_or_unknown_key")
-    for key in ("hermes_url", "hermes_model", "hermes_api_key_file", "initial_identity_file"):
+    for key in ("hermes_url", "hermes_model", "hermes_api_key_file"):
         if not isinstance(raw.get(key), str) or not raw[key].strip():
             fail("missing_input:" + key)
+    if "initial_identity_file" in raw and (
+        not isinstance(raw["initial_identity_file"], str)
+        or not raw["initial_identity_file"].strip()
+    ):
+        fail("invalid_optional_input:initial_identity_file")
     url = urlsplit(raw["hermes_url"])
     if (
         url.scheme not in ("http", "https")
@@ -603,13 +608,31 @@ finally:
             os.unlink(temporary)
 
 
+def preserve_installation_inputs(settings: dict) -> None:
+    # Business onboarding is independent of immutable base installation inputs.
+    # Preserve legacy records byte-for-byte while comparing only base settings.
+    base = {key: value for key, value in settings.items() if key != "initial_identity_file"}
+    path = STATE / "inputs.json"
+    if path.exists():
+        saved = read_json(path)
+        saved.pop("initial_identity_file", None)
+        if saved != base:
+            fail("existing_asset_differs:" + str(path))
+        return
+    once(path, encoded(base))
+
+
 def configure(options) -> None:
     if not options.inputs:
         fail("configure_requires_inputs_file")
     raw = json.loads(administrator_input(options.inputs, options.manager))
     settings = validate_inputs(raw)
     hermes_key = secret_input(settings["hermes_api_key_file"], options.manager)
-    identity = administrator_input(settings["initial_identity_file"], options.manager)
+    identity = (
+        administrator_input(settings["initial_identity_file"], options.manager)
+        if "initial_identity_file" in settings
+        else None
+    )
     image_id = read_json(STATE / "gateway-image.json")["image_id"]
     if read_json(STATE / "python-image.json")["requested_reference"] != settings["python_image"]:
         fail("built_python_image_input_conflict")
@@ -632,11 +655,19 @@ def configure(options) -> None:
             image_id,
             "-c",
             "import json,sys; from cf_agent_gateway.initial_identity import "
-            "InitialIdentityConfig; x=json.load(sys.stdin); "
-            "c=InitialIdentityConfig.model_validate(x['identity']); "
-            "assert c.profile.model == x['model']",
+            "InitialIdentityConfig; from cf_agent_gateway.config import HermesSettings; "
+            "x=json.load(sys.stdin); HermesSettings(model=x['model']); "
+            "c=InitialIdentityConfig.model_validate(x['identity']) "
+            "if x['identity_supplied'] else None; "
+            "assert c is None or c.profile.model == x['model']",
         ],
-        data=json.dumps({"identity": json.loads(identity), "model": settings["hermes_model"]}),
+        data=json.dumps(
+            {
+                "identity": json.loads(identity) if identity is not None else None,
+                "identity_supplied": identity is not None,
+                "model": settings["hermes_model"],
+            }
+        ),
     )
     if settings["database"]["mode"] == "external":
         database_url = secret_input(settings["database"]["external_url_file"], options.manager)
@@ -659,8 +690,13 @@ def configure(options) -> None:
     else:
         database_url = ""
     # Input conflicts are detected before generating any new credentials.
-    once(STATE / "inputs.json", encoded(settings))
-    once(STATE / "initial-identity.json", identity, owner=(0, SERVICE[1]), mode=0o640)
+    preserve_installation_inputs(settings)
+    if identity is not None:
+        once(STATE / "initial-identity.json", identity, owner=(0, SERVICE[1]), mode=0o640)
+        print(
+            "Optional business input validated and staged; explicit initialize checks bindings "
+            "and activates it. Base stages never reapply employee authorization."
+        )
     secret_path = STATE / "secrets.json"
     if secret_path.exists():
         credentials = read_json(secret_path)
@@ -942,8 +978,50 @@ def database() -> None:
     once(STATE / "database.json", encoded({"mode": "managed", "connectivity": "passed"}))
 
 
-def initialize(*, check: bool = False) -> None:
+def database_ready() -> None:
     regular(STATE / "database.json")
+    compose(
+        [
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "migration",
+            "python",
+            "-m",
+            "cf_agent_gateway.runtime.startup",
+            "check",
+        ]
+    )
+
+
+def business_status() -> None:
+    # Read current business services; never persist a frozen "empty" snapshot.
+    print(
+        compose(
+            [
+                "run",
+                "--rm",
+                "--no-deps",
+                "-T",
+                "migration",
+                "python",
+                "-m",
+                "cf_agent_gateway.business_access",
+                "status",
+            ]
+        )
+    )
+
+
+def initialize(*, check: bool = False) -> None:
+    database_ready()
+    identity_path = STATE / "initial-identity.json"
+    if not identity_path.exists() and not identity_path.is_symlink():
+        print("No optional identity supplied; base installation is ready for business onboarding.")
+        business_status()
+        return
+    regular(identity_path, owner=(0, SERVICE[1]), mode=0o640)
     args = [
         "run",
         "--rm",
@@ -951,7 +1029,7 @@ def initialize(*, check: bool = False) -> None:
         "-T",
         "--volume",
         str(STATE / "initial-identity.json") + ":/run/initial-identity.json:ro",
-        "migration",
+        "migration" if check else "worker",
         "python",
         "-m",
         "cf_agent_gateway.initial_identity",
@@ -975,7 +1053,7 @@ def core_ready() -> None:
 
 
 def start() -> None:
-    initialize(check=True)
+    database_ready()
     # Never start worker or delivery-worker here. The Controller retains that duty.
     compose(
         ["up", "--detach", "--wait", "--wait-timeout", "180", "gateway", "dispatch-worker"],
@@ -986,21 +1064,9 @@ def start() -> None:
 
 
 def diagnose() -> None:
-    compose(
-        [
-            "run",
-            "--rm",
-            "--no-deps",
-            "-T",
-            "migration",
-            "python",
-            "-m",
-            "cf_agent_gateway.runtime.startup",
-            "check",
-        ]
-    )
-    initialize(check=True)
+    database_ready()
     core_ready()
+    business_status()
     # Default diagnostic makes no HTTP/business/model request.
     output = compose(["exec", "-T", "gateway", "python", "-m", "cf_agent_gateway.hermes.diagnose"])
     print(output)
@@ -1010,7 +1076,7 @@ def diagnose() -> None:
 def boot_service(options) -> None:
     if not Path("/run/systemd/system").is_dir():
         fail("booted_systemd_host_required_not_container_acceptance")
-    initialize(check=True)
+    database_ready()
     for name in ("cf-agent-gateway-core.service", "cf-agent-gateway-database.service"):
         if (
             name.endswith("database.service")

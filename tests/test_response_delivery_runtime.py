@@ -533,3 +533,57 @@ def test_retry_budget_is_independent_for_each_part(session: Session) -> None:
         DeliveryAttemptStatus.FAILED,
         DeliveryAttemptStatus.DELIVERED,
     ]
+
+
+@pytest.mark.parametrize(
+    "current_account,expected_status,expected_error",
+    [
+        ("wxid-other-bot", DeliveryStatus.FAILED, "wechat_presend_account_mismatch"),
+        (None, DeliveryStatus.QUEUED, "wechat_presend_auth_unavailable"),
+    ],
+)
+def test_persisted_old_account_delivery_checks_real_auth_before_sending_and_keeps_history(
+    session: Session, current_account, expected_status, expected_error
+) -> None:
+    import httpx
+
+    from cf_agent_gateway.adapters.wechat.outbound_http import WechatHttpMessageSender
+
+    message, workspace, thread, _ = create_domain(session)
+    envelope = ResponseEnvelope(
+        response_id=RESPONSE_ID, parts=(TextPart(text="private old-account reply"),)
+    )
+    response, delivery, _ = ResponseStore(session).save_generated(
+        outcome(message, workspace, thread, envelope), target=target()
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.method == "GET" and request.url.path == "/api/status/auth"
+        body = (
+            {"status": "logged_in", "loggedInUser": current_account}
+            if current_account
+            else {"status": "logged_out"}
+        )
+        return httpx.Response(200, json=body)
+
+    def sender_factory(*, account_id):
+        return WechatHttpMessageSender(
+            account_id,
+            "http://wechat.test:6174",
+            "TEST_TOKEN",
+            environment_reader=lambda name: "private-test-token",
+            transport=httpx.MockTransport(handler),
+        )
+
+    result = ChannelDeliveryWorker(session, sender_factory).run_once()
+    assert result is not None and result.status is expected_status
+    assert result.error_code == expected_error and result.attempt_count == 1
+    assert len(requests) == 1
+    session.expire_all()
+    assert session.get(Message, message.id) is not None
+    assert session.get(ResponseRecord, response.response_id) is not None
+    stored = session.get(DeliveryOutboxRecord, delivery.id)
+    assert stored is not None and stored.account_id == ACCOUNT_ID
+    assert session.scalar(select(func.count()).select_from(DeliveryReceipt)) == 0

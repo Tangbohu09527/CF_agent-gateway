@@ -632,3 +632,95 @@ def test_latest_bootstrap_then_processes_only_new_messages(tmp_path: Path) -> No
             assert checkpoint is not None and checkpoint.last_local_id == 3
     finally:
         engine.dispose()
+
+
+def test_v2_relogin_and_new_account_cannot_reuse_old_authorization_or_thread(
+    tmp_path: Path,
+) -> None:
+    from cf_agent_gateway.admission.models import MessageAdmissionOutcome
+    from cf_agent_gateway.agent_profile import AgentProfileStore
+    from cf_agent_gateway.delivery.models import DeliveryOutboxRecord
+    from cf_agent_gateway.identity.models import SourceIdentityMapping
+    from cf_agent_gateway.message.schemas import ConversationCreate
+    from cf_agent_gateway.message.store import MessageStore
+
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'account-switch.db').as_posix()}"
+    engine = create_database_engine(database_url)
+    initialize_database(engine)
+    with Session(engine) as session:
+        identity_service = IdentityService(session)
+        identity = identity_service.create_identity(employee_id="approved-first-account")
+        identity_service.create_mapping(
+            platform="wechat",
+            account_id=ACCOUNT_ID,
+            sender_id="wxid_sender",
+            enterprise_identity_id=identity.id,
+        )
+        policy = AccessPolicyService(session)
+        policy.upsert_user_policy(enterprise_identity_id=identity.id)
+        policy.upsert_gateway_policy(allowed_risk_levels=(RiskLevel.NORMAL,))
+        profiles = AgentProfileStore(session)
+        profile, _ = profiles.create_agent_profile(
+            profile_key="switch-test",
+            revision=1,
+            provider="hermes",
+            external_profile_ref="profiles/switch-test/1",
+            model="hermes-agent",
+        )
+        conversation, _ = MessageStore(session).prepare_conversation(
+            ConversationCreate(
+                source="wechat",
+                source_account_id=ACCOUNT_ID,
+                conversation_id=CHAT_ID,
+                conversation_type="private",
+            )
+        )
+        profiles.bind_conversation_agent_profile(
+            conversation_record_id=conversation.id, agent_profile_id=profile.id
+        )
+    engine.dispose()
+    settings = runtime_settings(database_url, v2_routing_enabled=True)
+    client = FakeWechatClient({CHAT_ID: [raw_message(1)]})
+    lifecycle = WechatPollingLifecycleState()
+
+    def poll():
+        return run_wechat_poll_once(
+            settings,
+            client_factory=RecordingClientFactory(client),
+            environment_reader=lambda name: TOKEN if name == TOKEN_ENV else None,
+            lifecycle_state=lifecycle,
+        )
+
+    assert poll().messages_processed == 1
+    client.logged_in = False
+    assert poll().logged_in is False
+    client.logged_in = True
+    assert poll().messages_processed == 0
+    client.account_id = "wxid_changed_bot"
+    switched = poll()
+    assert switched.messages_processed == 1 and not switched.failures
+    client.account_id = ACCOUNT_ID
+    assert poll().messages_processed == 0
+    engine = create_database_engine(database_url)
+    try:
+        with Session(engine) as session:
+            rows = session.execute(
+                select(Message.source_account_id, MessageAdmissionOutcome.decision).join(
+                    MessageAdmissionOutcome, MessageAdmissionOutcome.message_id == Message.id
+                )
+            ).all()
+            assert {(account, decision.value) for account, decision in rows} == {
+                (ACCOUNT_ID, "allowed"),
+                ("wxid_changed_bot", "denied"),
+            }
+            assert session.scalar(select(func.count()).select_from(WechatSyncCheckpoint)) == 2
+            assert session.scalar(select(func.count()).select_from(Message)) == 2
+            assert session.scalar(select(func.count()).select_from(SourceIdentityMapping)) == 1
+            assert session.scalar(select(func.count()).select_from(AIThread)) == 1
+            assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
+            assert session.scalar(select(func.count()).select_from(HermesDispatchResponse)) == 0
+            assert session.scalar(select(func.count()).select_from(DeliveryOutboxRecord)) == 0
+            dispatch = session.scalar(select(HermesDispatchRecord))
+            assert dispatch is not None and dispatch.attempt_count == 0
+    finally:
+        engine.dispose()

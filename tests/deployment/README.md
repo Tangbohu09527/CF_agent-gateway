@@ -34,14 +34,19 @@ bash tests/deployment/run_clean_device.sh
 
 1. root:root 0750 Gateway 根目录，管理人不在 root/docker 组；无 Token/数据库时真实静态 Contract。
 2. WeChat 固定检出、digest 镜像身份检查、正式 Bootstrap；尚无 Runtime/Session。
-3. Gateway 安全配置、实际源码构建、错误顺序迁移失败后的安全重试、独立 PostgreSQL 空库迁移和正式 V2 身份初始化。
-4. Gateway/Dispatch 就绪且 Poll/Delivery 关闭；从真实 Gateway 容器验证外部模拟 Hermes 的网络、认证、全部 V2 字段、会话响应，以及认证错误/超时/服务关闭与重启。
-5. 真实管理脚本 dry-run、fresh QR 交互流程（明确为合成 QR/外部进程），认证/消息 API 后真实 Controller 打开组合 Gate。
-6. 唯一标记文本通过真实 Poll、授权、路由、Dispatch、响应和 Delivery；只读 Admin API 核对关联身份/Profile/线程/状态，重复轮询不重复调用/投递。
-7. 配置/凭据/Token/数据库/初始化重跑保护；独立 PostgreSQL 重启保留文本；停止 WeChat 只关闭 Poll/Delivery，Dispatch 不受 Controller 管理。
-8. 证据检查不包含生成的 Secret。输出 `A-result.json`、`text-chain.json`、固定提交与 stage 日志。
-   文本链记录模拟 Hermes 的 V2 请求、会话与幂等键；counts 中模型执行次数仅指合成服务，
-   不代表真实扫码、真实 Hermes 或模型供应商调用。
+3. 仅基础配置和模型输入，省略 `initial_identity_file`、机器人 ID、员工、群聊和业务路由；实际源码构建、独立 PostgreSQL 空库迁移、Gateway/Dispatch 核心启动。显式提供畸形或不存在的身份文件必须失败且可安全重试。
+4. 默认诊断无模型调用；真实 Gateway 容器对合成 Hermes 验证网络、认证、V2 协议及故障。WeChat 未启动时诊断准确报告服务不可达。
+5. 固定 fresh QR 管理脚本创建真实 runtime，合成扫码事件先挂起：正式账号诊断报告未登录且 Gate 关闭；模拟扫码完成后由真实管理脚本打开组合 Gate，诊断从 auth API 自动取得当前账号。
+6. 无授权的新消息经真实 Poll/Admission 持久化拒绝，Hermes 执行和业务回复都不增加。正式 `business_access discover` 提供观察信息，`approve --message-id` 从记录派生账号/发送者/会话，批准文件只包含明确员工和 Profile。
+7. 批准不重放旧拒绝消息；之后唯一标记的新文本通过真实授权、路由、Dispatch、响应和 Delivery，重复轮询仍只执行/投递一次。同一发送者的未绑定新私聊也必须持久化拒绝；正式补绑定后旧消息仍不重放。
+8. 缺失/畸形 auth 账号和错误认证失败关闭；同账号注销/重登不重置 checkpoint 或重放历史。切换账号保留独立 checkpoint、消息历史、授权和线程；证据只读查询真实 ORM，不修改数据库。
+9. 正式 `disable` 后新消息被拒绝；重跑基础配置/数据库/迁移/可选初始化/启动/诊断不恢复停用授权，不覆盖 Secret 或历史。保留非 root 管理用户、0750 Gateway 根、实际服务 UID 分离及无 sudo 私有路径访问拒绝。
+10. 独立 PostgreSQL 重启保留所有消息；停止 WeChat 只关闭 Poll/Delivery，Dispatch 不受 Controller 管理。证据扫描不含生成的 Secret。
+
+输出包含 `A-result.json`、`login-discovery.json`、`business-onboarding.json`、
+`unconfigured-route.json`、`account-isolation.json`、`text-chain.json`、固定提交和阶段日志。
+文本链 counts 仅统计批准后的主标记；模拟 Hermes 执行次数不代表真实 Hermes 或模型供应商调用。
+此前被拒绝的消息和新账号消息另行保留，不作为成功链计数。A 的所有账号、扫码事件和外部回复均为合成数据。
 
 CI 从 GitHub 固定 PR Head 执行安装，记录 WeChat PR #7 的合并结果并使用
 `67cbbb04ce15703428ce165ac38effac19f4b701`。本地执行也要求该 Gateway Commit 可从 GitHub 获取；
@@ -83,7 +88,8 @@ python3 tests/deployment/accept_booted_debian.py before-reboot \
 真实获准的标准 sudo 权限和当前 TTY 认证，不扩展为免密码权限。
 
 此入口调用正式 `system`、固定 Controller、WeChat configure/Bootstrap、Gateway 配置/构建/
-数据库/迁移/初始化/启动/默认无业务诊断和 `boot-service`。不启用 WeChat 自动开机，不扫码。
+数据库/迁移/核心启动/默认无模型诊断和 `boot-service`，不要求 initial_identity_file、员工、群聊或机器人 ID。
+业务状态独立报告；不启用 WeChat 自动开机，不扫码。CI 在首次空业务重启通过后，另用正式业务入口开通测试配置并第二次重启核对持久化，替身边界见 [VM说明](booted-vm.md)。
 记录位于 `/var/lib/cf-agent-gateway-install/boot-acceptance.json`：父目录要求 root:root 0700，
 报告从临时文件创建时即为 root:root 0600，文件与目录 fsync 后原子替换。读取/更新拒绝
 符号链接、硬链接、错误属主或权限；不会先写出可公开读取的报告再补权限。报告只含固定
@@ -98,5 +104,5 @@ python3 /opt/cf-agent-gateway/tests/deployment/accept_booted_debian.py after-reb
 ```
 
 只有内核 boot ID 变化、配置/凭据摘要不变、Docker 与 Gateway/Dispatch 自动启动、数据库迁移
-和初始身份检查通过、Poll/Delivery 仍关闭、WeChat 未运行时才记录 B 通过。`docker restart`
+和当前业务配置概览可读、Poll/Delivery 仍关闭、WeChat 未运行时才记录 B 通过。`docker restart`
 或普通 Debian 容器无法满足 B。后续必须按教程进行批准后的 C fresh QR 与真实 Hermes 文本验收。

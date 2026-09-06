@@ -377,6 +377,110 @@ print('synthetic Hermes real-container client: ' + expected)
     CHECKS.append(f"real Gateway container to external synthetic Hermes: {expected}")
 
 
+def application_json(
+    name: str,
+    module: str,
+    arguments: list[str] | None = None,
+    *,
+    input_file: Path | None = None,
+    succeeds: bool = True,
+) -> dict:
+    needs_wechat_token = module.endswith(".wechat.diagnose") or (arguments or [])[:1] == ["approve"]
+    if input_file is None and not needs_wechat_token:
+        command = [*COMPOSE, "exec", "-T", "gateway", "python", "-m", module]
+    else:
+        command = [*COMPOSE, "run", "--rm", "--no-deps", "-T"]
+        if input_file is not None:
+            command.extend(["--volume", f"{input_file}:/run/approved-business.json:ro"])
+        command.extend(["worker" if needs_wechat_token else "migration", "python", "-m", module])
+    return json.loads(run(name, [*command, *(arguments or [])], succeeds=succeeds).stdout)
+
+
+def account_diagnosis(name: str, expected: str) -> dict:
+    result = application_json(
+        name,
+        "cf_agent_gateway.adapters.wechat.diagnose",
+        succeeds=expected in {"authenticated", "not_logged_in"},
+    )
+    assert result["status"] == expected
+    assert result["authenticated"] is (expected == "authenticated")
+    assert ("account_id" in result) is (expected == "authenticated")
+    return result
+
+
+def synthetic_fresh_qr(wechat_token: str) -> dict:
+    command = ["bash", str(WECHAT / "scripts/start-qr-login.sh")]
+    # The unchanged lifecycle owns runtime creation and Gate opening. Only the
+    # external WebSocket scan event is held until the test observes not_logged_in.
+    process = subprocess.Popen(
+        [
+            "sudo",
+            "-H",
+            "-u",
+            MANAGER,
+            "--",
+            "script",
+            "--quiet",
+            "--return",
+            "--command",
+            shlex.join(command),
+            "/dev/null",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        wait(
+            lambda: request("http://127.0.0.1:6174/__test/state", wechat_token)[0] == 200,
+            "real fresh-QR runtime before simulated scan completion",
+        )
+        before = account_diagnosis("wechat-before-scan", "not_logged_in")
+        assert_gate(False)
+        assert (
+            request("http://127.0.0.1:6174/__test/control", wechat_token, {"allow_login": True})[0]
+            == 200
+        )
+        output, _ = process.communicate(timeout=360)
+        (EVIDENCE / "wechat-synthetic-fresh-qr.log").write_text(redact_output(output))
+        assert process.returncode == 0, "formal fresh-QR lifecycle failed; inspect stage log"
+        after = account_diagnosis("wechat-after-scan", "authenticated")
+        (EVIDENCE / "login-discovery.json").write_text(
+            json.dumps({"synthetic": True, "before": before, "after": after}, indent=2)
+        )
+        return after
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                output, _ = process.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                output, _ = process.communicate()
+            (EVIDENCE / "wechat-synthetic-fresh-qr.log").write_text(redact_output(output))
+
+
+def checkpoint_evidence(name: str) -> list[dict]:
+    # Observe the actual persisted model; this performs no initialization or writes.
+    script = """
+import json, os
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from cf_agent_gateway.config import load_settings
+from cf_agent_gateway.database import create_database_engine
+from cf_agent_gateway.adapters.wechat.polling_models import WechatSyncCheckpoint
+settings = load_settings(os.environ['CF_GATEWAY_CONFIG'])
+engine = create_database_engine(settings.database.url)
+with Session(engine) as session:
+    rows = session.scalars(select(WechatSyncCheckpoint).order_by(WechatSyncCheckpoint.id))
+    print(json.dumps([{'id': row.id, 'account_id': row.source_account_id,
+        'conversation_id': row.conversation_id, 'last_local_id': row.last_local_id,
+        'generation': row.regression_generation} for row in rows]))
+engine.dispose()
+"""
+    return json.loads(run(name, [*COMPOSE, "exec", "-T", "gateway", "python", "-c", script]).stdout)
+
+
 def main() -> None:
     assert os.geteuid() == 0 and len(GATEWAY_SHA) == 40
     assert Path("/.dockerenv").exists(), "A must run inside its disposable container"
@@ -483,28 +587,6 @@ def main() -> None:
     key_file = inputs_dir / "hermes-key"
     key_file.write_text(secrets.token_urlsafe(32))
     key_file.chmod(0o600)
-    identity = inputs_dir / "identity.json"
-    identity.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "profile": {
-                    "profile_key": "clean-device",
-                    "revision": 1,
-                    "provider": "hermes",
-                    "external_profile_ref": "profiles/clean-device/1",
-                    "model": "synthetic-A",
-                },
-                "identity": {"employee_id": "clean-device-operator", "display_name": "A operator"},
-                "wechat": {
-                    "account_id": "wxid_clean_device_gateway",
-                    "sender_id": "wxid_clean_device_operator",
-                    "conversation_id": "wxid_clean_device_operator",
-                },
-            }
-        )
-    )
-    identity.chmod(0o600)
     bridge = json.loads(
         subprocess.check_output(["docker", "network", "inspect", "cf-internal"], text=True)
     )[0]["IPAM"]["Config"][0]["Gateway"]
@@ -516,7 +598,6 @@ def main() -> None:
                 "hermes_url": f"http://{bridge}:18765",
                 "hermes_model": "synthetic-A",
                 "hermes_api_key_file": str(key_file),
-                "initial_identity_file": str(identity),
                 "database": {"mode": "managed"},
             }
         )
@@ -546,14 +627,23 @@ def main() -> None:
     stage("configure", succeeds=False, extra=["--inputs", str(invalid_inputs)])
     assert not (GATEWAY / "runtime.env").exists() and not (GATEWAY / ".env").exists()
     assert TOKEN.read_bytes() == token_before
+    # An explicit JSON null is invalid input, not omission of the optional file.
+    invalid_identity.write_text("null")
+    stage("configure", succeeds=False, extra=["--inputs", str(invalid_inputs)])
+    assert not (GATEWAY / "runtime.env").exists() and not (STATE / "inputs.json").exists()
+    assert TOKEN.read_bytes() == token_before
+    missing_inputs = inputs_dir / "missing-identity-inputs.json"
+    invalid_payload["initial_identity_file"] = str(inputs_dir / "does-not-exist.json")
+    missing_inputs.write_text(json.dumps(invalid_payload))
+    missing_inputs.chmod(0o600)
+    stage("configure", succeeds=False, extra=["--inputs", str(missing_inputs)])
+    assert not (GATEWAY / "runtime.env").exists() and TOKEN.read_bytes() == token_before
     stage("configure", extra=["--inputs", str(inputs)])
     initial = snapshot()
     stage("migrate", succeeds=False)
     assert snapshot() == initial
     stage("database")
-    stage("initialize", succeeds=False)
     stage("migrate")
-    stage("initialize")
     stage("start")
     assert_gate(False)
     for service in ("gateway", "dispatch-worker"):
@@ -562,8 +652,14 @@ def main() -> None:
         assert "cf-internal" in item["NetworkSettings"]["Networks"]
         assert item["State"]["Health"]["Status"] == "healthy"
     CHECKS.append(
-        "real PostgreSQL empty migration + V2 identity + Gateway/Dispatch with closed gate"
+        "real PostgreSQL empty migration + core start without any business identity or bot ID"
     )
+    assert not (STATE / "initial-identity.json").exists()
+    assert "initial_identity_file" not in json.loads(inputs.read_text())
+    stage("diagnose")
+    assert request("http://127.0.0.1:18765/__test/state", key_file.read_text())[1]["calls"] == []
+    assert account_diagnosis("wechat-service-not-started", "service_unavailable")
+    CHECKS.append("default diagnosis sends no model request; absent WeChat reported accurately")
     hermes_probe("success")
     gateway_ip = inspect_service("gateway")["NetworkSettings"]["Networks"]["cf-internal"][
         "IPAddress"
@@ -614,12 +710,6 @@ def main() -> None:
     )
     hermes_probe("success")
 
-    manager("wechat-dry-run", ["bash", str(WECHAT / "scripts/start-qr-login.sh"), "--dry-run"])
-    manager(
-        "wechat-synthetic-fresh-qr", ["bash", str(WECHAT / "scripts/start-qr-login.sh")], tty=True
-    )
-    assert_gate(True)
-    assert_management_isolation()
     wechat_token = TOKEN.read_text().strip()
     runtime = literal_env(GATEWAY / "runtime.env")
     port = literal_env(GATEWAY / ".env").get("CF_GATEWAY_PORT", "8080")
@@ -627,43 +717,160 @@ def main() -> None:
     admin = runtime["CF_AGENT_GATEWAY_ADMIN_TOKEN"]
     assert request(gateway_url + "/admin/messages", "invalid-credential")[0] == 401
     assert request(gateway_url + "/admin/messages", runtime["CF_GATEWAY_API_TOKEN"])[0] == 401
-    # Bootstrap mode=latest intentionally ignores history. Inject only after a
-    # successful empty poll, just as a newly sent user message arrives after QR.
-    wait(
-        lambda: request("http://127.0.0.1:6174/__test/state", wechat_token)[1]["polls"] >= 2,
-        "empty initial polling checkpoint",
+
+    def access(name: str, arguments: list[str], *, approval_file: Path | None = None) -> dict:
+        return application_json(
+            name, "cf_agent_gateway.business_access", arguments, input_file=approval_file
+        )
+
+    def archive() -> dict:
+        return request(gateway_url + "/admin/messages?limit=100", admin)[1]
+
+    def wechat_state() -> dict:
+        return request("http://127.0.0.1:6174/__test/state", wechat_token)[1]
+
+    def wechat_control(payload: dict) -> None:
+        assert request("http://127.0.0.1:6174/__test/control", wechat_token, payload)[0] == 200
+
+    def hermes_calls() -> list[dict]:
+        return request("http://127.0.0.1:18765/__test/state", key_file.read_text())[1]["calls"]
+
+    def settle_polls() -> None:
+        state = wechat_state()
+        key = json.dumps([state["account"], state["chats"][0]])
+        previous = state["conversation_polls"].get(key, 0)
+        wait(
+            lambda: wechat_state()["conversation_polls"].get(key, 0) >= previous + 2,
+            "two repeated production polls of the same conversation",
+        )
+
+    def message_with_marker(marker: str) -> dict | None:
+        return next((item for item in archive()["items"] if item["content"] == marker), None)
+
+    rejected_evidence = []
+
+    def reject_new_message(
+        label: str, *, local_id: int | None = None, conversation_id: str | None = None
+    ) -> dict:
+        previous_calls = len(hermes_calls())
+        previous_deliveries = len(wechat_state()["deliveries"])
+        marker = "clean-device-A-" + label + "-" + secrets.token_hex(8)
+        payload = {"message": marker}
+        if local_id is not None:
+            payload["local_id"] = local_id
+        if conversation_id is not None:
+            payload["conversation_id"] = conversation_id
+        wechat_control(payload)
+        message = wait(lambda: message_with_marker(marker), "persisted unapproved message")
+
+        def completed_status():
+            details = access("business-" + label, ["status", "--message-id", str(message["id"])])
+            outcome = details.get("historical_admission")
+            return details if outcome and outcome["state"] == "completed" else None
+
+        details = wait(completed_status, "completed unapproved message admission")
+        assert details["permitted"] is False
+        assert details["historical_admission"]["admitted"] is False
+        settle_polls()
+        current = message_with_marker(marker)
+        assert current["dispatch_status"] is None and current["response_id"] is None
+        assert len(hermes_calls()) == previous_calls
+        assert len(wechat_state()["deliveries"]) == previous_deliveries
+        rejected_evidence.append({"label": label, "message": current, "status": details})
+        return current
+
+    empty_business = access("business-empty-core", ["status"])
+    assert empty_business["counts"]["configured_identity_route_pairs"] == 0
+    assert archive()["total"] == 0
+    before_login_calls = len(hermes_calls())
+    manager("wechat-dry-run", ["bash", str(WECHAT / "scripts/start-qr-login.sh"), "--dry-run"])
+    discovered = synthetic_fresh_qr(wechat_token)
+    account_id = discovered["account_id"]
+    assert_gate(True)
+    assert_management_isolation()
+    assert len(hermes_calls()) == before_login_calls
+    settle_polls()  # Establish the empty latest-history checkpoint after actual login.
+    CHECKS.append(
+        "core and real Gate start without identity; explicit auth discovers current account"
     )
-    marker = "clean-device-A-" + secrets.token_hex(12)
-    request("http://127.0.0.1:6174/__test/control", wechat_token, {"message": marker})
-    deliveries = wait(
-        lambda: request(gateway_url + "/admin/deliveries", admin)[1]["items"],
-        "text delivery outbox",
+
+    unapproved = reject_new_message("before-approval")
+    assert unapproved["source_account_id"] == account_id
+    discovery = access("business-discover", ["discover", "--limit", "50"])
+    candidate = next(item for item in discovery["items"] if item["message_id"] == unapproved["id"])
+    assert candidate["source_account_id"] == account_id and candidate["permitted"] is False
+    assert candidate["sender_id"] == unapproved["sender_id"]
+    CHECKS.append(
+        "discovered unapproved account/sender creates no authorization, model call or reply"
     )
+
+    # This operator approval file is first created after observed login/admission.
+    # Bot, sender and conversation IDs are derived by the formal business command.
+    approval = inputs_dir / "approved-business.json"
+    approval.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profile": {
+                    "profile_key": "clean-device",
+                    "revision": 1,
+                    "provider": "hermes",
+                    "external_profile_ref": "profiles/clean-device/1",
+                    "model": "synthetic-A",
+                },
+                "identity": {"employee_id": "clean-device-operator", "display_name": "A operator"},
+            }
+        )
+    )
+    os.chown(approval, 0, 10001)
+    approval.chmod(0o640)
+    approved = access(
+        "business-approve",
+        [
+            "approve",
+            "--message-id",
+            str(unapproved["id"]),
+            "--input",
+            "/run/approved-business.json",
+        ],
+        approval_file=approval,
+    )
+    assert approved["permitted"] is True and approved["replayed_messages"] == 0
+    assert approved["source_account_id"] == account_id
+    settle_polls()
+    assert message_with_marker(unapproved["content"])["dispatch_status"] is None
+    assert not any(
+        call["request"]["messages"][0]["content"] == unapproved["content"]
+        for call in hermes_calls()
+    )
+    assert wechat_state()["deliveries"] == []
+
+    marker = "clean-device-A-approved-" + secrets.token_hex(12)
+    wechat_control({"message": marker})
+    message = wait(lambda: message_with_marker(marker), "approved message archive")
     wait(
-        lambda: (
-            request(gateway_url + "/admin/deliveries", admin)[1]["items"][0]["status"]
-            == "delivered"
+        lambda: any(
+            item["message_id"] == message["id"] and item["status"] == "delivered"
+            for item in request(gateway_url + "/admin/deliveries", admin)[1]["items"]
         ),
-        "text delivery completion",
+        "approved text delivery completion",
     )
-    time.sleep(9)  # At least two subsequent production polling intervals replay the same message.
-    messages = request(gateway_url + "/admin/messages", admin)[1]
-    assert messages["total"] == 1
-    message = messages["items"][0]
-    assert message["content"] == marker and message["identity_id"] and message["ai_thread_id"]
-    assert message["dispatch_status"] == "success" and message["response_id"]
+    settle_polls()
+    message = message_with_marker(marker)
+    assert message["identity_id"] and message["ai_thread_id"]
+    assert message["dispatch_status"] == "success" and message["response_status"] == "delivered"
     deliveries = request(gateway_url + "/admin/deliveries", admin)[1]["items"]
-    assert len(deliveries) == 1 and deliveries[0]["status"] == "delivered"
-    assert deliveries[0]["message_id"] == message["id"]
+    assert len(deliveries) == 1 and deliveries[0]["message_id"] == message["id"]
     thread = request(gateway_url + "/admin/threads/" + message["ai_thread_id"], admin)[1]
     assert thread["agent_profile_id"] and thread["hermes_thread_id"]
     assert thread["delivery_summary"]["delivered"] == 1
-    external = request("http://127.0.0.1:6174/__test/state", wechat_token)[1]
+    external = wechat_state()
     assert external["deliveries"] == [
-        {"chatId": "wxid_clean_device_operator", "text": f"Synthetic reply: {marker}"}
+        {"chatId": message["conversation_id"], "text": f"Synthetic reply: {marker}"}
     ]
-    calls = request("http://127.0.0.1:18765/__test/state", key_file.read_text())[1]["calls"]
-    marker_calls = [call for call in calls if call["request"]["messages"][0]["content"] == marker]
+    marker_calls = [
+        call for call in hermes_calls() if call["request"]["messages"][0]["content"] == marker
+    ]
     assert len(marker_calls) == 1
     (EVIDENCE / "text-chain.json").write_text(
         json.dumps(
@@ -675,20 +882,140 @@ def main() -> None:
                 "external": external,
                 "synthetic_hermes_execution_records": marker_calls,
                 "counts": {
-                    "gateway_messages": messages["total"],
+                    "gateway_messages": sum(
+                        item["content"] == marker for item in archive()["items"]
+                    ),
                     "gateway_delivery_records": len(deliveries),
                     "synthetic_wechat_text_deliveries": len(external["deliveries"]),
                     "synthetic_hermes_model_executions_for_marker": len(marker_calls),
                 },
+                "previously_rejected_message_id": unapproved["id"],
+                "previously_rejected_message_replayed": False,
             },
             indent=2,
         )
     )
+    CHECKS.append("formal approval never replays rejection; only a new text executes/delivers once")
+
+    unbound_conversation = message["conversation_id"] + "_unbound"
+    wechat_control({"conversation_id": unbound_conversation})
+    wait(
+        lambda: (
+            wechat_state()["conversation_polls"].get(
+                json.dumps([account_id, unbound_conversation]), 0
+            )
+            >= 2
+        ),
+        "unbound conversation empty checkpoint",
+    )
+    unbound = reject_new_message("missing-route", conversation_id=unbound_conversation)
+    assert unbound["sender_id"] == message["sender_id"]
+    calls_before_route = len(hermes_calls())
+    route_approval = access(
+        "business-bind-observed-conversation",
+        ["approve", "--message-id", str(unbound["id"]), "--input", "/run/approved-business.json"],
+        approval_file=approval,
+    )
+    assert route_approval["permitted"] is True and route_approval["replayed_messages"] == 0
+    assert route_approval["historical_admission"]["admitted"] is False
+    settle_polls()
+    assert message_with_marker(unbound["content"])["dispatch_status"] is None
+    assert len(hermes_calls()) == calls_before_route and len(wechat_state()["deliveries"]) == 1
+    (EVIDENCE / "unconfigured-route.json").write_text(
+        json.dumps(
+            {
+                "rejected_message": unbound,
+                "binding_approval": route_approval,
+                "replayed_messages": 0,
+                "synthetic_external_services": True,
+            },
+            indent=2,
+        )
+    )
+    CHECKS.append("mapped sender without route is durably rejected; later binding never replays it")
+
+    original_checkpoints = checkpoint_evidence("checkpoints-before-relogin")
+    original_total = archive()["total"]
+    original_calls = len(hermes_calls())
+    account_states = []
+    for label, update, expected in (
+        ("logged-out", {"auth": "logged_out"}, "not_logged_in"),
+        ("missing-account", {"auth": "logged_in", "account_present": False}, "invalid_account"),
+        ("malformed-account", {"account": {"unexpected": "identifier"}}, "invalid_account"),
+        ("wrong-token", {"account": account_id, "mode": "reject_auth"}, "token_error"),
+    ):
+        wechat_control(update)
+        state = account_diagnosis("wechat-" + label, expected)
+        # Let any already-started authenticated poll finish, then prove invalid
+        # authentication cannot fetch new message batches on subsequent ticks.
+        time.sleep(4)
+        before_invalid_polls = wechat_state()["polls"]
+        before_auth_requests = wechat_state()["auth_requests"]
+        wait(
+            lambda previous=before_auth_requests: wechat_state()["auth_requests"] >= previous + 2,
+            "invalid auth observations",
+        )
+        assert wechat_state()["polls"] == before_invalid_polls
+        assert len(hermes_calls()) == original_calls and len(wechat_state()["deliveries"]) == 1
+        account_states.append({"case": label, "diagnosis": state, "polls_unchanged": True})
+    wechat_control({"auth": "logged_in", "account": account_id, "mode": "normal"})
+    account_diagnosis("wechat-same-account-relogin", "authenticated")
+    settle_polls()
+    assert checkpoint_evidence("checkpoints-after-relogin") == original_checkpoints
+    assert archive()["total"] == original_total and len(hermes_calls()) == original_calls
     CHECKS.append(
-        "unique text: real admission/profile/authorization/dispatch/response/delivery; dedup"
+        "missing/malformed/auth failures fail closed; same-account relogin retains checkpoint/dedup"
     )
 
+    second_account = account_id + "_second"
+    wechat_control({"account": second_account})
+    second_discovery = account_diagnosis("wechat-second-account", "authenticated")
+    assert second_discovery["account_id"] == second_account
+    wait(
+        lambda: wechat_state()["account_polls"].get(json.dumps(second_account), 0) >= 2,
+        "new account empty checkpoint",
+    )
+    switched = reject_new_message("other-account", local_id=1)
+    assert switched["source_account_id"] == second_account
+    switched_status = access(
+        "business-second-account", ["status", "--message-id", str(switched["id"])]
+    )
+    assert switched_status["enterprise_identity_id"] is None
+    assert switched_status["ai_thread_id"] is None
+    switched_checkpoints = checkpoint_evidence("checkpoints-two-accounts")
+    old_rows = [row for row in switched_checkpoints if row["account_id"] == account_id]
+    new_rows = [row for row in switched_checkpoints if row["account_id"] == second_account]
+    assert old_rows == original_checkpoints and len(new_rows) == 1
+    assert new_rows[0]["last_local_id"] == 1 and old_rows[0]["last_local_id"] > 1
+    assert new_rows[0]["id"] != old_rows[0]["id"]
+    assert message_with_marker(marker)["ai_thread_id"] == thread["id"]
+    wechat_control({"account": account_id})
+    account_diagnosis("wechat-return-original-account", "authenticated")
+    settle_polls()
+    assert len(hermes_calls()) == original_calls and len(wechat_state()["deliveries"]) == 1
+    (EVIDENCE / "account-isolation.json").write_text(
+        json.dumps(
+            {
+                "synthetic": True,
+                "states": account_states,
+                "original_checkpoints": original_checkpoints,
+                "switched_checkpoints": switched_checkpoints,
+                "second_account_business_status": switched_status,
+                "old_thread_retained": thread["id"],
+            },
+            indent=2,
+        )
+    )
+    CHECKS.append("account switch retains separate checkpoint, authorization and thread history")
+
+    disabled = access("business-disable", ["disable", "--employee-id", "clean-device-operator"])
+    assert disabled["enabled"] is False and disabled["replayed_messages"] == 0
+    reject_new_message("after-disable")
     before = snapshot()
+    business_before = access(
+        "business-disabled-state", ["status", "--message-id", str(message["id"])]
+    )
+    assert business_before["permitted"] is False
     conflict = inputs_dir / "conflict.json"
     conflicting = json.loads(inputs.read_text())
     conflicting["hermes_model"] = "deliberately-conflicting-A-input"
@@ -696,14 +1023,40 @@ def main() -> None:
     conflict.chmod(0o600)
     stage("configure", succeeds=False, extra=["--inputs", str(conflict)])
     assert before == snapshot()
+    total_before_rerun = archive()["total"]
     stage("configure", extra=["--inputs", str(inputs)])
     stage("database")
     stage("migrate")
     stage("initialize")
-    assert before == snapshot()
-    assert request(gateway_url + "/admin/messages", admin)[1]["total"] == 1
+    stage("start")
+    stage("diagnose")
+    assert before == snapshot() and archive()["total"] == total_before_rerun
+    assert (
+        access("business-after-rerun", ["status", "--message-id", str(message["id"])])
+        == business_before
+    )
+    assert len(hermes_calls()) == original_calls
+    reject_new_message("after-rerun")
+    expected_archive_total = archive()["total"]
+    (EVIDENCE / "business-onboarding.json").write_text(
+        json.dumps(
+            {
+                "empty_business": empty_business,
+                "discovery": discovery,
+                "approval": approved,
+                "disabled": disabled,
+                "disabled_status_retained_after_install": business_before,
+                "rejected_messages": rejected_evidence,
+                "archive_total": expected_archive_total,
+                "business_model_executions": 1,
+                "business_deliveries": 1,
+                "synthetic_external_services": True,
+            },
+            indent=2,
+        )
+    )
     CHECKS.append(
-        "repeat configuration/database/migration/identity retains credentials/config/data"
+        "formal disable rejects new text; base rerun retains authorization state, secrets and data"
     )
     manager("wechat-stop", ["bash", str(WECHAT / "scripts/stop-qr-runtime.sh")])
     assert_gate(False)
@@ -722,7 +1075,9 @@ def main() -> None:
     stage("database")
     stage("migrate")
     wait(
-        lambda: request(gateway_url + "/admin/messages", admin)[1]["total"] == 1,
+        lambda: (
+            request(gateway_url + "/admin/messages", admin)[1]["total"] == expected_archive_total
+        ),
         "PostgreSQL restart persistence",
     )
     assert inspect_service("dispatch-worker")["Id"] == dispatch_before

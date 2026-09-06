@@ -12,6 +12,7 @@ class AdmissionReason(StrEnum):
     SYSTEM_MESSAGE = "system_message"
     SENDER_UNRESOLVED = "sender_unresolved"
     ACCESS_DENIED = "access_denied"
+    ROUTE_UNAVAILABLE = "route_unavailable"
     LEGACY_UNRESOLVED = "legacy_unresolved"
 
 

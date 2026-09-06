@@ -126,7 +126,6 @@ def test_pty_preserves_partial_output_across_timeout_and_requires_complete_evide
         "configure",
         "database",
         "migrate",
-        "initialize",
         "start",
         "diagnose",
         "boot-service",
@@ -209,3 +208,18 @@ def test_embedded_guest_scripts_are_valid_python(harness, tmp_path, monkeypatch)
     harness.verify_clean_guest(tmp_path, 22022)
     harness.guest_build_evidence(tmp_path, 22022)
     harness.guest_secrets(tmp_path, 22022)
+
+
+def test_vm_base_inputs_contain_no_robot_or_business_identity(harness, tmp_path):
+    paths = harness.input_files(tmp_path, 8765, "only-a-test-key")
+    assert {path.name for path in paths} == {"hermes-key", "inputs.json"}
+    values = json.loads((tmp_path / "inputs.json").read_text())
+    assert set(values) == {
+        "version",
+        "hermes_url",
+        "hermes_model",
+        "hermes_api_key_file",
+        "database",
+    }
+    assert "initial_identity_file" not in values
+    assert not (tmp_path / "identity.json").exists()

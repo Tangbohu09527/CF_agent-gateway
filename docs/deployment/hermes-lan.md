@@ -80,7 +80,7 @@ Get-NetTCPConnection -State Listen -LocalPort $hermesPort |
 
 ## 4. 从真实 Gateway 容器逐层验证
 
-先按正式安装入口完成数据库迁移、最小业务身份/授权/V2 Profile 与私聊路由初始化及检查，再启动 Gateway/Dispatch，Poll/Delivery 保持关闭。初始化所需的批准 `account_id`、`sender_id`、私聊 `chatId` 必须在 fresh QR 前已知；未知时遵循 [初始化入口的外部阻断说明](initial-identity.md)，不能先扫码再假定脚本会暂停等待配置。以下 Debian 命令由具有一次性部署权限的安装管理员执行；日常管理账户仍无需 root/docker 组。实际诊断进程在已有 Gateway 容器内，以 Compose 服务的 UID/GID 运行，复用其 `CF_GATEWAY_CONFIG`、网络和环境密钥。
+先按正式安装入口完成服务配置、数据库迁移和 Gateway/Dispatch 核心启动；这些步骤不依赖员工、群聊、机器人 ID 或业务路由。现有 fresh QR 可以在空业务配置下完成登录并恢复组合 Gate，账号由真实认证 API 自动取得；未经批准的消息由 Admission 拒绝。随后按[业务 CLI](initial-identity.md)发现实际消息、显式开通测试员工和路由。业务配置状态与核心/Controller readiness 分开，模型及文本验收仍须有正确来源的 Hermes 和批准测试 Profile。以下 Debian 命令由具有一次性部署权限的安装管理员执行；日常管理账户仍无需 root/docker 组。实际诊断进程在已有 Gateway 容器内，以 Compose 服务的 UID/GID 运行，复用其 `CF_GATEWAY_CONFIG`、网络和环境密钥。
 
 ```bash
 # Debian / 安装管理员；默认仅 TCP，不发 HTTP、不调用模型、不读取业务数据库
@@ -140,13 +140,13 @@ sudo docker compose --project-directory /opt/cf-agent-gateway \
 
 C 层审批后的执行顺序：
 
-1. 填完第 1 节来源清单并核对固定 Gateway/WeChat/Hermes/包装层 SHA 和镜像记录。先确认已掌握批准的机器人 `account_id`、员工 `sender_id`、私聊 `chatId`；在新隔离主机按正式入口迁移、初始化最小身份/授权/V2 Profile 与私聊路由并检查，再启动 Gateway/Dispatch，保持 Poll/Delivery 关闭。
+1. 填完第 1 节来源清单并核对固定 Gateway/WeChat/Hermes/包装层 SHA 和镜像记录。在新隔离主机按正式入口完成基础配置、迁移和 Gateway/Dispatch 核心启动，不提供机器人 ID、员工或群聊配置；独立业务诊断应显示待配置。
 2. 在批准 AI 测试主机配置正确服务与精确网络限制；从真实 Gateway 容器执行本页网络和获准 POST 模型探测；只有确认支持 models 端点时才另外执行可选只读认证检查。
 3. 完成服务进程和 AI 主机重启，重复上述检查；此时若 Debian 和 WeChat 未动，不强制 fresh QR。
-4. 确认初始化检查及真实 Hermes 验证均已通过后，才运行固定 WeChat 正式 fresh QR 脚本并人工扫码。该脚本在认证和消息 API 检查通过后立即调用既有 Controller 打开组合 Poll/Delivery Gate；这里没有额外的扫码后初始化暂停步骤。
+4. 核心安装完成即可运行固定 WeChat fresh QR 并人工扫码，此步骤也可在第 2、3 步前完成。认证/消息 API 检查通过后恢复组合 Gate，系统自动取得机器人账号；空业务配置下消息仍拒绝。用正式账号诊断和 business_access discover 取得实际观测，待真实 Hermes 验证通过后显式 approve 测试员工和路由，不要求扫码后额外 hold 参数。
 5. 发一条唯一标记的真实微信文本，核对 Message → Admission Allowed → Thread/Profile → Dispatch → Response → Delivery 与微信回执，重放来源事件不产生第二次模型执行或微信效果。
 6. 用获准测试请求核对错误 POST 认证、服务停止、不可达、超时与恢复；保留关联ID、状态、数量及脱敏错误码，排除业务正文、Secret、QR和Session文件。
 
-如果扫码前无法取得上述批准账号 ID，第 1 步的业务初始化和后续 fresh QR 流程必须暂停，保留为外部接口阻断。已核对的 WeChat 固定提交没有 post-auth hold 入口；所需最小配套范围见 [初始化说明](initial-identity.md)。本任务没有修改 WeChat 或实现该选项，不能用假 ID、空路由或假 ready 继续开 Gate。
+机器人 ID 不再是安装前输入，也不构成等待 hold 接口的阻断。自动发现与业务授权分开：未批准、无有效路由或已停用的请求保持持久拒绝，不调用 Hermes或业务投递；后续开通只验证新消息，历史拒绝不自动重放。Controller 的 Token/认证/heartbeat/Contract 检查和 JSON 含义保持原样。
 
 本 PR 单元测试和任何外部替身链路均属于 A 层。B 需要启动 systemd 的干净 Debian 主机及整机重启，C 需要真实微信、真实 AI 主机和正确 Hermes；本页不把上述待执行步骤写成通过记录。

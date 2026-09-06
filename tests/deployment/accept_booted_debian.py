@@ -302,7 +302,6 @@ def main() -> None:
         for name in (
             "database",
             "migrate",
-            "initialize",
             "start",
             "diagnose",
             "boot-service",
@@ -353,7 +352,7 @@ def main() -> None:
             "after_checks": [
                 "configuration/credential persistence",
                 "Docker and Gateway/Dispatch boot service",
-                "database migration and identity check",
+                "database migration and current business configuration overview",
                 "Poll/Delivery closed",
                 "WeChat waits for fresh QR",
             ],

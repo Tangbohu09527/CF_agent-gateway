@@ -5,7 +5,16 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import to_jsonable_python
 
 
@@ -16,12 +25,27 @@ class RawWechatModel(BaseModel):
 
 
 class AgentWechatAuthStatus(RawWechatModel):
-    logged_in_user: str | None = Field(default=None, alias="loggedInUser", min_length=1)
-    status: Any
+    logged_in_user: StrictStr | None = Field(
+        default=None, alias="loggedInUser", min_length=1, max_length=255, repr=False
+    )
+    status: StrictStr = Field(min_length=1, max_length=64)
+
+    @field_validator("logged_in_user", "status")
+    @classmethod
+    def validate_auth_identifier(cls, value: str | None) -> str | None:
+        if value is not None and any(
+            not character.isprintable() or character.isspace() for character in value
+        ):
+            raise ValueError(
+                "auth state and account must be printable identifiers without whitespace"
+            )
+        return value
 
     @property
     def source_account_id(self) -> str | None:
-        return self.logged_in_user
+        # The sole account source is the authenticated API field, never a nickname,
+        # configured bot ID, Linux identity, token, or remembered previous login.
+        return self.logged_in_user if self.status == "logged_in" else None
 
 
 class AgentWechatMedia(BaseModel):

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.access import AccessPolicyService, RiskLevel
@@ -14,11 +15,14 @@ from cf_agent_gateway.adapters.wechat import (
     WechatMessageType,
     WechatSenderType,
 )
+from cf_agent_gateway.admission import AdmissionReason, MessageAdmissionOutcomeStore
 from cf_agent_gateway.agent_profile import (
     AgentProfile,
+    AgentProfileStatus,
     AgentProfileStore,
-    PrivateConversationProfileNotConfiguredError,
+    GroupTypeStatus,
 )
+from cf_agent_gateway.agent_profile.errors import AgentProfileNotFoundError
 from cf_agent_gateway.context import (
     EnabledContextAccessPolicy,
     ThreadContextAccessPolicy,
@@ -37,6 +41,11 @@ from cf_agent_gateway.identity.models import EnterpriseIdentity
 from cf_agent_gateway.identity.service import IdentityService
 from cf_agent_gateway.ingestion import MessageAdmissionService
 from cf_agent_gateway.message.models import Conversation, Message
+from cf_agent_gateway.routing.errors import (
+    RouteAgentProfileUnavailableError,
+    RouteConversationTypeConflictError,
+)
+from cf_agent_gateway.routing.resolver import RouteResolver
 from cf_agent_gateway.task.model import (
     HermesDispatchRecord,
     HermesDispatchRecordStore,
@@ -456,7 +465,7 @@ def test_duplicate_v2_message_does_not_create_duplicate_thread_or_dispatch(
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
 
-def test_duplicate_archived_v2_message_without_outbox_recovers_after_binding(
+def test_unconfigured_v2_route_is_durably_denied_and_not_replayed_after_binding(
     session: Session,
 ) -> None:
     allow_gateway(session)
@@ -474,20 +483,39 @@ def test_duplicate_archived_v2_message_without_outbox_recovers_after_binding(
     )
     service = v2_service(session)
 
-    with pytest.raises(PrivateConversationProfileNotConfiguredError):
-        service.process(incoming)
+    denied = service.process(incoming)
+    assert denied.admission.reason is AdmissionReason.ROUTE_UNAVAILABLE
+    assert denied.should_create_task is False
+    stored = MessageAdmissionOutcomeStore(session).get_by_message_id(denied.message_id)
+    assert stored.state.value == "completed"
+    assert stored.policy_snapshot["route_unavailable_reason"] == (
+        "private_conversation_profile_not_configured"
+    )
+    assert stored.policy_snapshot["route_authorization"]["allowed"] is True
+    assert stored.authorization_snapshot is None
     assert session.scalar(select(func.count()).select_from(Message)) == 1
     assert session.scalar(select(func.count()).select_from(AIThread)) == 0
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
 
     profile = create_profile(session)
     bind_private_profile(session, conversation, profile)
-    recovered = service.process(incoming)
-
-    assert recovered.message_created is False
-    assert recovered.dispatch_record_id is not None
-    assert recovered.ai_thread_id is not None
-    assert session.scalar(select(func.count()).select_from(Message)) == 1
+    repeated = service.process(incoming)
+    assert repeated.message_created is False
+    assert repeated.should_create_task is False
+    assert repeated.admission.reason is AdmissionReason.ROUTE_UNAVAILABLE
+    assert repeated.dispatch_record_id is None
+    assert repeated.ai_thread_id is None
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
+    fresh = service.process(
+        message(
+            sequence=14,
+            sender_id="employee-a",
+            conversation_id=conversation.conversation_id,
+            conversation_type=WechatConversationType.PRIVATE,
+        )
+    )
+    assert fresh.should_create_task is True
+    assert session.scalar(select(func.count()).select_from(Message)) == 2
     assert session.scalar(select(func.count()).select_from(AIThread)) == 1
     assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1
 
@@ -606,3 +634,105 @@ def test_v2_worker_marks_context_unavailable_when_policy_fails_closed(
     assert metadata["thread_id"] == outcome.ai_thread_id
     assert metadata["context_available"] is False
     assert metadata["available_tools"] == []
+
+
+@pytest.mark.parametrize(
+    "configuration, expected_code",
+    [
+        ("profile_disabled", "route_agent_profile_unavailable"),
+        ("profile_archived", "route_agent_profile_unavailable"),
+        ("group_unconfigured", "unknown_group_type_not_configured"),
+        ("group_disabled", "route_group_type_unavailable"),
+        ("group_archived", "route_group_type_unavailable"),
+    ],
+)
+def test_expected_unavailable_routes_are_completed_denials(
+    session: Session, configuration: str, expected_code: str
+) -> None:
+    allow_gateway(session)
+    provision_sender(session, "employee-a")
+    is_group = configuration.startswith("group")
+    conversation = create_conversation(
+        session,
+        "unavailable@chatroom" if is_group else "unavailable-private",
+        conversation_type="group" if is_group else "private",
+    )
+    profile = create_profile(session)
+    store = AgentProfileStore(session)
+    if is_group and configuration != "group_unconfigured":
+        group_type, _ = store.create_group_type(
+            type_key="unavailable-group",
+            display_name="Unavailable group",
+            agent_profile_id=profile.id,
+            thread_policy=ThreadPolicy.GROUP_SHARED,
+            status=GroupTypeStatus(configuration.removeprefix("group_")),
+        )
+        store.bind_conversation_group_type(
+            conversation_record_id=conversation.id,
+            group_type_id=group_type.id,
+        )
+    elif not is_group:
+        bind_private_profile(session, conversation, profile)
+        store.set_agent_profile_status(
+            profile.id, AgentProfileStatus(configuration.removeprefix("profile_"))
+        )
+    incoming = message(
+        sequence=30,
+        sender_id="employee-a",
+        conversation_id=conversation.conversation_id,
+        conversation_type=WechatConversationType.GROUP
+        if is_group
+        else WechatConversationType.PRIVATE,
+    )
+    service = v2_service(session)
+    denied = service.process(incoming)
+    assert denied.admission.reason is AdmissionReason.ROUTE_UNAVAILABLE
+    stored = MessageAdmissionOutcomeStore(session).get_by_message_id(denied.message_id)
+    assert stored.state.value == "completed"
+    assert stored.policy_snapshot["route_unavailable_reason"] == expected_code
+    assert service.process(incoming).should_create_task is False
+    assert session.scalar(select(func.count()).select_from(AIThread)) == 0
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OperationalError("SELECT", {}, RuntimeError("test database unavailable")),
+        AgentProfileNotFoundError("missing-fk-target"),
+        RouteAgentProfileUnavailableError("missing-fk-target", "missing"),
+        RouteAgentProfileUnavailableError("invalid-profile", "unexpected-status"),
+        RouteConversationTypeConflictError(persisted_type="group", requested_type="private"),
+    ],
+)
+def test_database_and_route_contract_errors_remain_retryable_errors(
+    session: Session, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    allow_gateway(session)
+    provision_sender(session, "employee-a")
+    conversation = create_conversation(session, "error-private", conversation_type="private")
+    profile = create_profile(session)
+    bind_private_profile(session, conversation, profile)
+    incoming = message(
+        sequence=31,
+        sender_id="employee-a",
+        conversation_id=conversation.conversation_id,
+        conversation_type=WechatConversationType.PRIVATE,
+    )
+    original = RouteResolver.resolve
+
+    def fail_resolution(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(RouteResolver, "resolve", fail_resolution)
+    service = v2_service(session)
+    with pytest.raises(type(failure)):
+        service.process(incoming)
+    message_id = session.scalar(select(Message.id))
+    stored = MessageAdmissionOutcomeStore(session).get_by_message_id(message_id)
+    assert stored.state.value == "pending"
+    assert stored.decision is None
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
+    monkeypatch.setattr(RouteResolver, "resolve", original)
+    assert service.process(incoming).should_create_task is True
+    assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 1

@@ -381,7 +381,7 @@ class WechatPollingService:
             self._lifecycle_state.invalidate_all()
             return PollResult(logged_in=False)
 
-        source_account_id = _nonempty_string(auth_status.logged_in_user)
+        source_account_id = auth_status.source_account_id
         if source_account_id is None:
             self._lifecycle_state.invalidate_all()
             failure = PollFailure(

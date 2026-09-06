@@ -17,7 +17,15 @@ from cf_agent_gateway.access import (
 from cf_agent_gateway.admission.enums import AdmissionReason, SenderType
 from cf_agent_gateway.admission.errors import AdmissionInvariantError
 from cf_agent_gateway.admission.models import AdmissionCandidate, AdmissionOutcome
+from cf_agent_gateway.agent_profile.errors import (
+    PrivateConversationProfileNotConfiguredError,
+    UnknownGroupTypeNotConfiguredError,
+)
 from cf_agent_gateway.routing import RouteResolver
+from cf_agent_gateway.routing.errors import (
+    RouteAgentProfileUnavailableError,
+    RouteGroupTypeUnavailableError,
+)
 from cf_agent_gateway.workspace import ThreadResolver, WorkspaceService
 from cf_agent_gateway.workspace.store import WorkspaceStore
 
@@ -108,13 +116,41 @@ class AdmissionOrchestrator:
 
         workspace_service = WorkspaceService(self._session)
         if self._v2_routing_enabled:
-            route = RouteResolver(self._session).resolve(
-                source=candidate.source,
-                source_account_id=candidate.source_account_id,
-                conversation_id=candidate.conversation_id,
-                conversation_type=candidate.conversation_type.value,
-                enterprise_identity_id=enterprise_identity_id,
-            )
+            try:
+                route = RouteResolver(self._session).resolve(
+                    source=candidate.source,
+                    source_account_id=candidate.source_account_id,
+                    conversation_id=candidate.conversation_id,
+                    conversation_type=candidate.conversation_type.value,
+                    enterprise_identity_id=enterprise_identity_id,
+                )
+            except (
+                PrivateConversationProfileNotConfiguredError,
+                UnknownGroupTypeNotConfiguredError,
+                RouteAgentProfileUnavailableError,
+                RouteGroupTypeUnavailableError,
+            ) as error:
+                # Missing FK targets, unknown statuses and database failures remain errors.
+                if isinstance(
+                    error, (RouteAgentProfileUnavailableError, RouteGroupTypeUnavailableError)
+                ) and error.status not in {"disabled", "archived"}:
+                    raise
+                # Keep the successful authorization facts in the policy snapshot, but do
+                # not serialize an allowed authorization as a denied admission. The
+                # existing durable store requires both decisions to agree when present.
+                policy_references["policy_snapshot"]["route_unavailable_reason"] = error.code
+                policy_references["policy_snapshot"]["route_authorization"] = (
+                    authorization.to_dict()
+                )
+                return AdmissionOutcome(
+                    message_id=candidate.message_id,
+                    admitted=False,
+                    should_create_task=False,
+                    reason=AdmissionReason.ROUTE_UNAVAILABLE,
+                    enterprise_identity_id=enterprise_identity_id,
+                    routing_mode="v2",
+                    **policy_references,
+                )
             thread = ThreadResolver(self._session).resolve(
                 conversation=route,
                 source_account=route,

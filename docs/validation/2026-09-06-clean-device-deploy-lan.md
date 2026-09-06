@@ -1,5 +1,6 @@
 # 2026-09-06 Gateway 首次安装、WeChat 组合与 Hermes LAN 验证
 
+> 本页保留前轮固定 Head 的历史证据。本轮用户已确认安装不依赖员工或机器人 ID，原账号前置与 hold-gateway 配套建议不再是当前要求；当前行为和验收入口见[业务解耦记录](2026-09-06-business-onboarding.md)。
 本记录属于 [Gateway PR #10](https://github.com/Tangbohu09527/CF_agent-gateway/pull/10)。**A 与真实 VM 的 B 已取得固定提交的通过证据；C 未执行，正确 Hermes 来源及完整 AI 主机安装/自启教程仍缺输入，尚未达到最高真实业务验收标准。** 没有连接 CFserver 或既有 AI 主机，没有读取生产 Token、Session、数据库、备份或业务文件。未部署生产、发布镜像、创建 Tag 或合并 PR。
 
 ## 版本与文件范围

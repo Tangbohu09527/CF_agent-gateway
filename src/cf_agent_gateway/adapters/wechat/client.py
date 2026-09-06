@@ -43,6 +43,7 @@ class AgentWechatClient:
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {normalized_token}",
+                "X-Session-Id": "default",
             },
             timeout=resolved_timeout,
             transport=transport,
@@ -64,9 +65,17 @@ class AgentWechatClient:
         response = self._request("GET", "api/status/auth", operation=operation)
         payload = self._json(response, operation=operation)
         candidate = payload
+        if isinstance(payload, Mapping) and (
+            payload.get("success") is False or payload.get("error") not in (None, "")
+        ):
+            raise WechatResponseError(operation=operation)
         if isinstance(payload, Mapping) and "status" not in payload:
             candidate = payload.get("data")
-        if not isinstance(candidate, Mapping):
+        if (
+            not isinstance(candidate, Mapping)
+            or candidate.get("success") is False
+            or candidate.get("error") not in (None, "")
+        ):
             raise WechatResponseError(operation=operation)
         try:
             return AgentWechatAuthStatus.model_validate(candidate)

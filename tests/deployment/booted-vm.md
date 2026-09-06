@@ -3,7 +3,8 @@
 入口是 `bash tests/deployment/run_booted_vm.sh`；`clean-device.yml` 的独立 B job
 在一次性 GitHub-hosted Ubuntu amd64 runner 上执行。它启动自己的 Debian 内核和 PID 1
 systemd，调用仓库已有的 `accept_booted_debian.py before-reboot`，重启 guest，然后调用
-同一入口的 `after-reboot`。不能将普通 Debian 容器或能力探测文件当作 B 通过。
+同一入口的 `after-reboot`，先证明无员工/群聊配置也能安装并自动恢复核心进程。
+然后在这台已安装 VM 上显式业务开通，再第二次真实 reboot 验证授权持久化。不能将普通 Debian 容器或能力探测文件当作 B 通过。
 
 ## 固定来源与必要输入
 
@@ -21,9 +22,9 @@ systemd，调用仓库已有的 `accept_booted_debian.py before-reboot`，重启
 - cloud-init 只提供初始管理账户和临时 root SSH 公钥。管理账户 `cf-b-manager` 的 UID
   为 1100，属于标准 sudo 组，使用本轮随机密码；没有新增免密码 sudo 规则。这是 VM
   必要账户输入，不证明 Gateway system 阶段自动分配了该 UID。
-- 其余 fixture 仅提供独立随机 Hermes API Key、明确批准的最小私聊测试身份和 managed DB
-  配置输入。没有模型供应商 Key。Token、目录、网络、数据库、Gateway 配置、业务授权和
-  路由都由正式入口生成；不预先修补关键安装资产。
+- 基础输入仅提供独立随机 Hermes API Key、服务地址/模型名和 managed DB 配置。
+  不提供机器人 ID、initial_identity_file、员工、群聊或路由。没有模型供应商 Key。
+  Token、目录、网络、数据库与 Gateway 配置都由正式入口生成，不预先修补关键安装资产。
 
 [cloud-init NoCloud 文档](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html)
 说明 seed 的元数据/用户配置机制；[用户模块文档](https://docs.cloud-init.io/en/latest/reference/modules.html#users-and-groups)
@@ -53,8 +54,20 @@ ProxyCommand/ProxyJump、控制连接复用和既有 SSH 配置。PTY 自动回�
 的管理密码；标准 sudo 实际验证密码，不使用 `sudo -S` 或全局时间戳配置。
 
 Hermes 是 runner loopback 上的 **TCP-only 替身**；guest 通过 QEMU 的隔离用户网络访问。
-正式默认诊断仅建立 TCP 连接，不发送 HTTP、API 认证、微信、模型或业务请求。B 不证明
-真实 Windows/Hermes 局域网业务，也不替代 C。after-reboot 对 Docker/core 的启动状态最多
+正式默认 Hermes 诊断仅建立 TCP 连接，不发送 Hermes HTTP/API/模型请求。基础安装及第一轮重启时业务配置为空。
+
+第一轮 B 通过后，`authorization_reboot.py prepare` 才创建明确的 auth-only WeChat 替身容器，
+复用正式构建镜像、内部网络和已有受保护 Token，无 host port。机器人 ID 在替身认证响应中产生，
+通过正式账号诊断自动读取；随后将合成观测消息提交到现有受认证 `/internal/messages`，通过正式业务状态查询确认当前未获授权。
+该 API 只归档，不执行 Poll/Admission，因此 B 的历史 Admission 保持空；真实拒绝与不重放由 A 验证。正式 `business_access approve --message-id ...` 从该观测和当前认证取得
+账号/发送者/会话，只由审批文件提供员工与 Profile；不直接写 SQL 或补配置表。
+开通后该归档观测仍没有 Admission/Dispatch，不调用模型。该替身随后移除，只操作本次持有的容器 ID。
+
+第二次 guest reboot 后再次执行正式 `after-reboot` 核心检查，并用
+`authorization_reboot.py check` 比较当前业务服务返回的授权/路由/未处理归档观测与开通后快照；
+要求第二次 boot ID 变化、授权有效且未处理归档未被执行。白名单结果同时保存第一轮空业务报告与
+`authorization_reboot` 第二轮报告。后续 auth 与消息摄取是测试输入，不是实际 WeChat 轮询/扫码。
+B 不证明真实 Windows/Hermes 局域网业务，也不替代 C。after-reboot 对 Docker/core 的启动状态最多
 只读等待 240 秒，观察失败即停止，不手动启动服务修好验收。
 
 ## 证据与失败处理

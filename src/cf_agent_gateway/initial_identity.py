@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from cf_agent_gateway.access import AccessPolicyService, RiskLevel, evaluate_access
 from cf_agent_gateway.access.models import RequestFacts
 from cf_agent_gateway.access.policy_store import AccessPolicyStore
+from cf_agent_gateway.adapters.wechat.diagnose import inspect_authentication
 from cf_agent_gateway.agent_profile import AgentProfileStatus, AgentProfileStore
 from cf_agent_gateway.config import load_settings
 from cf_agent_gateway.database import check_database_migrations, create_database_engine
@@ -265,6 +266,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise InitialIdentityError("v2_routing_required", "runtime.v2_routing_enabled")
         if settings.hermes.model != config.profile.model:
             raise InitialIdentityError("hermes_model_conflict", "profile.model")
+        if not arguments.check:
+            stage = "wechat_auth"
+            authentication = inspect_authentication(settings)
+            if not authentication["authenticated"]:
+                raise InitialIdentityError("wechat_" + str(authentication["status"]), "wechat_auth")
+            if authentication["account_id"] != config.wechat.account_id:
+                raise InitialIdentityError("wechat_account_changed", "wechat_auth")
         stage = "database"
         engine = create_database_engine(settings.database.url)
         result = initialize_identity(engine, config, check_only=arguments.check)

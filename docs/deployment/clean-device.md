@@ -18,14 +18,15 @@ Gateway 的准备和下述 A 层隔离回归可以独立完成；真实 AI 主�
 | WeChat 提交 | `67cbbb04ce15703428ce165ac38effac19f4b701`；PR #7 已合并，merge commit `81d21f451adc61df71077ca3035adeddeca4621f`，本次选择已合并的审查 Head |
 | 管理账户 | 任意合法非 root 账户，例如 `cfoperator`；不在 root/docker 组，UID/所有组均与 Gateway `10001:10001`、WeChat 基线 `1000:1000` 及实际服务身份分开 |
 | WeChat 镜像 | 可拉取的完整 registry digest 和经镜像验证的服务 UID/GID，不能用管理用户名推断 |
-| Hermes | 正确来源与固定版本、批准服务 URL、模型路由名、Profile 引用/版本、独立 API Key 的受保护文件；不要传 provider Key |
-| 初始业务身份 | 一个批准员工 ID、机器人 account_id、员工 sender_id、private chatId；见 [正式初始化入口](initial-identity.md) |
+| Hermes 服务配置 | 正确来源与固定版本、批准服务 URL、模型路由名、独立 API Key 的受保护文件；不要传 provider Key。业务 Profile 引用/绑定在后续开通时提供 |
+| 业务开通（安装后） | 基础安装不需要员工名单、机器人 ID 或群聊/会话绑定。登录账号由认证 API 自动取得；从实际观测消息显式批准员工和路由，见 [业务 CLI](initial-identity.md) |
 | PostgreSQL | 默认 managed；或带独立凭据、容器可达地址和显式 TLS 的外部 `postgresql+psycopg` URL 文件 |
 | 两台设备地址 | AI URL 是安装输入；Gateway 的 LAN 地址作为 AI 主机防火墙允许来源输入，不写死现场地址 |
 
-初始账号 ID 必须来自已批准账户记录。若全新账号扫码前无法取得，当前 WeChat start 在认证/API
-通过后立即开启组合 Gate，没有已实现的 post-auth hold 入口；不能伪造 ID 或假 ready。
-[初始化说明](initial-identity.md)记录此条件下 WeChat 所需的最小配套范围，本仓库不跨库修改。
+机器人账号只来自受支持的认证 API `loggedInUser`，安装者不填写、猜测或复制旧账号 ID。
+安装、核心运行、WeChat 登录与业务开通分开：无员工/群聊授权时显示待业务配置，
+Poll/Delivery 可正常运行，但现有 Admission/路由仍拒绝未批准请求，不调用 Hermes、不产生业务回复。
+不需要新增 hold-gateway 参数；真实 Token、认证/API、heartbeat 和 Controller Contract 检查保持有效。
 
 ## 1. 从固定 GitHub 提交取得入口（新 Debian，初始 root 控制台）
 
@@ -95,12 +96,11 @@ Bootstrap 是 WeChat Token、`cf-internal`、storage/secrets/archive 目录的�
 
 ## 3. 必要配置（Debian，初始管理员/受控 sudo）
 
-用设备上的受控编辑器创建绝对路径、属主为 root 或管理账户、0600 的三个输入文件。
+用设备上的受控编辑器创建绝对路径、属主为 root 或管理账户、0600 的两个基础输入文件。
 不要把文件放在 Git、普通日志或命令参数里，不要开启 shell xtrace。
 
 1. Hermes API Key 文件：仅该 Key（16–4096 个可见非空白字符），可有末尾换行；不要输出文件。
-2. 按 `config/initial-identity.example.json` 创建初始身份 JSON，填写真实批准的账户/Profile信息。
-3. 安装 JSON，例如 `/root/cf-install-inputs.json`：
+2. 安装 JSON，例如 `/root/cf-install-inputs.json`；不包含机器人 ID、员工名单或会话路由：
 
 ```json
 {
@@ -108,12 +108,12 @@ Bootstrap 是 WeChat Token、`cf-internal`、storage/secrets/archive 目录的�
   "hermes_url": "http://REPLACE_WITH_APPROVED_AI_LAN_HOST:REPLACE_WITH_VERIFIED_PORT",
   "hermes_model": "REPLACE_WITH_VERIFIED_HERMES_MODEL",
   "hermes_api_key_file": "/root/hermes-api-key",
-  "initial_identity_file": "/root/initial-identity.json",
   "database": {"mode": "managed"}
 }
 ```
 
 这只是输入模板，未替换时不能通过安装。所有实际配置键以 `config.py` 和安装器解析为准。
+`initial_identity_file` 为兼容保留的可选业务输入；默认不提供。显式提供时仍严格检查文件权限、JSON/schema和模型匹配，错误不会当作缺省忽略；其业务初始化独立于基础安装。新设备优先在登录后按[业务 CLI](initial-identity.md)从观测消息开通，无需填写机器人 ID。
 `hermes_url` 不含 `/v1`，地址必须从 Gateway 容器可达；不能填写其自身 loopback。
 两个可选镜像输入为 `python_image`（默认 `python:3.12-slim-bookworm`）及 `postgres_image`
 （默认 `postgres:16-bookworm`）。第一次拉取后记录 registry digest，重跑只拉已记录 digest。
@@ -137,7 +137,6 @@ bash "$INSTALLER" build "${COMMON[@]}" --inputs /root/cf-install-inputs.json
 bash "$INSTALLER" configure "${COMMON[@]}" --inputs /root/cf-install-inputs.json
 bash "$INSTALLER" database "${COMMON[@]}"
 bash "$INSTALLER" migrate "${COMMON[@]}"
-bash "$INSTALLER" initialize "${COMMON[@]}"
 bash "$INSTALLER" start "${COMMON[@]}"
 bash "$INSTALLER" diagnose "${COMMON[@]}"
 ```
@@ -149,7 +148,7 @@ Admin、PostgreSQL 管理和应用凭据，原子保存并复用；Hermes API Ke
 运行，只有受限的 volume 初始化使用 root。
 
 `build` 不依赖 Hermes 凭据、数据库或业务身份，可以不传 `--inputs` 独立构建默认基础镜像。
-`configure` 先在此真实镜像内验证业务身份结构，再原子保存配置，错误输入可以修正重试。
+`configure` 在真实镜像内校验服务配置；只有显式提供业务身份文件时才同时校验它，然后原子保存配置。缺省文件不创建假身份或永久“空业务”标记。
 
 `build` 实际复用 `docker/Dockerfile`，传入已记录基础镜像 digest 与 Gateway Git SHA；
 记录依赖解析结果和实际 Image ID，正式 `.env` 使用该 ID。不会依赖旧 daemon、本地 Tag、
@@ -163,19 +162,20 @@ managed 数据库由 `deploy/postgres/compose.yml` 的独立 `cf-agent-gateway-d
 `cf-gateway-postgres:5432`，微信使用 `cf-agent-wechat:6174`。Controller、迁移和 runtime
 读取同一个正式 Compose 和 `.env`，不需要 overlay 或手动 `docker network connect`。
 
-`migrate` 针对空库迁移到打包的单一 Alembic head；`initialize` 通过现有业务 stores 的正式入口
-一次事务创建最小身份/Profile/权限/private路由。重复执行比对而不扩权，冲突/禁用状态保留并拒绝。
-`start` 先只读确认身份与可执行路由，再启动 Gateway/Dispatch；不会打开 Poll/Delivery。
-`/ready` 与容器 healthy 只证明核心状态，不能代替 Hermes、微信认证或文本闭环。
+`migrate` 针对空库迁移到打包的单一 Alembic head；`start` 检查核心配置和数据库迁移后启动
+Gateway/Dispatch，不要求员工、群聊或路由，不打开 Poll/Delivery。`diagnose` 读取当前业务服务，
+在空配置时报告 `business_state=awaiting_configuration`；这不是安装失败或业务链验收成功。
+数据库/迁移/配置损坏仍失败，`/ready` 及 Controller v1 原有含义不变。
+
+可选 `initialize` 阶段保留给显式业务开通；无输入时只查数据库并报告待配置，有输入时沿用
+原业务服务和事务校验，错误绑定、冲突或已停用策略仍失败。基础 configure/database/migrate/start/
+diagnose/boot-service 不会重新应用它，也不会恢复后来停用的员工。业务文件路径不作为基础
+安装的不可变配置条件；后续业务变更不要求重建基础配置或更换 Secret。
 
 ## 5. Hermes 验证、fresh QR 与文本（Debian 管理用户 + 批准 AI 主机）
 
-先完成 [Hermes 来源与 LAN 验证](hermes-lan.md)，从实际 Gateway 容器依次验证网络、
-认证、全部 API 字段和应用响应。默认 `diagnose` 只做网络检查；HTTP 认证检查显式启用，
-实际业务/模型调用必须 `--allow-model-call`，重复请求探测另需 `--check-replay`。
-来源/版本未知时本步骤保持未完成，不进入真实业务验收。
-
-在真实 Hermes 门禁及初始化通过后，以管理用户在受控 TTY 执行：
+基础安装完成后即可进行微信登录，不要求员工/群聊配置或先开通业务。
+以管理用户在受控 TTY 执行现有 fresh QR 流程：
 
 ```bash
 # Debian / non-root manager
@@ -189,11 +189,33 @@ bash scripts/status.sh
 认证及消息 API 后才打开 Gate；Dispatch 不归 Controller 管理。`agent-wechat` 仍为
 `restart: "no"`，Archive 不自动复用。每次 fresh QR 都通过这一入口。
 
+登录后，安装管理员使用同一正式 Compose 的一次性 `worker` 配置运行只读认证诊断；
+它继承已有 Token 挂载，只执行 CLI，不启动 Worker 主循环或改变 Gate：
+
+```bash
+# Debian / installation administrator; no model request, no Token in argv/output
+sudo docker compose --project-directory /opt/cf-agent-gateway \
+  --env-file /opt/cf-agent-gateway/.env --file /opt/cf-agent-gateway/docker-compose.prod.yml \
+  run --rm --no-deps -T worker python -m cf_agent_gateway.adapters.wechat.diagnose
+```
+
+`authenticated` 仅在真实登录账号合法时输出 `account_id`；`not_logged_in` 表示待登录，
+缺失/畸形账号、错误 Token、API 不可达分别报告，拒绝消息处理。业务状态通过安装器 `diagnose`
+或 `business_access status` 单独查看；有 Worker heartbeat 不代表已获业务授权。
+同账号重新登录复用该账号隔离状态；换账号使用独立 Checkpoint、来源事件、身份映射和线程。
+发送前也核对当前真实认证账号，旧账号投递不会经新账号发出，历史数据不自动清除。
+
+按[业务 CLI](initial-identity.md)先 `discover` 读取实际拒绝消息的稳定标识，再用
+`approve --message-id ... --input ...` 显式批准测试员工和私聊路由；审批文件只填员工与
+Profile，账号从认证 API 和实际消息来源核对取得。发现群聊不会启用群聊。
+开通前须完成[正确 Hermes 来源与 LAN 验证](hermes-lan.md)；其完整安装/自启和真实对接仍待核实。
+默认诊断没有模型费用；业务协议探测必须 `--allow-model-call`，重复探测另需 `--check-replay`。
+
 从已批准测试员工的私聊发一条新的唯一标记文本，确认真实回复仅一次。用正式 Admin 只读 API
 检查 Message→Admission/Thread→Dispatch→Response→Delivery 的关联和状态，保留脱敏结果。
 不要把 Key 放在 curl argv：可在 Gateway 容器内从已配置环境读取独立 Admin Token后请求
 `/admin/messages`、`/admin/dispatches`、`/admin/deliveries`；接口细节见 [API](../api.md)。
-未授权身份另发新标记文本应保留拒绝证据而不触发 AI。旧消息的 durable denied 不会因以后授权而重放。
+未授权身份另发新标记文本应保留拒绝证据而不触发 AI。用 `business_access disable --employee-id ...` 停用后，新消息再次拒绝；重跑基础安装不恢复授权。旧消息的 durable denied 不会因以后授权而重放。
 
 ## 6. 重跑、失败诊断与重启
 
@@ -207,7 +229,7 @@ bash scripts/status.sh
 | configure 输入或已存在配置不同 | 核对受保护文件/键/权限；重跑不会写入新的 Key，不能当轮换工具 |
 | build 失败 | 检查 registry/PyPI/磁盘；基础镜像记录保留，依赖版本记录只在成功后生成 |
 | database 认证失败 | 核对独立凭据与实际数据库；不删除 volume。自建初始角色/库的部分创建可幂等续作 |
-| migrate/initialize 失败 | 核对 schema/初始身份错误，业务事务回滚；不要手工 SQL 改权限或队列 |
+| migrate 失败 / 可选 initialize 失败 | 分别核对 schema 或显式业务输入/绑定；空员工不是迁移错误。不要手工 SQL 改权限或队列 |
 | diagnose 网络/认证/超时 | 按 Hermes 教程逐层处理；TCP成功或HTTP200不是应用成功 |
 
 详细版本记录：`/var/lib/cf-agent-gateway-install/{source-versions.json,python-image.json,`
@@ -240,8 +262,8 @@ boot 前绝无 Worker 自动运行；批准 reboot 前先正常 WeChat stop，bo
 - A：原有全量测试、Lint、Format、Compose E2E，以及 `tests/deployment/run_clean_device.sh`
   的真实 Debian 包/独立 Docker/PostgreSQL/Gateway/Controller/WeChat管理脚本组合回归。
   仅外部微信、Hermes以及普通容器缺少的 systemd观察为明确替身；不证明真实扫码/模型。
-- B：启动了 systemd 的干净 Debian 13 amd64 主机/VM正式安装与真实 reboot。
+- B：启动了 systemd 的干净 Debian 13 amd64 VM无业务输入安装与真实 reboot；随后显式业务开通并第二次 reboot 验证授权持久化。B 的后续 auth/摄取输入为明确替身，不证明真实扫码。
 - C：正确来源 Hermes 的 Windows/实际环境安装、认证/LAN/模型、真实微信扫码和唯一文本回复。
 
-本次结果、CI链接、固定SHA、具体阻断见[任务验证记录](../validation/2026-09-06-clean-device-deploy-lan.md)；
+本轮结果、CI链接、固定SHA、具体阻断见[业务解耦验证记录](../validation/2026-09-06-business-onboarding.md)；前轮证据保留于[首次安装记录](../validation/2026-09-06-clean-device-deploy-lan.md)；
 历史生产截图/日志不替代本次 A/B/C。

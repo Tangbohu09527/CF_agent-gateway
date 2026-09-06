@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
@@ -15,6 +16,8 @@ from cf_agent_gateway import initial_identity
 from cf_agent_gateway.access import AccessPolicyService, RiskLevel
 from cf_agent_gateway.access.policy_models import GatewayAccessPolicy, UserAccessPolicy
 from cf_agent_gateway.adapters.wechat import NormalizedWechatMessage, wechat_message_to_event
+from cf_agent_gateway.adapters.wechat.client import AgentWechatClient
+from cf_agent_gateway.adapters.wechat.diagnose import inspect_authentication
 from cf_agent_gateway.agent_profile import AgentProfile, AgentProfileStatus, AgentProfileStore
 from cf_agent_gateway.database import create_database_engine, initialize_database
 from cf_agent_gateway.identity.models import (
@@ -318,7 +321,11 @@ def test_conversation_configuration_preserves_existing_data(engine: Engine) -> N
 
 def cli_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: Engine) -> Path:
     config_path = tmp_path / "gateway.yaml"
-    config_path.write_text("runtime:\n  v2_routing_enabled: true\n", encoding="utf-8")
+    config_path.write_text(
+        "runtime:\n  v2_routing_enabled: true\n"
+        "wechat:\n  enabled: true\n  base_url: http://wechat.unit.invalid:6174\n",
+        encoding="utf-8",
+    )
     input_path = tmp_path / "identity.json"
     input_path.write_text(json.dumps(approved_input()), encoding="utf-8")
     monkeypatch.setenv("CF_GATEWAY_CONFIG", str(config_path))
@@ -326,10 +333,38 @@ def cli_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: Engine) 
     return input_path
 
 
+def stub_auth_transport(monkeypatch: pytest.MonkeyPatch, payload: object) -> list[str]:
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/status/auth"
+        assert request.headers["Authorization"] == "Bearer synthetic-cli-token"
+        requests.append(request.url.path)
+        return httpx.Response(200, json=payload)
+
+    def inspect(settings):
+        return inspect_authentication(
+            settings,
+            environment_reader=lambda name: (
+                "synthetic-cli-token" if name == settings.wechat.token_env else None
+            ),
+            client_factory=lambda base_url, token: AgentWechatClient(
+                base_url, token, transport=httpx.MockTransport(respond)
+            ),
+        )
+
+    monkeypatch.setattr(initial_identity, "inspect_authentication", inspect)
+    return requests
+
+
 def test_cli_uses_runtime_database_and_checks_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: Engine, capsys
 ) -> None:
     input_path = cli_inputs(tmp_path, monkeypatch, engine)
+    requests = stub_auth_transport(
+        monkeypatch, {"status": "logged_in", "loggedInUser": "wxid-test-bot"}
+    )
     assert initial_identity.main(["--input", str(input_path)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "ready"
@@ -337,6 +372,7 @@ def test_cli_uses_runtime_database_and_checks_route(
     result = json.loads(capsys.readouterr().out)
     assert result["check_only"] is True
     assert result["created_stages"] == []
+    assert requests == ["/api/status/auth"]
 
 
 @pytest.mark.parametrize(
@@ -366,3 +402,82 @@ def test_cli_does_not_echo_invalid_secret_input(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr()
     assert "never-print-this-secret" not in output.err + output.out
     assert json.loads(output.err) == {"error_code": "initial_identity_failed", "stage": "input"}
+
+
+@pytest.mark.parametrize(
+    "payload, error_code",
+    [
+        (
+            {"status": "logged_in", "loggedInUser": "different-current-account"},
+            "wechat_account_changed",
+        ),
+        ({"status": "not_logged_in"}, "wechat_not_logged_in"),
+        ({"status": "logged_in"}, "wechat_invalid_account"),
+        (
+            {"status": "logged_in", "loggedInUser": {"secret": "MUST-NOT-PRINT"}},
+            "wechat_invalid_account",
+        ),
+        ({"status": 42, "loggedInUser": "wxid-test-bot"}, "wechat_invalid_account"),
+    ],
+)
+def test_legacy_cli_rejects_unmatched_or_invalid_auth_before_creating_business_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: Engine,
+    capsys: pytest.CaptureFixture,
+    payload: object,
+    error_code: str,
+) -> None:
+    input_path = cli_inputs(tmp_path, monkeypatch, engine)
+    requests = stub_auth_transport(monkeypatch, payload)
+    assert initial_identity.main(["--input", str(input_path)]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"error_code": error_code, "stage": "wechat_auth"}
+    assert "MUST-NOT-PRINT" not in output.err
+    assert "different-current-account" not in output.err
+    assert requests == ["/api/status/auth"]
+    with Session(engine) as session:
+        for model in (AgentProfile, EnterpriseIdentity, SourceIdentityMapping, UserAccessPolicy):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
+
+
+def test_legacy_check_does_not_require_running_wechat_or_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: Engine,
+    config: InitialIdentityConfig,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    initialize_identity(engine, config)
+    input_path = cli_inputs(tmp_path, monkeypatch, engine)
+
+    def prohibited_auth(settings):
+        raise AssertionError("read-only check must not inspect authentication")
+
+    monkeypatch.setattr(initial_identity, "inspect_authentication", prohibited_auth)
+    assert initial_identity.main(["--input", str(input_path), "--check"]) == 0
+    assert json.loads(capsys.readouterr().out)["check_only"] is True
+
+
+def test_legacy_auth_unexpected_error_does_not_echo_credentials_or_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: Engine,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    input_path = cli_inputs(tmp_path, monkeypatch, engine)
+
+    def failed_auth(settings):
+        raise RuntimeError("Secret:DO-NOT-PRINT")
+
+    monkeypatch.setattr(initial_identity, "inspect_authentication", failed_auth)
+    assert initial_identity.main(["--input", str(input_path)]) == 1
+    output = capsys.readouterr()
+    assert json.loads(output.err) == {
+        "error_code": "initial_identity_failed",
+        "stage": "wechat_auth",
+    }
+    assert "DO-NOT-PRINT" not in output.out + output.err
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(EnterpriseIdentity)) == 0

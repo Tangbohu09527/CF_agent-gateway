@@ -264,7 +264,6 @@ def run_interactive(
             "configure",
             "database",
             "migrate",
-            "initialize",
             "start",
             "diagnose",
             "boot-service",
@@ -296,31 +295,12 @@ def evidence_json(payload: dict, secret_values: list[str]) -> str:
 def input_files(work: Path, port: int, hermes_key: str) -> list[Path]:
     values = {
         "hermes-key": hermes_key,
-        "identity.json": json.dumps(
-            {
-                "version": 1,
-                "profile": {
-                    "profile_key": "booted-vm",
-                    "revision": 1,
-                    "provider": "hermes",
-                    "external_profile_ref": "profiles/booted-vm/1",
-                    "model": "synthetic-B-no-call",
-                },
-                "identity": {"employee_id": "booted-vm-operator", "display_name": "B operator"},
-                "wechat": {
-                    "account_id": "wxid_booted_vm_gateway",
-                    "sender_id": "wxid_booted_vm_operator",
-                    "conversation_id": "wxid_booted_vm_operator",
-                },
-            }
-        ),
         "inputs.json": json.dumps(
             {
                 "version": 1,
                 "hermes_url": f"http://10.0.2.2:{port}",
                 "hermes_model": "synthetic-B-no-call",
                 "hermes_api_key_file": "/root/b-inputs/hermes-key",
-                "initial_identity_file": "/root/b-inputs/identity.json",
                 "database": {"mode": "managed"},
             }
         ),
@@ -559,6 +539,51 @@ def execute_vm(work: Path, gateway_commit: str, result: dict, secret_values: lis
             )
             if report.get("result") != "passed" or before == after:
                 raise VMFailure("formal_B_evidence_did_not_pass")
+            # Preserve the first empty-business reboot evidence, then explicitly
+            # onboard a synthetic observed employee through the formal business CLI.
+            result["phase"] = "post_install_formal_business_onboarding"
+            business_entry = "/opt/cf-agent-gateway/tests/deployment/authorization_reboot.py"
+            onboarding = json.loads(
+                ssh(
+                    work,
+                    ssh_port,
+                    ["python3", business_entry, "prepare"],
+                    timeout=300,
+                ).decode()
+            )
+            if onboarding["before_boot_id"] != after:
+                raise VMFailure("business_onboarding_not_after_empty_business_reboot")
+            result["phase"] = "reboot_guest_with_authorized_business"
+            with contextlib.suppress(VMFailure):
+                ssh(work, ssh_port, ["systemctl", "reboot"], timeout=30)
+            authorized_boot = wait_for_guest(work, ssh_port, process, after)
+            result["phase"] = "formal_after_authorized_reboot"
+            run_interactive(
+                work,
+                ssh_port,
+                [
+                    "python3",
+                    "/opt/cf-agent-gateway/tests/deployment/accept_booted_debian.py",
+                    "after-reboot",
+                    "--manager",
+                    MANAGER,
+                ],
+                password,
+                secret_values,
+            )
+            authorization = json.loads(
+                ssh(
+                    work,
+                    ssh_port,
+                    ["python3", business_entry, "check"],
+                    timeout=180,
+                ).decode()
+            )
+            if (
+                authorization["result"] != "passed"
+                or authorization["after_boot_id"] != authorized_boot
+            ):
+                raise VMFailure("authorized_business_reboot_evidence_did_not_pass")
             build_records = guest_build_evidence(work, ssh_port)
             result.update(
                 {
@@ -566,6 +591,7 @@ def execute_vm(work: Path, gateway_commit: str, result: dict, secret_values: lis
                     "result": "passed",
                     "phase": "complete",
                     "report": report,
+                    "authorization_reboot": authorization,
                     "synthetic_hermes_tcp_connections": service.accepted,
                 }
             )
@@ -618,7 +644,10 @@ def main() -> int:
             "fixed WeChat Bootstrap",
             "password-authenticated manager",
         ],
-        "synthetic": ["Hermes TCP listener only; no API, model or business request"],
+        "synthetic": [
+            "Hermes TCP listener only; no model request",
+            "post-install WeChat auth-only fixture and synthetic internal message intake",
+        ],
         "C": "pending separately approved real WeChat, Windows AI and Hermes acceptance",
     }
     secret_values = []
