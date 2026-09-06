@@ -3585,11 +3585,11 @@ def test_normalization_failure_stops_chat_without_advancing(
     assert checkpoint(checkpoint_store).last_local_id == 1  # type: ignore[union-attr]
 
 
-def test_chat_id_precedes_username_and_name_is_display_only(
+def test_agreeing_chat_aliases_keep_name_display_only(
     checkpoint_store: WechatSyncCheckpointStore,
 ) -> None:
     client = FakeWechatClient(
-        chats=[{"id": CHAT_ID, "username": "wrong-fallback", "name": "Alice Display"}],
+        chats=[{"id": CHAT_ID, "username": CHAT_ID, "name": "Alice Display"}],
         messages={CHAT_ID: [raw_message(1)]},
     )
     sink = RecordingSink()
@@ -3602,6 +3602,89 @@ def test_chat_id_precedes_username_and_name_is_display_only(
     assert sink.handled[0].conversation_id == CHAT_ID
     assert sink.handled[0].conversation_name == "Alice Display"
     assert result.chat_results[0].conversation_name == "Alice Display"
+
+
+@pytest.mark.parametrize("field", ["id", "chatId", "chat_id", "userName", "username"])
+def test_documented_chat_identity_alias_polls_the_physical_conversation(
+    checkpoint_store: WechatSyncCheckpointStore,
+    field: str,
+) -> None:
+    client = FakeWechatClient(
+        chats=[{field: f" {CHAT_ID} ", "name": "Display only"}],
+        messages={CHAT_ID: [raw_message(1)]},
+    )
+    sink = RecordingSink()
+    result = WechatPollingService(
+        client, checkpoint_store, sink, bootstrap_mode="backfill"
+    ).poll_once()
+
+    assert result.chats_succeeded == 1 and result.messages_processed == 1
+    assert client.list_message_calls == [CHAT_ID]
+    assert sink.handled[0].conversation_id == CHAT_ID
+    assert checkpoint(checkpoint_store).last_local_id == 1  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("invalid_id", [None, 123, True, {}, [], " "])
+def test_non_string_or_empty_id_does_not_override_a_valid_chat_id_alias(
+    checkpoint_store: WechatSyncCheckpointStore,
+    invalid_id: object,
+) -> None:
+    client = FakeWechatClient(
+        chats=[{"id": invalid_id, "chatId": CHAT_ID}],
+        messages={CHAT_ID: [raw_message(1)]},
+    )
+    sink = RecordingSink()
+    result = WechatPollingService(
+        client, checkpoint_store, sink, bootstrap_mode="backfill"
+    ).poll_once()
+
+    assert result.chats_succeeded == 1
+    assert client.list_message_calls == [CHAT_ID]
+    assert sink.handled[0].conversation_id == CHAT_ID
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"id": CHAT_ID, "chatId": "another-chat"},
+        {"id": CHAT_ID, "username": "another-chat"},
+        {"chatId": CHAT_ID, "chat_id": "another-chat"},
+        {"userName": CHAT_ID, "username": "another-chat"},
+        {"id": "123", "chatId": CHAT_ID},
+    ],
+)
+def test_conflicting_chat_identity_aliases_fail_closed(
+    checkpoint_store: WechatSyncCheckpointStore,
+    fields: dict[str, str],
+) -> None:
+    client = FakeWechatClient(chats=[fields], messages={CHAT_ID: [raw_message(1)]})
+    sink = RecordingSink()
+    result = WechatPollingService(
+        client, checkpoint_store, sink, bootstrap_mode="backfill"
+    ).poll_once()
+
+    assert result.chats_failed == 1
+    assert result.failures[0].stage is PollFailureStage.PARSE_CHAT
+    assert result.failures[0].code == "wechat_chat_identity_error"
+    assert client.list_message_calls == [] and sink.attempts == []
+    assert checkpoint(checkpoint_store) is None
+
+
+@pytest.mark.parametrize("field", ["id", "chatId", "chat_id", "userName", "username"])
+@pytest.mark.parametrize("invalid_id", [None, 123, True, {}, [], " "])
+def test_invalid_chat_identity_alias_does_not_fetch_messages_or_create_checkpoint(
+    checkpoint_store: WechatSyncCheckpointStore,
+    field: str,
+    invalid_id: object,
+) -> None:
+    client = FakeWechatClient(chats=[{field: invalid_id}])
+    sink = RecordingSink()
+    result = WechatPollingService(client, checkpoint_store, sink).poll_once()
+
+    assert result.chats_failed == 1 and result.messages_processed == 0
+    assert result.failures[0].code == "wechat_chat_identity_error"
+    assert client.list_message_calls == [] and sink.attempts == []
+    assert checkpoint(checkpoint_store) is None
 
 
 def test_username_is_used_when_chat_id_is_missing(

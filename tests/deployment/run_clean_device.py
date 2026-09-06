@@ -44,12 +44,60 @@ COMPOSE = [
 CHECKS: list[str] = []
 
 
+def private_values() -> list[str]:
+    values = []
+    for path in (
+        TOKEN,
+        Path("/root/a-manager-password"),
+        Path("/root/acceptance-inputs/hermes-key"),
+        Path("/var/lib/cf-agent-gateway-postgres/postgres-password"),
+        Path("/var/lib/cf-agent-gateway-postgres/app-password"),
+    ):
+        if path.is_file():
+            values.append(path.read_text().strip())
+    generated = STATE / "secrets.json"
+    if generated.is_file():
+        values.extend(
+            value for value in json.loads(generated.read_text()).values() if isinstance(value, str)
+        )
+    runtime_file = GATEWAY / "runtime.env"
+    if runtime_file.is_file():
+        values.extend(literal_env(runtime_file).values())
+    return sorted((value for value in values if value), key=len, reverse=True)
+
+
+def redact_output(output: str) -> str:
+    for value in private_values():
+        output = output.replace(value, "[redacted A credential]")
+    return output
+
+
+def preserve_runtime_evidence() -> None:
+    if (GATEWAY / ".env").is_file():
+        try:
+            logs = subprocess.run(
+                [*COMPOSE, "logs", "--no-color"], capture_output=True, text=True, timeout=30
+            )
+            (EVIDENCE / "runtime-final.log").write_text(redact_output(logs.stdout + logs.stderr))
+        except subprocess.TimeoutExpired:
+            (EVIDENCE / "runtime-final.log").write_text("runtime log collection timed out\n")
+    # Scan on both success and failure, including management output and earlier
+    # stage logs. Only sanitized A evidence leaves the disposable root filesystem.
+    for path in EVIDENCE.iterdir():
+        if path.is_file():
+            original = path.read_text(errors="replace")
+            sanitized = redact_output(original)
+            if sanitized != original:
+                path.write_text(sanitized)
+            assert not any(value in sanitized for value in private_values())
+
+
 def run(
     name: str, command: list[str], *, succeeds: bool = True, timeout: int = 1200
 ) -> subprocess.CompletedProcess[str]:
     print(f"A: {name}", flush=True)
     result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-    (EVIDENCE / f"{name}.log").write_text(result.stdout + result.stderr)
+    (EVIDENCE / f"{name}.log").write_text(redact_output(result.stdout + result.stderr))
     if (result.returncode == 0) != succeeds:
         raise AssertionError(f"{name}: unexpected exit {result.returncode}; see stage log")
     return result
@@ -468,6 +516,9 @@ def main() -> None:
     message = messages["items"][0]
     assert message["content"] == marker and message["identity_id"] and message["ai_thread_id"]
     assert message["dispatch_status"] == "success" and message["response_id"]
+    deliveries = request(gateway_url + "/admin/deliveries", admin)[1]["items"]
+    assert len(deliveries) == 1 and deliveries[0]["status"] == "delivered"
+    assert deliveries[0]["message_id"] == message["id"]
     thread = request(gateway_url + "/admin/threads/" + message["ai_thread_id"], admin)[1]
     assert thread["agent_profile_id"] and thread["hermes_thread_id"]
     assert thread["delivery_summary"]["delivered"] == 1
@@ -552,6 +603,7 @@ if __name__ == "__main__":
         main()
         result = "passed"
     finally:
+        preserve_runtime_evidence()
         for name in (
             "gateway-image.json",
             "python-image.json",
