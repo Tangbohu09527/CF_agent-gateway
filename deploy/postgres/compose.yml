@@ -1,0 +1,53 @@
+# Independent database project. Runtime/Controller never stop or remove it.
+name: cf-agent-gateway-db
+services:
+  postgres:
+    image: ${CF_POSTGRES_IMAGE:?Run the database stage to record the registry digest}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      TZ: UTC
+    volumes:
+      - data:/var/lib/postgresql/data
+      - type: bind
+        source: ${CF_POSTGRES_ROOT:?}/postgres-password
+        target: /run/secrets/postgres-password
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CF_POSTGRES_ROOT:?}/app-password
+        target: /run/secrets/app-password
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CF_POSTGRES_ROOT:?}/init-app.sh
+        target: /docker-entrypoint-initdb.d/10-gateway.sh
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      default:
+        aliases:
+          - cf-gateway-postgres
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '3'
+    # Deliberately no published database port.
+volumes:
+  data:
+networks:
+  default:
+    external: true
+    name: cf-internal

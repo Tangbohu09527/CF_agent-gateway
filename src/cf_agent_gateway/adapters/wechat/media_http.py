@@ -137,6 +137,7 @@ class WechatHttpMediaSender(WechatHttpMessageSender):
         operation: str,
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
+        self._verify_current_account()
         response: httpx.Response | None = None
         failure: str | None = None
         try:

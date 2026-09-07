@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "profile": {
+    "profile_key": "initial-text-assistant",
+    "revision": 1,
+    "provider": "hermes",
+    "external_profile_ref": "REPLACE_WITH_VERIFIED_HERMES_PROFILE_REFERENCE",
+    "model": "REPLACE_WITH_VERIFIED_HERMES_MODEL"
+  },
+  "identity": {
+    "employee_id": "REPLACE_WITH_APPROVED_EMPLOYEE_ID",
+    "display_name": "REPLACE_WITH_APPROVED_DISPLAY_NAME"
+  },
+  "wechat": {
+    "account_id": "REPLACE_WITH_WECHAT_BOT_ACCOUNT_ID",
+    "sender_id": "REPLACE_WITH_APPROVED_WECHAT_SENDER_ID",
+    "conversation_id": "REPLACE_WITH_PRIVATE_CHAT_ID"
+  }
+}

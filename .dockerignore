@@ -13,3 +13,7 @@ __pycache__
 build
 dist
 htmlcov
+.task-deps
+.task-artifacts
+runtime.env
+config/*.local.yaml

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -66,10 +69,13 @@ def test_continuous_heartbeat_proof_requires_multiple_complete_renewals(
 def test_stale_heartbeat_proof_pauses_running_file_until_it_ages_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frozen = _heartbeat_set(0)
-    recovered = _heartbeat_set(1)
+    before = _heartbeat_set(0)
+    frozen = _heartbeat_set(1)
+    recovered = _heartbeat_set(2)
     commands: list[list[str]] = []
-    heartbeat_reads = iter((frozen, frozen))
+    # A heartbeat may advance while Docker is still processing pause.
+    heartbeat_reads = iter((before, frozen, frozen))
+    recovery_baselines: list[dict[str, dict[str, Any]]] = []
 
     def run(
         arguments: list[str],
@@ -93,11 +99,19 @@ def test_stale_heartbeat_proof_pauses_running_file_until_it_ages_and_recovers(
         "_wait_for_component_status",
         lambda *args, **kwargs: {"status": "degraded"},
     )
-    monkeypatch.setattr(
-        runner,
-        "_wait_for_heartbeat_advances",
-        lambda *args, **kwargs: recovered,
-    )
+
+    def advance(
+        compose: list[str],
+        environment: dict[str, str],
+        previous: dict[str, dict[str, Any]],
+        **kwargs: object,
+    ) -> dict[str, dict[str, Any]]:
+        del compose, environment
+        assert kwargs["names"] == ("dispatch-worker-heartbeat.json",)
+        recovery_baselines.append(previous)
+        return recovered
+
+    monkeypatch.setattr(runner, "_wait_for_heartbeat_advances", advance)
     monkeypatch.setattr(runner, "_wait_for_healthy", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         runner,
@@ -109,6 +123,7 @@ def test_stale_heartbeat_proof_pauses_running_file_until_it_ages_and_recovers(
 
     assert commands[0][-2:] == ["pause", "dispatch-worker"]
     assert commands[1][-2:] == ["unpause", "dispatch-worker"]
+    assert recovery_baselines == [frozen]
 
 
 @pytest.mark.parametrize("exit_code", [1, 137, 143])
@@ -192,3 +207,96 @@ def test_cleanup_retries_and_verifies_resources_on_every_path(
     )
     runner._cleanup_project([], {}, "successful-project")
     assert verifications == ["failed-project", "successful-project"]
+
+
+def test_controller_fixture_uses_effective_isolated_compose_and_unchanged_controller(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    compose = ["docker", "compose", "--file", "production", "--file", "e2e"]
+    environment = {"COMPOSE_PROJECT_NAME": "isolated-e2e"}
+    rendered = {
+        "name": "isolated-e2e",
+        "services": {
+            "worker": {
+                "environment": {"SENTINEL": "fixture-private-value"},
+                "volumes": [
+                    {"source": "/absolute/auth-token", "target": runner.TOKEN_CONTAINER_PATH}
+                ],
+                "networks": {"default": None},
+            },
+            "postgres": {"networks": {"default": None}},
+        },
+        "networks": {"default": {"name": "isolated-e2e_default", "external": False}},
+        "volumes": {"runtime-heartbeats": {"name": "isolated-e2e_runtime-heartbeats"}},
+    }
+    commands = []
+
+    def run(arguments, **kwargs):
+        commands.append((arguments, kwargs))
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(rendered), "")
+
+    monkeypatch.setattr(runner, "_run", run)
+    fixture = tmp_path / "controller-root"
+    controller = runner._prepare_runtime_control_fixture(compose, environment, fixture)
+    assert commands == [
+        (
+            compose + ["config", "--format", "json"],
+            {
+                "environment": environment,
+                "capture_output": True,
+            },
+        )
+    ]
+    assert controller == fixture / "deploy" / "wechat-runtime-control"
+    assert controller.read_bytes() == runner.RUNTIME_CONTROL.read_bytes()
+    actual = json.loads((fixture / "docker-compose.prod.yml").read_text())
+    assert actual == rendered
+    if os.name == "posix":
+        assert stat.S_IMODE(fixture.stat().st_mode) == 0o700
+        assert stat.S_IMODE((fixture / "docker-compose.prod.yml").stat().st_mode) == 0o600
+        assert stat.S_IMODE(controller.stat().st_mode) == 0o755
+    assert "fixture-private-value" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "network",
+    [
+        {"name": "cf-internal", "external": True},
+        {"name": "other-project_default", "external": False},
+    ],
+)
+def test_controller_fixture_refuses_a_shared_or_different_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, network: dict
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["compose", "config"],
+            0,
+            json.dumps({"networks": {"default": network}}),
+            "",
+        ),
+    )
+    fixture = tmp_path / "controller-root"
+    with pytest.raises(AssertionError, match="isolated project network"):
+        runner._prepare_runtime_control_fixture(
+            [], {"COMPOSE_PROJECT_NAME": "isolated-e2e"}, fixture
+        )
+    assert not fixture.exists()
+
+
+def test_runtime_control_invocation_uses_prepared_fixed_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands = []
+
+    def run(arguments, **kwargs):
+        commands.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "{}", "")
+
+    monkeypatch.setattr(runner, "_run", run)
+    controller = tmp_path / "deploy" / "wechat-runtime-control"
+    runner._run_runtime_control("start", {}, timeout_seconds=30, runtime_control=controller)
+    assert commands[0][-4:] == [str(controller), "start", "--timeout-seconds", "30"]
+    assert commands[0][0] == "sudo"

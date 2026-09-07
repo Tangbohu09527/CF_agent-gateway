@@ -19,6 +19,10 @@ from cf_agent_gateway.adapters.wechat import (
     WechatTimeoutError,
     WechatTransportError,
 )
+from cf_agent_gateway.adapters.wechat.errors import (
+    WechatAccountMismatchError,
+    WechatPreSendAuthError,
+)
 from cf_agent_gateway.artifact import (
     ArtifactIntegrityError,
     ArtifactKind,
@@ -373,6 +377,12 @@ class ChannelDeliveryWorker:
 
 
 def classify_delivery_error(error: Exception) -> DeliveryFailureKind:
+    if isinstance(error, WechatAccountMismatchError):
+        return DeliveryFailureKind.PERMANENT
+    if isinstance(error, WechatPreSendAuthError):
+        # No POST happened: bounded retry is safe. Send-time unknown effects retain
+        # their existing UNCERTAIN classification below.
+        return DeliveryFailureKind.RETRYABLE
     if isinstance(error, RetryableDeliveryError):
         return DeliveryFailureKind.RETRYABLE
     if isinstance(error, PermanentDeliveryError):

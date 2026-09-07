@@ -29,13 +29,19 @@ def media_sender(
     *,
     max_media_bytes: int = 25 * 1024 * 1024,
 ) -> WechatHttpMediaSender:
+    def authenticated_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/api/status/auth"):
+            assert request.headers["X-Session-Id"] == "default"
+            return httpx.Response(200, json={"status": "logged_in", "loggedInUser": ACCOUNT_ID})
+        return handler(request)
+
     return WechatHttpMediaSender(
         account_id=ACCOUNT_ID,
         base_url=BASE_URL,
         token_env=TOKEN_ENV,
         max_media_bytes=max_media_bytes,
         environment_reader=lambda name: TOKEN if name == TOKEN_ENV else None,
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(authenticated_handler),
     )
 
 

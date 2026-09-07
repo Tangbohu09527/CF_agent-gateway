@@ -1,0 +1,111 @@
+name: Clean device installation
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clean-device-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clean-device-a:
+    name: A - Debian 13 isolated daemon official installation
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check every repository shell file
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do bash -n "$file"; done < <(git ls-files -z '*.sh')
+      - name: Record read-only capability for a possible B virtual machine
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/clean-device-evidence
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          flags = set()
+          try:
+              for line in Path('/proc/cpuinfo').read_text().splitlines():
+                  if line.startswith('flags') and ':' in line:
+                      flags.update(line.split(':', 1)[1].split())
+              cpuinfo_readable = True
+          except OSError:
+              cpuinfo_readable = False
+          payload = {
+              'purpose': 'capability_only_not_B_acceptance',
+              'kvm': {
+                  'exists': Path('/dev/kvm').exists(),
+                  'readable': os.access('/dev/kvm', os.R_OK),
+                  'writable': os.access('/dev/kvm', os.W_OK),
+              },
+              'commands': {
+                  name: shutil.which(name) is not None
+                  for name in ('qemu-system-x86_64', 'qemu-img')
+              },
+              'cpuinfo_readable': cpuinfo_readable,
+              'cpu_virtualization_flags': {name: name in flags for name in ('vmx', 'svm')},
+              'vm_boot_tested': False,
+          }
+          evidence = Path(os.environ['EVIDENCE_DIR'])
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / 'B-runner-capability.json').write_text(json.dumps(payload, indent=2) + '\n')
+          print('B capability metadata recorded; no VM was booted.')
+          PY
+      - name: Verify fixed WeChat PR merge evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_DIR: ${{ runner.temp }}/clean-device-evidence
+        run: |
+          mkdir -p "$EVIDENCE_DIR"
+          gh api repos/Tangbohu09527/CF_agent-wechat/pulls/7 \
+            --jq '{number,merged,merge_commit_sha,head_sha:.head.sha}' \
+            > "$EVIDENCE_DIR/wechat-pr-7.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads((Path(os.environ['EVIDENCE_DIR']) / 'wechat-pr-7.json').read_text())
+          assert data['merged'] is True, 'Final combination requires WeChat PR #7 merged'
+          assert data['head_sha'] == '67cbbb04ce15703428ce165ac38effac19f4b701'
+          PY
+      - name: Execute official install from empty Debian and Docker stores
+        env:
+          GATEWAY_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVIDENCE_DIR: ${{ runner.temp }}/clean-device-evidence
+        run: bash tests/deployment/run_clean_device.sh
+      - name: Upload A evidence with explicit real and synthetic boundaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-device-A-${{ github.run_id }}
+          path: ${{ runner.temp }}/clean-device-evidence
+          retention-days: 14
+
+  booted-vm-b:
+    name: B - Booted Debian 13 VM official install and reboot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Execute formal B entry inside a fresh QEMU guest
+        env:
+          GATEWAY_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVIDENCE_DIR: ${{ runner.temp }}/booted-vm-evidence
+        run: bash tests/deployment/run_booted_vm.sh
+      - name: Upload only scanned B result; no guest disks, seed or credentials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-device-B-${{ github.run_id }}
+          path: ${{ runner.temp }}/booted-vm-evidence/B-result.json
+          retention-days: 14

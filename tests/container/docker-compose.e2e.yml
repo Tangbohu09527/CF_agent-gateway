@@ -71,3 +71,8 @@ services:
     depends_on:
       synthetic-wechat:
         condition: service_healthy
+
+networks:
+  default:
+    external: false
+    name: ${COMPOSE_PROJECT_NAME}_default

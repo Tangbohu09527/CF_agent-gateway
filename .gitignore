@@ -21,6 +21,9 @@ data/
 .env*
 !.env.example
 config/*.local.yaml
+runtime.env
+.task-deps/
+.task-artifacts/
 
 # Editors and operating systems
 .idea/

@@ -49,6 +49,21 @@ class WechatResponseError(WechatAdapterError):
         super().__init__(f"agent-wechat API operation {operation!r} returned an invalid response")
 
 
+class WechatPreSendAuthError(WechatAdapterError):
+    """A read-only auth check failed before any send request was attempted."""
+
+    code = "wechat_presend_auth_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("current WeChat account could not be authenticated before sending")
+
+
+class WechatAccountMismatchError(WechatPreSendAuthError):
+    """The current authenticated account differs from this persisted delivery."""
+
+    code = "wechat_presend_account_mismatch"
+
+
 class WechatNormalizationError(WechatAdapterError):
     """A raw WeChat message cannot be normalized without inventing data."""
 

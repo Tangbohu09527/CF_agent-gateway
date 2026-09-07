@@ -1,0 +1,15 @@
+[Unit]
+Description=Independent Gateway PostgreSQL (Compose first installation)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/var/lib/cf-agent-gateway-postgres
+ExecStart=/usr/bin/docker compose --env-file /var/lib/cf-agent-gateway-postgres/.env --file /opt/cf-agent-gateway/deploy/postgres/compose.yml up --detach --wait
+# No automatic stop/down: database lifecycle remains independent of runtime.
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target

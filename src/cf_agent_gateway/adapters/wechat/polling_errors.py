@@ -18,7 +18,7 @@ class WechatChatIdentityError(WechatPollingError):
     code = "wechat_chat_identity_error"
 
     def __init__(self) -> None:
-        super().__init__("agent-wechat chat requires an id or username")
+        super().__init__("agent-wechat chat requires one unambiguous string identifier")
 
 
 class WechatLocalIdError(WechatPollingError):

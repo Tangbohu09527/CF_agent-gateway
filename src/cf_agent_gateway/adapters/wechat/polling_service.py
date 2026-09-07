@@ -381,7 +381,7 @@ class WechatPollingService:
             self._lifecycle_state.invalidate_all()
             return PollResult(logged_in=False)
 
-        source_account_id = _nonempty_string(auth_status.logged_in_user)
+        source_account_id = auth_status.source_account_id
         if source_account_id is None:
             self._lifecycle_state.invalidate_all()
             failure = PollFailure(
@@ -1299,12 +1299,18 @@ class WechatPollingService:
 def _parse_chat(chat: Mapping[str, Any]) -> tuple[str, str | None]:
     if not isinstance(chat, Mapping):
         raise WechatChatIdentityError()
-    conversation_id = _nonempty_string(chat.get("id"))
-    if conversation_id is None:
-        conversation_id = _nonempty_string(chat.get("username"))
-    if conversation_id is None:
+    # The fixed WeChat management parser recognizes these upstream aliases.
+    # Keep the existing string-only identity semantics: an integer database id
+    # is metadata, not a physical conversation id. Conflicting valid aliases
+    # cannot safely select a conversation or its authorization context.
+    candidates = {
+        value
+        for key in ("id", "chatId", "chat_id", "userName", "username")
+        if (value := _nonempty_string(chat.get(key))) is not None
+    }
+    if len(candidates) != 1:
         raise WechatChatIdentityError()
-    return conversation_id, _nonempty_string(chat.get("name"))
+    return candidates.pop(), _nonempty_string(chat.get("name"))
 
 
 def _handle_with_disposition(

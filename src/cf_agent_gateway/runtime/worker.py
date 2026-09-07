@@ -74,6 +74,7 @@ def run_worker(
     interval = settings.runtime.polling_interval_seconds
     cycle_sequence = 0
     last_history_shape: _PollHistoryShape | None = None
+    last_auth_failure: tuple[tuple[str, str], ...] | None = None
     final_heartbeat_state: Literal["stopped", "failed"] = "stopped"
 
     try:
@@ -106,6 +107,7 @@ def run_worker(
                 raise
             except Exception as error:
                 last_history_shape = None
+                last_auth_failure = None
                 logger.error(
                     "poll cycle failed",
                     extra={"fields": {"error_code": _safe_error_code(error)}},
@@ -126,6 +128,16 @@ def run_worker(
                     result,
                     previous_history_shape=last_history_shape,
                 )
+                if not result.logged_in:
+                    auth_failure = tuple(
+                        (failure.stage.value, failure.code) for failure in result.failures
+                    )
+                    level = logging.INFO if auth_failure != last_auth_failure else logging.DEBUG
+                    last_auth_failure = auth_failure
+                else:
+                    if last_auth_failure is not None:
+                        level = logging.INFO
+                    last_auth_failure = None
                 logger.log(
                     level,
                     "poll cycle completed",

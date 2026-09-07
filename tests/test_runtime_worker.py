@@ -633,3 +633,41 @@ def test_stuck_poll_does_not_renew_the_worker_heartbeat(tmp_path: Path) -> None:
         release_poll.set()
         thread.join(timeout=2)
         assert not thread.is_alive()
+
+
+def test_unchanged_logout_and_auth_failure_do_not_flood_info_and_recovery_is_visible(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    logged_out = PollResult(logged_in=False)
+    malformed = PollResult(
+        logged_in=False,
+        failures=[PollFailure(stage=PollFailureStage.AUTH, code="wechat_response_error")],
+    )
+    recovered = PollResult(logged_in=True, source_account_id="wxid_private_bot")
+    values = [logged_out] * 20 + [malformed] * 20 + [recovered] * 20 + [logged_out] * 20
+    stop = RecordingEvent()
+    calls = 0
+
+    def poll_once(candidate):
+        nonlocal calls
+        result = values[calls]
+        calls += 1
+        if calls == len(values):
+            stop.set()
+        return result
+
+    with caplog.at_level(logging.DEBUG, logger=worker.logger.name):
+        worker.run_worker(settings, stop_event=stop, poll_once=poll_once)
+    cycles = [
+        record
+        for record in worker_log_records(caplog)
+        if record.getMessage() == "poll cycle completed"
+    ]
+    assert len(cycles) == 80
+    assert [index for index, record in enumerate(cycles) if record.levelno == logging.INFO] == [
+        0,
+        20,
+        40,
+        60,
+    ]
+    assert "wxid_private_bot" not in caplog.text

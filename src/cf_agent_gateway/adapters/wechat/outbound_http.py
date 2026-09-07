@@ -6,8 +6,12 @@ from typing import Any, Self
 
 import httpx
 
+from cf_agent_gateway.adapters.wechat.client import AgentWechatClient
 from cf_agent_gateway.adapters.wechat.errors import (
+    WechatAccountMismatchError,
+    WechatAdapterError,
     WechatAPIError,
+    WechatPreSendAuthError,
     WechatResponseError,
     WechatTimeoutError,
     WechatTransportError,
@@ -42,11 +46,16 @@ class WechatHttpMessageSender:
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {normalized_token}",
+                "X-Session-Id": "default",
             },
             timeout=resolved_timeout,
             transport=transport,
             follow_redirects=False,
             trust_env=False,
+        )
+
+        self._auth_client = AgentWechatClient(
+            normalized_base_url, normalized_token, timeout=resolved_timeout, transport=transport
         )
 
     @property
@@ -60,7 +69,25 @@ class WechatHttpMessageSender:
         self.close()
 
     def close(self) -> None:
-        self._client.close()
+        try:
+            self._client.close()
+        finally:
+            self._auth_client.close()
+
+    def _verify_current_account(self) -> None:
+        # fresh QR closes the combination Gate before replacing the account. Check
+        # again immediately before every send so old outbox records cannot silently
+        # use a newly logged-in account when that Gate is reopened.
+        failed = False
+        current = None
+        try:
+            current = self._auth_client.get_auth_status().source_account_id
+        except WechatAdapterError:
+            failed = True
+        if failed or current is None:
+            raise WechatPreSendAuthError()
+        if current != self._account_id:
+            raise WechatAccountMismatchError()
 
     def send_text(self, conversation_id: str, content: str) -> dict[str, Any] | None:
         operation = "send_text"
@@ -68,6 +95,7 @@ class WechatHttpMessageSender:
         if not isinstance(content, str) or content == "":
             raise ValueError("content must not be empty")
 
+        self._verify_current_account()
         response: httpx.Response | None = None
         failure: str | None = None
         try:
