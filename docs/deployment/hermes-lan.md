@@ -150,3 +150,8 @@ C 层审批后的执行顺序：
 机器人 ID 不再是安装前输入，也不构成等待 hold 接口的阻断。自动发现与业务授权分开：未批准、无有效路由或已停用的请求保持持久拒绝，不调用 Hermes或业务投递；后续开通只验证新消息，历史拒绝不自动重放。Controller 的 Token/认证/heartbeat/Contract 检查和 JSON 含义保持原样。
 
 本 PR 单元测试和任何外部替身链路均属于 A 层。B 需要启动 systemd 的干净 Debian 主机及整机重启，C 需要真实微信、真实 AI 主机和正确 Hermes；本页不把上述待执行步骤写成通过记录。
+
+## Gateway 长工具任务等待
+
+业务请求的有限等待预算、超时与 uncertain 语义，以及旧 Release 升级注意事项，见
+[Hermes 长工具任务](../hermes-long-task-runtime.md)。诊断探针的短超时不代表业务任务预算。

@@ -264,7 +264,8 @@ copying message content.
 **Classify**
 
 - pending Admission with an expired lease: recoverable from the stored request snapshot;
-- running Dispatch with expired lease: reclaimable under the fenced retry rules;
+- running Dispatch with expired lease: becomes `uncertain` on the next claim scan,
+  preserving its Thread block; no automatic replay or retry-exhaustion unlock;
 - `failed`: definite failure governed by retry budget;
 - `uncertain`: external effect unknown and same-Thread work blocked;
 - `dead`: terminal Dispatch;
