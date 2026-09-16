@@ -88,13 +88,16 @@ class HermesDispatchService:
             workspace_id=record.workspace_id,
             ai_thread_id=record.ai_thread_id,
         )
-        return self._dispatch(admission, idempotency_key=record.idempotency_key)
+        return self._dispatch(
+            admission, idempotency_key=record.idempotency_key, defer_binding_update=True
+        )
 
     def _dispatch(
         self,
         admission: AdmissionOutcome,
         *,
         idempotency_key: str | None,
+        defer_binding_update: bool = False,
     ) -> HermesDispatchOutcome:
         workspace_id, ai_thread_id = self._allowed_target(admission)
 
@@ -138,37 +141,36 @@ class HermesDispatchService:
             )
         requested_hermes_thread_id = _hermes_thread_id_for_dispatch(thread)
 
+        # Snapshot inputs before releasing the connection/row lock. Durable
+        # per-thread FIFO is owned by the claim, not a long DB transaction.
+        content = message.content
+        message_id = message.id
+        outcome_workspace_id = workspace.id
+        outcome_thread_id = thread.id
+        invocation: dict[str, object] = {"hermes_thread_id": requested_hermes_thread_id}
+        if idempotency_key is not None:
+            invocation["idempotency_key"] = idempotency_key
+        if profile is not None:
+            invocation.update(
+                profile_reference=profile.external_profile_ref,
+                profile_revision=profile.revision,
+                thread_id=thread.id,
+                session_metadata=self._session_metadata(message, thread, admission),
+            )
+        if defer_binding_update:
+            self._session.commit()
+
         try:
-            if profile is None:
-                if idempotency_key is None:
-                    result = self._client.chat(
-                        message.content,
-                        hermes_thread_id=requested_hermes_thread_id,
-                    )
-                else:
-                    result = self._client.chat(
-                        message.content,
-                        hermes_thread_id=requested_hermes_thread_id,
-                        idempotency_key=idempotency_key,
-                    )
-            elif idempotency_key is None:
-                result = self._client.chat(
-                    message.content,
-                    hermes_thread_id=requested_hermes_thread_id,
-                    profile_reference=profile.external_profile_ref,
-                    profile_revision=profile.revision,
-                    thread_id=thread.id,
-                    session_metadata=self._session_metadata(message, thread, admission),
-                )
-            else:
-                result = self._client.chat(
-                    message.content,
-                    hermes_thread_id=requested_hermes_thread_id,
-                    profile_reference=profile.external_profile_ref,
-                    profile_revision=profile.revision,
-                    thread_id=thread.id,
-                    session_metadata=self._session_metadata(message, thread, admission),
-                    idempotency_key=idempotency_key,
+            result = self._client.chat(content, **invocation)
+            if defer_binding_update:
+                return HermesDispatchOutcome(
+                    message_id=message_id,
+                    workspace_id=outcome_workspace_id,
+                    ai_thread_id=outcome_thread_id,
+                    assistant_content=result.assistant_content,
+                    response=result.response,
+                    requested_hermes_thread_id=requested_hermes_thread_id,
+                    next_hermes_thread_id=result.hermes_thread_id,
                 )
             hermes_thread_advanced = self._workspace_store.advance_hermes_thread(
                 thread,

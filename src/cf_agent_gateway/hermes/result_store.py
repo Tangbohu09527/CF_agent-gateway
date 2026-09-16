@@ -8,6 +8,7 @@ from cf_agent_gateway.hermes.models import HermesDispatchOutcome, ResponseEnvelo
 from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
 from cf_agent_gateway.task.model.errors import HermesDispatchStateConflictError
 from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispatchStatus
+from cf_agent_gateway.workspace.models import AIThread
 
 
 class HermesDispatchResponseStore:
@@ -72,9 +73,27 @@ class HermesDispatchResponseStore:
                     record_id=dispatch_record_id,
                     expected_status=HermesDispatchStatus.RUNNING,
                 )
+            if outcome.requested_hermes_thread_id is not None:
+                if outcome.next_hermes_thread_id is None:
+                    raise ValueError("missing Hermes session rotation target")
+                rotated = self._session.execute(
+                    update(AIThread)
+                    .where(
+                        AIThread.id == outcome.ai_thread_id,
+                        AIThread.hermes_thread_id == outcome.requested_hermes_thread_id,
+                    )
+                    .values(hermes_thread_id=outcome.next_hermes_thread_id)
+                    .execution_options(synchronize_session=False)
+                )
+                if rotated.rowcount != 1:
+                    raise HermesDispatchStateConflictError(
+                        record_id=dispatch_record_id,
+                        expected_status=HermesDispatchStatus.RUNNING,
+                    )
             self._session.add(response)
             self._session.commit()
         except HermesDispatchStateConflictError:
+            self._session.rollback()
             raise
         except IntegrityError:
             self._session.rollback()

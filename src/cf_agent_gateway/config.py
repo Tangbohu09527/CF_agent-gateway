@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
+
 _POLLING_INTERVAL_ERROR = (
     "runtime.polling_interval_seconds must be within the supported positive timeout range"
 )
@@ -163,10 +165,13 @@ class HermesSettings:
     base_url: str = ""
     api_key_env: str = "HERMES_API_KEY"
     model: str = "hermes-agent"
+    timeouts: HermesTimeoutSettings = HermesTimeoutSettings()
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("hermes.enabled must be a boolean")
+        if not isinstance(self.timeouts, HermesTimeoutSettings):
+            raise ValueError("hermes.timeouts must be HermesTimeoutSettings")
 
         if not isinstance(self.base_url, str):
             raise ValueError("hermes.base_url must be an HTTP or HTTPS URL")
@@ -322,6 +327,7 @@ def load_settings(path: str | Path) -> Settings:
             base_url=hermes.get("base_url", ""),
             api_key_env=hermes.get("api_key_env", "HERMES_API_KEY"),
             model=hermes.get("model", "hermes-agent"),
+            timeouts=_hermes_timeouts(hermes),
         ),
         worker=WorkerSettings(
             enabled=worker.get("enabled", False),
@@ -339,6 +345,14 @@ def load_settings(path: str | Path) -> Settings:
             ),
         ),
     )
+
+
+def _hermes_timeouts(hermes: dict[str, Any]) -> HermesTimeoutSettings:
+    raw = _mapping(hermes, "timeouts")
+    try:
+        return HermesTimeoutSettings(**raw)
+    except TypeError:
+        raise ValueError("hermes.timeouts contains an unknown setting") from None
 
 
 def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:

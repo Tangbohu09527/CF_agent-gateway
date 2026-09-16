@@ -54,6 +54,12 @@ class HermesTimeoutError(HermesTransportError):
         HermesError.__init__(self, f"Hermes API operation {operation!r} timed out")
 
 
+class HermesExecutionTimeoutError(HermesTimeoutError):
+    """Gateway's total request budget elapsed; Hermes may still be executing."""
+
+    code = "hermes_execution_timeout_error"
+
+
 class HermesResponseError(HermesError):
     """Hermes returned a successful response with an invalid shape."""
 

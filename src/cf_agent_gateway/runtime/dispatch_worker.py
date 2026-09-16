@@ -28,6 +28,7 @@ from cf_agent_gateway.hermes import (
     HermesDispatchService,
 )
 from cf_agent_gateway.hermes.worker import HermesDispatchWorker
+from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.response import ResponsePersistenceProcessor
 from cf_agent_gateway.runtime.errors import (
@@ -63,6 +64,7 @@ class HermesClientFactory(Protocol):
         base_url: str,
         api_key: str,
         model: str,
+        timeouts: HermesTimeoutSettings,
     ) -> ClosableHermesChatClient: ...
 
 
@@ -174,6 +176,7 @@ def run_dispatch_worker(
                 base_url=settings.hermes.base_url,
                 api_key=api_key,
                 model=settings.hermes.model,
+                timeouts=settings.hermes.timeouts,
             )
         except Exception:
             client_initialization_failed = True
@@ -198,6 +201,11 @@ def run_dispatch_worker(
                     "concurrency": settings.worker.concurrency,
                     "lease_seconds": settings.worker.lease_seconds,
                     "retry_limit": settings.worker.retry_limit,
+                    "hermes_connect_seconds": settings.hermes.timeouts.connect_seconds,
+                    "hermes_read_seconds": settings.hermes.timeouts.read_seconds,
+                    "hermes_write_seconds": settings.hermes.timeouts.write_seconds,
+                    "hermes_pool_seconds": settings.hermes.timeouts.pool_seconds,
+                    "hermes_execution_seconds": settings.hermes.timeouts.execution_seconds,
                 }
             },
         )

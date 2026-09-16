@@ -324,7 +324,8 @@ def test_worker_systemd_units_are_installable_and_hardened(
     assert f"CF_GATEWAY_WORKER_HEARTBEAT_PATH={heartbeat_path}" in environment
     assert unit["Service"]["Restart"] == ["on-failure"]
     assert unit["Service"]["KillSignal"] == ["SIGTERM"]
-    assert unit["Service"]["TimeoutStopSec"] == ["120s"]
+    expected_stop = "3660s" if "dispatch" in unit_name else "120s"
+    assert unit["Service"]["TimeoutStopSec"] == [expected_stop]
     assert unit["Service"]["StateDirectory"] == ["cf-agent-gateway"]
     assert unit["Service"]["RuntimeDirectory"] == [runtime_directory]
     assert unit["Service"]["NoNewPrivileges"] == ["true"]

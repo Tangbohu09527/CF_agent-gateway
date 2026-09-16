@@ -745,6 +745,13 @@ def configure(options) -> None:
             "base_url": settings["hermes_url"],
             "api_key_env": "HERMES_API_KEY",
             "model": settings["hermes_model"],
+            "timeouts": {
+                "connect_seconds": 5,
+                "read_seconds": 600,
+                "write_seconds": 15,
+                "pool_seconds": 5,
+                "execution_seconds": 600,
+            },
         },
     }
     # JSON is a YAML subset; no host-side PyYAML dependency is required.

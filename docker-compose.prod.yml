@@ -149,6 +149,8 @@ services:
 
   dispatch-worker:
     <<: *runtime
+    # Drain any supported Hermes execution budget (max 3600s) plus persistence.
+    stop_grace_period: ${CF_GATEWAY_DISPATCH_STOP_GRACE_PERIOD:-3660s}
     profiles:
       - worker
     command:
