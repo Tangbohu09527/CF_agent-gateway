@@ -40,3 +40,10 @@ hermes:
   base_url: ""
   api_key_env: HERMES_API_KEY
   model: hermes-agent
+  # Read is inactivity between chunks; execution is the whole HTTP request budget.
+  timeouts:
+    connect_seconds: 5
+    read_seconds: 600
+    write_seconds: 15
+    pool_seconds: 5
+    execution_seconds: 600

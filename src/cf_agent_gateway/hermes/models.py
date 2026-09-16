@@ -161,6 +161,9 @@ class HermesDispatchOutcome:
     ai_thread_id: str
     assistant_content: str
     response: ResponseEnvelope | None = None
+    # Durable dispatch defers session rotation until fenced result persistence.
+    requested_hermes_thread_id: str | None = None
+    next_hermes_thread_id: str | None = None
 
     @classmethod
     def from_response(

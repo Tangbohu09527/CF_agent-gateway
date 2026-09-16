@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Self
 from urllib.parse import urlsplit
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 from cf_agent_gateway.hermes.errors import (
     HermesAPIError,
     HermesAPIKeyError,
+    HermesExecutionTimeoutError,
     HermesResponseError,
     HermesTimeoutError,
     HermesTransportError,
@@ -20,8 +22,10 @@ from cf_agent_gateway.hermes.models import (
     HermesUserMessage,
     ResponseEnvelope,
 )
+from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 
-DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=15.0, pool=5.0)
+DEFAULT_TIMEOUTS = HermesTimeoutSettings()
+DEFAULT_TIMEOUT = DEFAULT_TIMEOUTS.httpx_timeout()
 HERMES_SESSION_HEADER = "X-Hermes-Session-Id"
 HERMES_IDEMPOTENCY_HEADER = "Idempotency-Key"
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
@@ -29,7 +33,12 @@ MAX_HERMES_THREAD_ID_LENGTH = 255
 
 
 class HermesClient:
-    """Synchronous client for the Hermes OpenAI-compatible chat API."""
+    """Synchronous worker interface with cancellable, per-call async HTTP I/O.
+
+    Each worker slot owns its event loop and connection for the duration of a
+    call. Cancellation unwinds HTTPX before the synchronous call returns.
+    Closing our socket does not cancel Hermes execution.
+    """
 
     def __init__(
         self,
@@ -37,24 +46,33 @@ class HermesClient:
         api_key: str | None,
         model: str,
         *,
-        timeout: httpx.Timeout | float = DEFAULT_TIMEOUT,
-        transport: httpx.BaseTransport | None = None,
+        timeout: httpx.Timeout | float | None = None,
+        timeouts: HermesTimeoutSettings = DEFAULT_TIMEOUTS,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         normalized_base_url = _base_url(base_url)
         normalized_api_key = _api_key(api_key)
         self._model = _required_string(model, "model")
-        resolved_timeout = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout)
-        self._client = httpx.Client(
-            base_url=normalized_base_url,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {normalized_api_key}",
-            },
-            timeout=resolved_timeout,
-            transport=transport,
-            follow_redirects=False,
-            trust_env=False,
-        )
+        if not isinstance(timeouts, HermesTimeoutSettings):
+            raise ValueError("timeouts must be HermesTimeoutSettings")
+        if timeout is not None:
+            # Compatibility for bounded diagnostic callers, never unbounded I/O.
+            value = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout)
+            timeouts = HermesTimeoutSettings(
+                connect_seconds=value.connect,
+                read_seconds=value.read,
+                write_seconds=value.write,
+                pool_seconds=value.pool,
+                execution_seconds=timeouts.execution_seconds,
+            )
+        self._base_url = normalized_base_url
+        self._headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {normalized_api_key}",
+        }
+        self._timeouts = timeouts
+        self._transport = transport
+        self._closed = False
 
     def __enter__(self) -> Self:
         return self
@@ -63,7 +81,8 @@ class HermesClient:
         self.close()
 
     def close(self) -> None:
-        self._client.close()
+        # Runtime drains active slots first; sockets are owned by each call.
+        self._closed = True
 
     def chat(
         self,
@@ -144,8 +163,14 @@ class HermesClient:
         json: dict[str, Any],
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        if self._closed:
+            raise RuntimeError("Hermes client is closed")
         try:
-            response = self._client.request(method, endpoint, json=json, headers=headers)
+            response = asyncio.run(
+                self._request_async(method, endpoint, json=json, headers=headers)
+            )
+        except TimeoutError:
+            raise HermesExecutionTimeoutError(operation=operation) from None
         except httpx.TimeoutException:
             raise HermesTimeoutError(operation=operation) from None
         except httpx.RequestError:
@@ -153,6 +178,27 @@ class HermesClient:
         if not 200 <= response.status_code < 300:
             raise HermesAPIError(operation=operation, status_code=response.status_code)
         return response
+
+    async def _request_async(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str] | None,
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            headers=self._headers,
+            timeout=self._timeouts.httpx_timeout(),
+            transport=self._transport,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            # Includes connect/write and the entire body, even when bytes trickle
+            # in often enough to reset the independent read inactivity timeout.
+            async with asyncio.timeout(self._timeouts.execution_seconds):
+                return await client.request(method, endpoint, json=json, headers=headers)
 
 
 def _explicit_incomplete_response(response: httpx.Response, payload: object) -> bool:

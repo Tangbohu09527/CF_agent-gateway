@@ -17,6 +17,7 @@ from cf_agent_gateway.config import (
     WorkerSettings,
 )
 from cf_agent_gateway.hermes import HermesChatResult
+from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 from cf_agent_gateway.runtime import dispatch_worker
 from cf_agent_gateway.runtime.errors import (
     DispatchWorkerDisabledError,
@@ -88,7 +89,9 @@ def test_runtime_requires_hermes_api_key_before_creating_resources() -> None:
 def test_runtime_sanitizes_hermes_client_initialization_failure() -> None:
     secret = "secret-hermes-api-key"
 
-    def failing_client_factory(*, base_url: str, api_key: str, model: str) -> Any:
+    def failing_client_factory(
+        *, base_url: str, api_key: str, model: str, timeouts: HermesTimeoutSettings
+    ) -> Any:
         del base_url, model
         raise RuntimeError(f"client rejected {api_key}")
 
@@ -134,7 +137,10 @@ def test_runtime_builds_and_runs_worker_with_configured_concurrency(
     client = TrackingClient()
     engine = TrackingEngine()
 
-    def client_factory(*, base_url: str, api_key: str, model: str) -> TrackingClient:
+    def client_factory(
+        *, base_url: str, api_key: str, model: str, timeouts: HermesTimeoutSettings
+    ) -> TrackingClient:
+        assert timeouts is settings.hermes.timeouts
         events.append(("client", base_url, api_key, model))
         return client
 

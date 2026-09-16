@@ -270,45 +270,34 @@ def test_fifo_blocks_same_thread_but_allows_parallel_threads(tmp_path: Path) -> 
         engine.dispose()
 
 
-def test_expired_lease_is_reclaimed_with_new_token(
+@pytest.mark.parametrize("retry_limit", [0, 2])
+def test_expired_lease_becomes_uncertain_without_reexecution(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+    retry_limit: int,
 ) -> None:
     factory, engine = database_factory(tmp_path)
     try:
         with factory() as session:
-            enqueue_message(session, create_thread(session, "crash"), "crash")
+            seed = create_thread(session, "crash")
+            enqueue_message(session, seed, "crash")
+            enqueue_message(session, seed, "following")
         dispatcher = ControlledDispatcher()
-        worker = make_worker(
-            factory,
-            dispatcher,
-            lease_seconds=1,
-            retry_limit=2,
-        )
+        worker = make_worker(factory, dispatcher, lease_seconds=1, retry_limit=retry_limit)
         now = datetime.now(UTC)
-        with caplog.at_level(logging.INFO):
-            first = worker.claim_once(now=now)
-            assert first is not None
-            assert worker.claim_once(now=now + timedelta(milliseconds=500)) is None
-            recovered = worker.claim_once(now=now + timedelta(seconds=2))
-        assert recovered is not None
-        assert recovered.record_id == first.record_id
-        assert recovered.claim_token != first.claim_token
-        assert recovered.attempt_count == 2
-
+        first = worker.claim_once(now=now)
+        assert first is not None
+        assert worker.claim_once(now=now + timedelta(milliseconds=500)) is None
+        assert worker.claim_once(now=now + timedelta(seconds=2)) is None
+        assert worker.claim_once(now=now + timedelta(minutes=20)) is None
         with pytest.raises(HermesDispatchStateConflictError):
             worker.process_claim(first)
         assert dispatcher.calls == []
-
-        result = worker.process_claim(recovered)
-        assert result.status is HermesDispatchStatus.SUCCESS
-        assert dispatcher.calls == [(recovered.record_id, recovered.idempotency_key)]
-        messages = [record.getMessage() for record in caplog.records]
-        assert messages.count("worker lease acquired") == 2
-        assert messages.count("dispatch claimed") == 2
-        assert messages.count("stale takeover") == 1
-        assert first.claim_token not in caplog.text
-        assert recovered.claim_token not in caplog.text
+        with factory() as session:
+            record = session.get(HermesDispatchRecord, first.record_id)
+            assert record.status is HermesDispatchStatus.UNCERTAIN
+            assert record.attempt_count == 1
+            assert record.last_error_code == "dispatch_lease_expired_uncertain"
+            assert session.scalar(select(HermesDispatchResponse)) is None
     finally:
         engine.dispose()
 

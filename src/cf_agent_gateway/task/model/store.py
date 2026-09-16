@@ -25,7 +25,7 @@ MAX_CLAIM_TOKEN_LENGTH = 255
 MAX_ERROR_CODE_LENGTH = 128
 DEFAULT_LEASE_SECONDS = 60.0
 DEFAULT_RETRY_LIMIT = 3
-_EXHAUSTED_LEASE_ERROR = "dispatch_lease_expired_retry_exhausted"
+_EXPIRED_LEASE_ERROR = "dispatch_lease_expired_uncertain"
 _BLOCKING_STATUSES = (
     HermesDispatchStatus.QUEUED,
     HermesDispatchStatus.RUNNING,
@@ -185,17 +185,6 @@ class HermesDispatchRecordStore:
                     }
                 },
             )
-            if claimed_from_status is HermesDispatchStatus.RUNNING:
-                logger.warning(
-                    "stale takeover",
-                    extra={
-                        "fields": {
-                            "dispatch_record_id": record.id,
-                            "attempt_count": record.attempt_count,
-                            "recovery_action": "expired_dispatch_lease_reclaimed",
-                        }
-                    },
-                )
             return record
         return None
 
@@ -409,14 +398,14 @@ class HermesDispatchRecordStore:
             .where(
                 HermesDispatchRecord.status == HermesDispatchStatus.RUNNING,
                 HermesDispatchRecord.lease_expires_at <= now,
-                HermesDispatchRecord.attempt_count >= max_attempts,
             )
             .values(
-                status=HermesDispatchStatus.DEAD,
+                # Loss of ownership cannot prove that Hermes did not execute.
+                status=HermesDispatchStatus.UNCERTAIN,
                 claim_token=None,
                 lease_expires_at=None,
                 completed_at=func.now(),
-                last_error_code=_EXHAUSTED_LEASE_ERROR,
+                last_error_code=_EXPIRED_LEASE_ERROR,
                 updated_at=func.now(),
             )
             .execution_options(synchronize_session=False)
@@ -506,11 +495,6 @@ def _claimable_predicate(
                 record.attempt_count < max_attempts,
                 record.manual_retry_approved.is_(True),
             ),
-        ),
-        and_(
-            record.status == HermesDispatchStatus.RUNNING,
-            record.lease_expires_at <= now,
-            record.attempt_count < max_attempts,
         ),
     )
 

@@ -22,6 +22,7 @@ import yaml
 from cf_agent_gateway.config import HermesSettings, load_settings
 from cf_agent_gateway.hermes.client import HermesClient
 from cf_agent_gateway.hermes.errors import HermesAPIError, HermesError
+from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 
 
 def diagnose(
@@ -34,7 +35,7 @@ def diagnose(
     profile_reference: str | None = None,
     profile_revision: int | None = None,
     timeout: float = 5.0,
-    transport: httpx.BaseTransport | None = None,
+    transport: httpx.MockTransport | None = None,
 ) -> dict[str, Any]:
     """Check only the requested layers, stopping at the first failed layer.
 
@@ -82,11 +83,19 @@ def diagnose(
         result["ok"] = True
         return result
 
+    # Diagnostic --timeout is an explicit shorter budget, independent of business calls.
+    probe_timeouts = HermesTimeoutSettings(
+        connect_seconds=min(timeout, 120),
+        read_seconds=timeout,
+        write_seconds=min(timeout, 120),
+        pool_seconds=min(timeout, 120),
+        execution_seconds=timeout,
+    )
     api_key = environ.get(settings.api_key_env)
     # Reuse the production client's validation before creating any HTTP request.
     try:
         client = HermesClient(
-            settings.base_url, api_key, settings.model, timeout=timeout, transport=transport
+            settings.base_url, api_key, settings.model, timeouts=probe_timeouts, transport=transport
         )
     except (HermesError, ValueError):
         return _failed(result, "configuration", "hermes_api_key_or_client_invalid")
@@ -136,7 +145,7 @@ def diagnose(
                 settings.base_url,
                 "rejected-probe-" + uuid4().hex,
                 settings.model,
-                timeout=timeout,
+                timeouts=probe_timeouts,
                 transport=transport,
             ) as invalid_client:
                 invalid_client.chat(content, **invocation)
