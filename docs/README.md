@@ -1,67 +1,59 @@
 # Documentation index
 
 This index separates current authoritative documentation from historical snapshots.
-[Production status](production-status.md) is the single authority for the currently
-deployed release. Runbooks describe reusable procedures and must not be read as proof
-that a future release has passed production acceptance.
+[Production status](production-status.md) summarizes the latest supplied site evidence.
+Runbooks describe reusable procedures and are not proof of acceptance.
 
 ## Start here
 
-- [Production status](production-status.md): authoritative release, deployment, evidence,
-  rollback, and current limitation record.
-- [Repository README](../README.md): concise project scope, runtime path, and local entry.
+- [Production status](production-status.md): latest observed image, evidence boundaries,
+  historical P1 baseline, residual warnings and rollback limitations.
+- [September 17 long-task acceptance](validation/2026-09-17-hermes-long-task-acceptance.md):
+  real database duration, response/delivery/receipt evidence, WeChat receipt and remaining scope.
+- [Repository README](../README.md): scope, runtime path and local entry.
 
 ## Architecture
 
-- [Domain architecture](architecture.md): responsibility boundaries, core entities,
-  permission model, and Message-to-Delivery data flow.
-- [Runtime architecture](runtime-architecture.md): process ownership, Worker lifecycle,
-  Controller, Checkpoint, CAS/FIFO, recovery, heartbeat, logging, and restart semantics.
+- [Domain architecture](architecture.md): responsibility boundaries and Message-to-Delivery flow.
+- [Runtime architecture](runtime-architecture.md): process ownership, Controller, CAS/FIFO,
+  recovery, heartbeats, logging and restart semantics.
 
 ## Production operations
 
-- [Production deployment](deployment/production.md): reusable Compose deployment,
-  controlled Worker gate, verification, and rollback procedure.
-- [Runtime health](runtime-health.md): exact health endpoints, fields, status meanings, and
-  Controller status contract.
-- [Runtime recovery](runtime-recovery.md): fail-closed diagnosis and recovery flows.
-- [Troubleshooting](troubleshooting.md): symptom-oriented read-only checks and safe actions.
-- [Migration runbook](../migrations/README.md): Alembic chain, upgrade guards, downgrade
-  limits, and backup boundary.
+- [Production deployment](deployment/production.md): reusable controlled Compose procedure.
+- [Long-task runtime](hermes-long-task-runtime.md): finite wait configuration, safety semantics,
+  code-level test history and the subsequent real-site acceptance boundary.
+- [Runtime health](runtime-health.md): health fields and Controller contract.
+- [Runtime recovery](runtime-recovery.md): fail-closed diagnosis and recovery.
+- [Troubleshooting](troubleshooting.md): read-only checks and safe actions.
+- [Migration runbook](../migrations/README.md): chain, guards and backup boundary.
 
 ## API and contracts
 
-- [HTTP and Admin API](api.md): current routes, authentication, limits, response fields,
-  idempotency, and recovery audit behavior.
-- [Gateway to agent-wechat contract](wechat-runtime-contract.md): Runtime Controller and
-  protected Token File contract.
-- [WeChat outbound media adapter](wechat-media-adapter-v2.md): implemented and tested
-  outbound image/file adapter boundary and its production-validation limitation.
+- [HTTP and Admin API](api.md): routes, authentication, idempotency and recovery audit.
+- [Gateway to agent-wechat contract](wechat-runtime-contract.md): Controller and Token File.
+- [WeChat outbound media](wechat-media-adapter-v2.md): implemented/tested behavior and unverified site scope.
 
 ## Validation and release evidence
 
-- [Production validation](production-validation.md): completed September 2026 acceptance
-  record followed by a clean future-release checklist.
-- [Production status](production-status.md): immutable image, real-log observations,
-  retention record, rollback location, and final evidence location.
+- [September 17 acceptance](validation/2026-09-17-hermes-long-task-acceptance.md): latest scoped
+  long-task record, not a universal production sign-off.
+- [Production validation](production-validation.md): historical September 3 P1 acceptance and
+  a reusable unchecked future-release checklist. Its P1 image is not the new site image.
+- [Production status](production-status.md): current summary and explicitly dated old archives.
 
 ## Development and staging
 
-- Current local development starts in the [repository README](../README.md).
-- Production-like container checks are implemented in the repository test suite and
-  GitHub Actions; a green run is test evidence, not external-system ownership.
+Local development starts in the [repository README](../README.md). Repository tests and
+GitHub Actions establish only behavior for their specific commit/environment; a green CI
+run does not replace external-system site evidence.
 
 ## Historical documents
 
-The following files are archived snapshots. They may retain old branch names, revisions,
-or deployment models as historical evidence and must not be used as current production
-instructions.
+These retain dated snapshots and must not be used as current production-image instructions:
 
-- [V1 staging validation](v1-staging-validation.md): historical text-only V1 staging
-  acceptance record.
-- [V2 Integration Alpha status](v2-integration-alpha-status.md): historical Alpha branch
-  and schema snapshot superseded by the production V2 record.
-- [Debian staging deployment](deployment/staging-debian.md): archived non-Compose staging
-  layout.
-- [systemd deployment](systemd-deployment.md): archived alternative process-manager
-  guidance; current production uses Compose and the Runtime Controller.
+- [V1 staging validation](v1-staging-validation.md)
+- [V2 Integration Alpha](v2-integration-alpha-status.md)
+- [Debian staging](deployment/staging-debian.md)
+- [systemd alternative](systemd-deployment.md)
+- [September 3 P1 validation](production-validation.md#completed-production-acceptance-record)

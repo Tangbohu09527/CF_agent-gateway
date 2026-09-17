@@ -10,36 +10,38 @@ It covers fixed sources, Controller, WeChat Bootstrap, independent PostgreSQL, i
 credentials and core startup without employee lists or a configured bot ID. After login,
 use the [business CLI](docs/deployment/initial-identity.md) to explicitly approve or disable
 access from observed messages. [Hermes LAN setup](docs/deployment/hermes-lan.md)
-records the missing Hermes source/version evidence; real AI-host installation and business
-acceptance remain pending. Existing installations use the separate upgrade runbook.
+records the missing Hermes source/version evidence. Clean-device AI-host installation
+acceptance remains separate from the existing-host September 17 long-task record.
+Existing installations use the separate upgrade runbook.
 
 ## Current status
 
-The V2 runtime and P1 observability changes are production validated. Production is
-online on the release recorded in [Production status](docs/production-status.md).
+Evidence updated: **2026-09-17**. The existing production chain is operating on the newly
+observed application image, with a scoped long-task persistence and WeChat delivery
+acceptance. Historical continuity warnings remain open; this is not an all-scenarios
+healthy or high-availability sign-off.
 
-- Repository branch authority: `main`
-- PR #8 documentation closeout baseline:
-  `c5518aed12b90235f118ed81bb3cef75d0463443`
-- Production Release Git authority:
-  `b488cf452584e73bc9b752564bf90ea153aa8d18` (PR #7 merge commit)
-- Production image code snapshot:
-  `f36c798294368263433f6132366ac9a864d9482b`
-- Production image:
-  `sha256:b9341ca7df6f952b4d81028c497574c1e22478e4408f98791a28bd9514b215f1`
-- Release label: `p1-observability-main-b488cf452584-20260903`
-- Database head: `20260823_04`
-- Production log policy: Docker `json-file`, `64m` x `10` files per Compose service
-- No new P1 Git release tag was created
+- Repository branch authority: `main`; query its live tip instead of treating a dated
+  snapshot as permanently current.
+- Merged long-task fix: PR #11, `9a1caa237a9053678c80f68fdb15d351d5bfecf8`.
+- Observed application Docker Image ID:
+  `sha256:1cd7650543babe75d4fabe71e27e3cbc1d54585d34ffa853280606c2a3ddaa8b`.
+- Dispatch startup read/execution budgets: `600/600` seconds; Dispatch stop grace: `3660` seconds.
+- Repository schema head: `20260823_04`; site database/migration runtime checks reported `ok`.
+- Scoped acceptance: one long task persisted and reached WeChat, with database-recorded
+  dispatch duration **113.799 seconds**, one dispatch attempt and one receipted delivery attempt.
 
-The live `main` tip changes whenever a merge advances the branch, so long-lived production
-documentation does not hard-code it. Query the current tip in the GitHub branch view or
-with `git rev-parse origin/main`. The PR #8 merge commit is the documentation closeout
-baseline, not a permanent current-`main` value. PR #8 only updated documentation; it did
-not rebuild or deploy the production image, change the database revision or release label,
-or create a production tag. Current production remains defined by the Production Release
-Git authority `b488cf452584`, the image code snapshot `f36c79829436`, and the immutable
-image digest above. Repository `main` advancing does not mean production was redeployed.
+See [Production status](docs/production-status.md) for deployment authority and
+[2026-09-17 acceptance](docs/validation/2026-09-17-hermes-long-task-acceptance.md) for dated
+record IDs, timestamps, evidence provenance and remaining work. The Image ID is not a
+verified registry manifest digest. The merged source baseline and observed image are
+separate facts; complete build provenance, a new Release label/Tag and a new offline
+rollback archive have not been independently verified in this record.
+
+The September 3 P1 Release authority `b488cf452584e73bc9b752564bf90ea153aa8d18`, source
+snapshot `f36c798294368263433f6132366ac9a864d9482b` and image `sha256:b9341ca7df6f952b4d81028c497574c1e22478e4408f98791a28bd9514b215f1`
+are historical, not the newly observed application image. PR #8/#9 documentation closeout
+remains historical evidence. This documentation change does not deploy production.
 
 ## Responsibility boundary
 
@@ -55,6 +57,7 @@ The Gateway does not implement Hermes, `agent-wechat`, AI inference, automatic S
 execution, general AI Provider routing, ERP business logic, an enterprise knowledge base,
 RAG, OCR, or general inbound file/archive understanding. `agent-wechat`, Hermes,
 PostgreSQL lifecycle, secret storage, and host operations remain external responsibilities.
+A local-file tool test through external Hermes is not enterprise File Service or Skills integration.
 
 ## Runtime path
 
@@ -98,10 +101,17 @@ login boundary.
 - Worker heartbeats, runtime health, structured logs, and bounded log retention provide
   operational evidence without replacing database authority.
 
+These implementation rules are not a claim that every failure/reboot/concurrency scenario
+was exercised during the September 17 site acceptance.
+
 ## Known limitations
 
 - General Provider routing and automatic Skill execution are not connected.
 - ERP automation, knowledge retrieval, RAG, and Hermes behavior are outside the Gateway.
+- Three historical chats had unresolved continuity failures in the reviewed site logs;
+  the accepted test chat was not one of them. Do not reset Checkpoints to clear health warnings.
+- Raw Hermes tool logs, the installed Desktop build, near-600-second execution, in-flight
+  disconnect/reboot, and long-task concurrency/FIFO/lease observations remain separately unverified.
 - V2 supports explicit `private_sender`, `group_sender`, and `group_shared` Thread
   policies. The old Alpha whole-group Thread limitation is not a current V2 limitation.
 - Outbound response artifacts can be delivered as tested image/file parts, but that media
@@ -147,6 +157,8 @@ In PowerShell, use `curl.exe http://127.0.0.1:8080/health`.
 Start with the [documentation index](docs/README.md). The main operational entries are:
 
 - [Production status](docs/production-status.md)
+- [September 17 long-task acceptance](docs/validation/2026-09-17-hermes-long-task-acceptance.md)
+- [Long-task runtime and evidence boundaries](docs/hermes-long-task-runtime.md)
 - [Production deployment](docs/deployment/production.md)
 - [Runtime recovery](docs/runtime-recovery.md)
 - [Runtime health](docs/runtime-health.md)
@@ -154,5 +166,5 @@ Start with the [documentation index](docs/README.md). The main operational entri
 - [Migration runbook](migrations/README.md)
 - [Production validation](docs/production-validation.md)
 
-Historical V1, Alpha, staging, and systemd snapshots are indexed separately and are not
-current production instructions.
+Historical V1, Alpha, staging, systemd and September 3 P1 snapshots are not current
+production-image instructions.
