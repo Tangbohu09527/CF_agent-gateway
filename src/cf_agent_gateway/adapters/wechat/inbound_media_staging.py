@@ -16,7 +16,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from cf_agent_gateway.adapters.wechat.inbound_media import MAX_MEDIA_BYTES, InboundMediaResult, MediaReadiness
+from cf_agent_gateway.adapters.wechat.inbound_media import (
+    MAX_MEDIA_BYTES,
+    InboundMediaResult,
+    MediaReadiness,
+)
 from cf_agent_gateway.adapters.wechat.inbound_media_http import BoundMediaResult, MediaFetchError
 
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -38,8 +42,10 @@ class InboundMediaStaging:
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
         if (
-            not self._root.is_absolute() or self._root == Path("/")
-            or ".." in self._root.parts or os.name != "posix"
+            not self._root.is_absolute()
+            or self._root == Path("/")
+            or ".." in self._root.parts
+            or os.name != "posix"
             or not hasattr(os, "O_NOFOLLOW")
         ):
             raise MediaFetchError("invalid_media_staging_root")
@@ -65,8 +71,10 @@ class InboundMediaStaging:
         try:
             info = os.fstat(file_fd)
             if (
-                not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
                 or info.st_size != len(expected)
             ):
                 raise MediaFetchError("media_staging_conflict")
@@ -84,7 +92,10 @@ class InboundMediaStaging:
                 raise MediaFetchError("media_staging_conflict")
             after = os.fstat(file_fd)
             if (info.st_ino, info.st_dev, info.st_mtime_ns, info.st_ctime_ns) != (
-                after.st_ino, after.st_dev, after.st_mtime_ns, after.st_ctime_ns,
+                after.st_ino,
+                after.st_dev,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
             ):
                 raise MediaFetchError("media_staging_conflict")
         finally:
@@ -102,8 +113,9 @@ class InboundMediaStaging:
             os.fsync(fd)
             return True
         temp = ".intake-" + uuid.uuid4().hex
-        file_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                          0o600, dir_fd=fd)
+        file_fd = os.open(
+            temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd
+        )
         # Do not automatically remove a temp on I/O failure: retain local evidence.
         try:
             os.fchmod(file_fd, 0o600)
@@ -136,8 +148,10 @@ class InboundMediaStaging:
             raise MediaFetchError("invalid_media_staging_input")
         media = bound.media
         if (
-            media.readiness is not MediaReadiness.READY or not isinstance(media.data, bytes)
-            or not 1 <= len(media.data) <= MAX_MEDIA_BYTES or media.size != len(media.data)
+            media.readiness is not MediaReadiness.READY
+            or not isinstance(media.data, bytes)
+            or not 1 <= len(media.data) <= MAX_MEDIA_BYTES
+            or media.size != len(media.data)
             or media.sha256 != hashlib.sha256(media.data).hexdigest()
             or media.media_type not in {"image", "file"}
         ):
@@ -147,15 +161,20 @@ class InboundMediaStaging:
             (bound.source_fingerprint + ":" + media.sha256).encode("ascii")
         ).hexdigest()
         metadata = {
-            "schema": "cf-inbound-staging/v1", "source_fingerprint": bound.source_fingerprint,
-            "blob": key + ".blob", "bytes": media.size, "sha256": media.sha256,
-            "media_type": media.media_type, "filename": media.filename,
+            "schema": "cf-inbound-staging/v1",
+            "source_fingerprint": bound.source_fingerprint,
+            "blob": key + ".blob",
+            "bytes": media.size,
+            "sha256": media.sha256,
+            "media_type": media.media_type,
+            "filename": media.filename,
             "declared_quality": media.declared_quality,
             "original_comparison": media.original_comparison.value,
             "formal_archive": False,
         }
-        raw = json.dumps(metadata, ensure_ascii=True, sort_keys=True,
-                         separators=(",", ":")).encode("utf-8")
+        raw = json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         if len(raw) > 16384:
             raise MediaFetchError("invalid_media_staging_input")
         fd = None
@@ -163,8 +182,14 @@ class InboundMediaStaging:
             fd = self._root_fd()
             self._publish(fd, key + ".blob", media.data)
             existing = self._publish(fd, key + ".json", raw)
-            return StagedMedia(key, bound.source_fingerprint, media.size, media.sha256,
-                               media.original_comparison.value, existing)
+            return StagedMedia(
+                key,
+                bound.source_fingerprint,
+                media.size,
+                media.sha256,
+                media.original_comparison.value,
+                existing,
+            )
         except OSError:
             raise MediaFetchError("media_staging_io_failed") from None
         finally:

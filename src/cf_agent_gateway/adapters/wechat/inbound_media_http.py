@@ -98,9 +98,15 @@ class MediaSource:
     @property
     def fingerprint(self) -> str:
         values = [
-            "wechat-media-source/v1", self.account_id, self.chat_id, self.sender_id,
-            self.local_id, self.server_id, self.raw_type,
-            _time(self.occurred_at).isoformat(), self.content_sha256,
+            "wechat-media-source/v1",
+            self.account_id,
+            self.chat_id,
+            self.sender_id,
+            self.local_id,
+            self.server_id,
+            self.raw_type,
+            _time(self.occurred_at).isoformat(),
+            self.content_sha256,
         ]
         return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
 
@@ -160,17 +166,28 @@ class InboundMediaHTTPClient:
     """
 
     def __init__(
-        self, base_url: str, token: str, *, max_bytes: int = MAX_MEDIA_BYTES,
-        deadline_seconds: float = 30.0, transport: httpx.AsyncBaseTransport | None = None,
+        self,
+        base_url: str,
+        token: str,
+        *,
+        max_bytes: int = MAX_MEDIA_BYTES,
+        deadline_seconds: float = 30.0,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = _base_url(base_url)
-        if not isinstance(token, str) or not token or any(not 0x21 <= ord(c) <= 0x7e for c in token):
+        if (
+            not isinstance(token, str)
+            or not token
+            or any(not 0x21 <= ord(c) <= 0x7E for c in token)
+        ):
             raise MediaFetchError("invalid_media_credential")
         if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_MEDIA_BYTES:
             raise MediaFetchError("invalid_media_limit")
         if (
-            isinstance(deadline_seconds, bool) or not isinstance(deadline_seconds, (int, float))
-            or not math.isfinite(deadline_seconds) or not 0 < deadline_seconds <= 120
+            isinstance(deadline_seconds, bool)
+            or not isinstance(deadline_seconds, (int, float))
+            or not math.isfinite(deadline_seconds)
+            or not 0 < deadline_seconds <= 120
         ):
             raise MediaFetchError("invalid_media_deadline")
         self._token = token
@@ -178,12 +195,17 @@ class InboundMediaHTTPClient:
         self._deadline = deadline_seconds
         self._transport = transport
 
-    def fetch(self, source: MediaSource, *, expected: ExpectedOriginal | None = None) -> BoundMediaResult:
+    def fetch(
+        self, source: MediaSource, *, expected: ExpectedOriginal | None = None
+    ) -> BoundMediaResult:
         """Synchronous worker entry; async runtimes should use fetch_async."""
         return asyncio.run(self.fetch_async(source, expected=expected))
 
     async def fetch_async(
-        self, source: MediaSource, *, expected: ExpectedOriginal | None = None,
+        self,
+        source: MediaSource,
+        *,
+        expected: ExpectedOriginal | None = None,
     ) -> BoundMediaResult:
         if not isinstance(source, MediaSource):
             raise MediaFetchError("invalid_media_source")
@@ -193,10 +215,16 @@ class InboundMediaHTTPClient:
             async with asyncio.timeout(self._deadline):
                 async with httpx.AsyncClient(
                     base_url=self._base_url,
-                    headers={"Authorization": f"Bearer {self._token}", "X-Session-Id": "default",
-                             "Accept": "application/json", "Accept-Encoding": "identity"},
+                    headers={
+                        "Authorization": f"Bearer {self._token}",
+                        "X-Session-Id": "default",
+                        "Accept": "application/json",
+                        "Accept-Encoding": "identity",
+                    },
                     timeout=httpx.Timeout(connect=5, read=15, write=5, pool=5),
-                    trust_env=False, follow_redirects=False, transport=self._transport,
+                    trust_env=False,
+                    follow_redirects=False,
+                    transport=self._transport,
                 ) as client:
                     await self._binding(client, source)
                     payload = await self._json(
@@ -232,7 +260,9 @@ class InboundMediaHTTPClient:
         if auth.get("loggedInUser") != source.account_id:
             raise MediaFetchError("media_account_changed")
         rows = await self._json(
-            client, f"api/messages/{quote(source.chat_id, safe='')}", _METADATA_LIMIT,
+            client,
+            f"api/messages/{quote(source.chat_id, safe='')}",
+            _METADATA_LIMIT,
         )
         if isinstance(rows, dict):
             rows = rows.get("messages", rows.get("data"))
@@ -240,25 +270,35 @@ class InboundMediaHTTPClient:
                 rows = rows.get("messages")
         if not isinstance(rows, list) or len(rows) > 1000:
             raise MediaFetchError("invalid_media_message_list")
-        selected = [item for item in rows if isinstance(item, dict)
-                    and type(item.get("localId")) in (str, int)
-                    and str(item["localId"]) == source.local_id]
+        selected = [
+            item
+            for item in rows
+            if isinstance(item, dict)
+            and type(item.get("localId")) in (str, int)
+            and str(item["localId"]) == source.local_id
+        ]
         if len(selected) != 1:
             raise MediaFetchError("media_source_not_unique_or_not_visible")
         item = selected[0]
         try:
             content = item.get("content")
             matches = (
-                item.get("chatId") == source.chat_id and item.get("sender") == source.sender_id
-                and type(item.get("type")) is int and item["type"] == source.raw_type
+                item.get("chatId") == source.chat_id
+                and item.get("sender") == source.sender_id
+                and type(item.get("type")) is int
+                and item["type"] == source.raw_type
                 and item.get("isSelf") is not True
                 and _time(item.get("timestamp")) == _time(source.occurred_at)
                 and isinstance(content, str)
                 and hashlib.sha256(content.encode("utf-8")).hexdigest() == source.content_sha256
-                and ((source.server_id is None and item.get("serverId") in (None, "", 0, "0"))
-                     or (source.server_id is not None
-                         and type(item.get("serverId")) in (str, int)
-                         and str(item["serverId"]) == source.server_id))
+                and (
+                    (source.server_id is None and item.get("serverId") in (None, "", 0, "0"))
+                    or (
+                        source.server_id is not None
+                        and type(item.get("serverId")) in (str, int)
+                        and str(item["serverId"]) == source.server_id
+                    )
+                )
             )
         except (UnicodeError, MediaFetchError):
             matches = False
@@ -271,11 +311,15 @@ class InboundMediaHTTPClient:
             if response.status_code != 200:
                 transient = response.status_code in {408, 425, 429} or response.status_code >= 500
                 raise MediaFetchError(
-                    f"media_http_{response.status_code}", retryable=transient,
+                    f"media_http_{response.status_code}",
+                    retryable=transient,
                 )
             if response.headers.get("content-encoding", "identity").lower() not in {"", "identity"}:
                 raise MediaFetchError("media_content_encoding_not_allowed")
-            if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            if (
+                response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                != "application/json"
+            ):
                 raise MediaFetchError("media_json_content_type_required")
             lengths = response.headers.get_list("content-length")
             declared = None
@@ -293,8 +337,9 @@ class InboundMediaHTTPClient:
             if declared is not None and declared != len(body):
                 raise MediaFetchError("media_http_body_incomplete", retryable=True)
         try:
-            result = json.loads(body.decode("utf-8"), object_pairs_hook=_object,
-                                parse_constant=_nonfinite)
+            result = json.loads(
+                body.decode("utf-8"), object_pairs_hook=_object, parse_constant=_nonfinite
+            )
         except (ValueError, UnicodeError, RecursionError):
             raise MediaFetchError("invalid_media_json") from None
         if isinstance(result, dict) and (

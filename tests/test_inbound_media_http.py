@@ -28,15 +28,32 @@ TOKEN = "synthetic-http-token-not-real"
 
 def source(kind=49, **kwargs):
     text = "synthetic.pdf" if kind == 49 else ""
-    return replace(MediaSource("account-test", "chat-test", "sender-test", "12", "10012",
-                               kind, datetime(2026, 1, 1, tzinfo=UTC),
-                               hashlib.sha256(text.encode()).hexdigest()), **kwargs)
+    return replace(
+        MediaSource(
+            "account-test",
+            "chat-test",
+            "sender-test",
+            "12",
+            "10012",
+            kind,
+            datetime(2026, 1, 1, tzinfo=UTC),
+            hashlib.sha256(text.encode()).hexdigest(),
+        ),
+        **kwargs,
+    )
 
 
 def message(kind=49):
-    return {"localId": 12, "serverId": "10012", "chatId": "chat-test", "sender": "sender-test",
-            "type": kind, "timestamp": "2026-01-01T00:00:00Z", "isSelf": False,
-            "content": "synthetic.pdf" if kind == 49 else ""}
+    return {
+        "localId": 12,
+        "serverId": "10012",
+        "chatId": "chat-test",
+        "sender": "sender-test",
+        "type": kind,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "isSelf": False,
+        "content": "synthetic.pdf" if kind == 49 else "",
+    }
 
 
 class Chunks(httpx.AsyncByteStream):
@@ -47,7 +64,7 @@ class Chunks(httpx.AsyncByteStream):
         for i in range(0, len(self.data), 1024):
             if self.delay:
                 await asyncio.sleep(self.delay)
-            yield self.data[i:i + 1024]
+            yield self.data[i : i + 1024]
 
     async def aclose(self):
         self.closed = True
@@ -59,8 +76,11 @@ class Fixture:
         self.mutations = {}
         self.status, self.media_headers, self.delay = 200, {}, 0
         self.media_raw = None
-        self.media = {"type": "file" if kind == 49 else "image", "filename": "synthetic.pdf",
-                      "data": base64.b64encode(PDF if kind == 49 else IMAGE).decode()}
+        self.media = {
+            "type": "file" if kind == 49 else "image",
+            "filename": "synthetic.pdf",
+            "data": base64.b64encode(PDF if kind == 49 else IMAGE).decode(),
+        }
 
     def payload(self, path, number):
         if path.endswith("/auth"):
@@ -88,20 +108,21 @@ class Fixture:
         headers = {"Content-Type": "application/json", "Content-Length": str(len(raw))}
         if is_media:
             headers.update(self.media_headers)
-        return httpx.Response(self.status if is_media else 200,
-                              stream=stream, headers=headers)
+        return httpx.Response(self.status if is_media else 200, stream=stream, headers=headers)
 
     def client(self, **kwargs):
-        return InboundMediaHTTPClient("http://wechat.test:6174", TOKEN,
-                                      transport=httpx.MockTransport(self.handler), **kwargs)
+        return InboundMediaHTTPClient(
+            "http://wechat.test:6174", TOKEN, transport=httpx.MockTransport(self.handler), **kwargs
+        )
 
 
 @pytest.mark.parametrize("kind", [3, 49])
 def test_fetch_bound_bytes_empty_image_text_is_valid(kind):
     f = Fixture(kind)
     data = IMAGE if kind == 3 else PDF
-    result = f.client().fetch(source(kind), expected=ExpectedOriginal(
-        len(data), hashlib.sha256(data).hexdigest()))
+    result = f.client().fetch(
+        source(kind), expected=ExpectedOriginal(len(data), hashlib.sha256(data).hexdigest())
+    )
     assert result.media.data == data
     assert result.media.original_comparison == "match"
     assert result.source_fingerprint == source(kind).fingerprint
@@ -133,10 +154,18 @@ def test_account_change_prevents_media_or_discard_after(when):
 
 
 @pytest.mark.parametrize("when", [2, 5])
-@pytest.mark.parametrize("field,value", [("sender", "someone-else"), ("chatId", "another-chat"),
-                                        ("serverId", "different-id"), ("type", 3),
-                                        ("content", "changed.pdf"), ("isSelf", True),
-                                        ("timestamp", "2026-01-02T00:00:00Z")])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sender", "someone-else"),
+        ("chatId", "another-chat"),
+        ("serverId", "different-id"),
+        ("type", 3),
+        ("content", "changed.pdf"),
+        ("isSelf", True),
+        ("timestamp", "2026-01-02T00:00:00Z"),
+    ],
+)
 def test_bound_identity_rejected(field, value, when):
     f = Fixture()
     f.mutations[when] = lambda rows: [{**rows[0], field: value}]
@@ -154,8 +183,10 @@ def test_missing_or_duplicate_local_id_not_guessed(transform):
     assert len(f.calls) == 2
 
 
-@pytest.mark.parametrize("code,retryable", [(302, False), (401, False), (403, False),
-                                          (404, False), (429, True), (500, True), (503, True)])
+@pytest.mark.parametrize(
+    "code,retryable",
+    [(302, False), (401, False), (403, False), (404, False), (429, True), (500, True), (503, True)],
+)
 def test_status_classification_and_no_network_retry(code, retryable):
     f = Fixture()
     f.status = code
@@ -168,12 +199,17 @@ def test_status_classification_and_no_network_retry(code, retryable):
     assert "secret" not in str(err.value) and TOKEN not in repr(err.value)
 
 
-@pytest.mark.parametrize("headers,code", [({"Content-Encoding": "gzip"}, "media_content_encoding_not_allowed"),
-                                         ({"Content-Type": "text/html"}, "media_json_content_type_required"),
-                                         ({"Content-Length": "-1"}, "invalid_media_content_length"),
-                                         ({"Content-Length": "2, 2"}, "invalid_media_content_length"),
-                                         ({"Content-Length": "100000000"}, "media_http_body_too_large"),
-                                         ({"Content-Length": "1"}, "media_http_body_incomplete")])
+@pytest.mark.parametrize(
+    "headers,code",
+    [
+        ({"Content-Encoding": "gzip"}, "media_content_encoding_not_allowed"),
+        ({"Content-Type": "text/html"}, "media_json_content_type_required"),
+        ({"Content-Length": "-1"}, "invalid_media_content_length"),
+        ({"Content-Length": "2, 2"}, "invalid_media_content_length"),
+        ({"Content-Length": "100000000"}, "media_http_body_too_large"),
+        ({"Content-Length": "1"}, "media_http_body_incomplete"),
+    ],
+)
 def test_http_frame_limits(headers, code):
     f = Fixture()
     f.media_headers = headers
@@ -191,15 +227,24 @@ def test_unknown_length_stream_bounded():
         del reply.headers["Content-Length"]
         return reply
 
-    client = InboundMediaHTTPClient("http://wechat.test", TOKEN, max_bytes=100,
-                                    transport=httpx.MockTransport(handler))
+    client = InboundMediaHTTPClient(
+        "http://wechat.test", TOKEN, max_bytes=100, transport=httpx.MockTransport(handler)
+    )
     with pytest.raises(MediaFetchError, match="media_http_body_too_large"):
         client.fetch(source())
     assert all(s.closed for s in f.streams)
 
 
-@pytest.mark.parametrize("raw", [b'{"type":"pending","type":"file"}', b'{"x": NaN}',
-                                 b'{"x": Infinity}', b"not-json", b'"\xff"'])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"type":"pending","type":"file"}',
+        b'{"x": NaN}',
+        b'{"x": Infinity}',
+        b"not-json",
+        b'"\xff"',
+    ],
+)
 def test_invalid_json_rejected_without_payload(raw):
     f = Fixture()
     f.media_raw = raw
@@ -232,8 +277,17 @@ def test_claimed_full_image_is_not_source_proof():
     assert result.media.declared_quality == "full"
 
 
-@pytest.mark.parametrize("path", ["http://user:pass@example.test", "ftp://example.test", "http://example.test/other",
-                                   "http://example.test/?token=x", "http://example.test/#x", "http://example.test:0"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "http://user:pass@example.test",
+        "ftp://example.test",
+        "http://example.test/other",
+        "http://example.test/?token=x",
+        "http://example.test/#x",
+        "http://example.test:0",
+    ],
+)
 def test_operator_endpoint_contract(path):
     with pytest.raises(MediaFetchError, match="invalid_media_endpoint"):
         InboundMediaHTTPClient(path, TOKEN)
@@ -268,7 +322,9 @@ def test_real_http_file_fetch_then_private_stage(tmp_path):
     thread.start()
     try:
         client = InboundMediaHTTPClient(f"http://127.0.0.1:{server.server_port}", TOKEN)
-        result = client.fetch(source(), expected=ExpectedOriginal(len(PDF), hashlib.sha256(PDF).hexdigest()))
+        result = client.fetch(
+            source(), expected=ExpectedOriginal(len(PDF), hashlib.sha256(PDF).hexdigest())
+        )
         tmp_path.chmod(0o700)
         staged = InboundMediaStaging(tmp_path).publish(result)
         assert (tmp_path / (staged.reference + ".blob")).read_bytes() == PDF

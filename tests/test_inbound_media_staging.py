@@ -17,8 +17,11 @@ DATA = b"%PDF-1.7\nsynthetic-not-real-doc\n"
 
 
 def bound(data=DATA, **kwargs):
-    payload = {"type": "file", "filename": "private-fixture.pdf",
-               "data": base64.b64encode(data).decode()}
+    payload = {
+        "type": "file",
+        "filename": "private-fixture.pdf",
+        "data": base64.b64encode(data).decode(),
+    }
     return BoundMediaResult("a" * 64, parse_inbound_media(payload, **kwargs))
 
 
