@@ -29,7 +29,7 @@ Dispatch 在排队时就占据线程位置。`claim_next` 与显式 `claim` 共�
 
 `GET /inbound-media/{job_id}` 和按消息定位的 `GET /messages/{message_id}/inbound-media` 使用既有 Gateway API token，提供任务状态、期限、次数和静态错误码；不返回 capability、文件正文或磁盘路径。该入口面向受信服务/管理调用，不把全局 API token 发给微信用户。状态改变有结构化日志，实际用户通知仍由原 Delivery 工作者处理。
 
-Hermes 侧的最小契约是使用描述符 URL 和 Authorization header，在 AI 主机下载工作副本并核验大小/摘要。本仓真实回环测试以模拟 Hermes HTTP 服务完成这一步；**没有验证正在运行的 Hermes 是否具备这一 HTTP 文件工具或其网络/TLS 配置**。若现有 Agent profile 缺此能力，需要在其适配层增加 descriptor-aware 下载工具；不需要修改模型核心，也不在本轮改生产配置。下载后处理结果必须通过 FileBrowser API 另存，默认保留原件。
+Hermes 侧的最小契约是使用描述符 URL 和 Authorization header，在 AI 主机下载工作副本并核验大小/摘要。本仓真实回环测试以模拟 Hermes HTTP 服务取得字节并在内存核验大小/摘要；**没有验证真实 AI 主机工作副本落盘、正在运行的 Hermes 是否具备这一 HTTP 文件工具或其网络/TLS 配置**。若现有 Agent profile 缺此能力，需要在其适配层增加 descriptor-aware 下载工具；不需要修改模型核心，也不在本轮改生产配置。下载后处理结果必须通过 FileBrowser API 另存，默认保留原件。
 
 暂存/Attachment 是受控入站缓存，不是正式 FileBrowser 归档，也不是出站 READY Artifact。检索、分类、正式归档和加工逻辑仍属于 Hermes/文件服务；本轮不实现第二套文件服务、正文修改、删除、重命名或新建文件夹。需要回传时沿用已存在的 READY Artifact / Delivery 边界。`not_checked` 或 `different` 的 JPEG 不得称为原图，即使上游声明 full。
 
