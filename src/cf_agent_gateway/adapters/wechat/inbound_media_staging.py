@@ -7,6 +7,7 @@ No guessed original filename becomes an on-disk path; no business files are run.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -24,6 +25,16 @@ from cf_agent_gateway.adapters.wechat.inbound_media import (
 from cf_agent_gateway.adapters.wechat.inbound_media_http import BoundMediaResult, MediaFetchError
 
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
+_TRANSIENT_IO_ERRNOS = {
+    getattr(errno, name)
+    for name in ("EIO", "EBUSY", "EAGAIN", "EINTR", "ETIMEDOUT", "ESTALE")
+    if hasattr(errno, name)
+}
+
+
+def _io_error(error: OSError) -> MediaFetchError:
+    # Permission, no-follow/link and unknown failures are not temporary outages.
+    return MediaFetchError("media_staging_io_failed", retryable=error.errno in _TRANSIENT_IO_ERRNOS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,8 +216,8 @@ class InboundMediaStaging:
             return data
         except FileNotFoundError:
             raise MediaFetchError("media_staging_missing", retryable=True) from None
-        except OSError:
-            raise MediaFetchError("media_staging_io_failed", retryable=True) from None
+        except OSError as error:
+            raise _io_error(error) from None
         finally:
             if file_fd is not None:
                 os.close(file_fd)
@@ -265,8 +276,8 @@ class InboundMediaStaging:
                 media.original_comparison.value,
                 existing,
             )
-        except OSError:
-            raise MediaFetchError("media_staging_io_failed", retryable=True) from None
+        except OSError as error:
+            raise _io_error(error) from None
         finally:
             if fd is not None:
                 os.close(fd)

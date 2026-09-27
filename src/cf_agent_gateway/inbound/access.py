@@ -70,6 +70,12 @@ def grant_read(session, job, *, public_base_url):
         "url": public_base_url.rstrip("/") + f"/inbound-media/{job.id}/content",
         "authorization": "Bearer " + token,
         "expires_at": job.read_expires_at.isoformat(),
+        "download_policy": {
+            "max_attempts": 4,
+            "total_timeout_seconds": 30,
+            "retryable_status_codes": [503],
+            "retry_after_seconds": 1,
+        },
         "size": manifest["size"],
         "sha256": manifest["sha256"],
         "mime_type": _mime(manifest["signature"]),
@@ -80,7 +86,7 @@ def grant_read(session, job, *, public_base_url):
     }
 
 
-def read_authorized(session, job_id, header, staging):
+def _authorized_manifest(session, job_id, header):
     job = session.get(InboundMediaJob, job_id, populate_existing=True)
     now = datetime.now(UTC)
     if not isinstance(header, str) or not header.startswith("Bearer ") or len(header) > 128:
@@ -103,7 +109,7 @@ def read_authorized(session, job_id, header, staging):
         or aware(record.lease_expires_at) <= now
     ):
         raise MediaFetchError("media_read_not_authorized")
-    attachment = session.get(Attachment, job.attachment_id)
+    attachment = session.get(Attachment, job.attachment_id, populate_existing=True)
     manifest = job.manifest
     if (
         attachment is None
@@ -121,15 +127,25 @@ def read_authorized(session, job_id, header, staging):
         ).hexdigest()
     ):
         raise MediaFetchError("media_registry_conflict")
+    return dict(manifest)
+
+
+def read_authorized(session, job_id, header, staging):
+    manifest = _authorized_manifest(session, job_id, header)
     data = staging.read(manifest["reference"], size=manifest["size"], sha256=manifest["sha256"])
+    # Disk access may outlast a claim/lease or an identity change. Revalidate before
+    # releasing the buffered bytes; no database lock spans file or network I/O.
+    if _authorized_manifest(session, job_id, header) != manifest:
+        raise MediaFetchError("media_registry_conflict")
     return data, _mime(manifest["signature"])
 
 
 @router.get("/inbound-media/{job_id}/content", tags=["inbound-media"])
 def get_inbound_content(job_id: int, request: Request, session: DatabaseSession):
     settings = request.app.state.settings.inbound_media
+    headers = {"Cache-Control": "no-store"}
     if not settings.enabled:
-        raise HTTPException(status_code=404, detail="inbound media unavailable")
+        raise HTTPException(status_code=404, detail="inbound media unavailable", headers=headers)
     try:
         data, mime = read_authorized(
             session,
@@ -137,9 +153,23 @@ def get_inbound_content(job_id: int, request: Request, session: DatabaseSession)
             request.headers.get("authorization"),
             InboundMediaStaging(Path(settings.staging_root)),
         )
-    except (MediaFetchError, KeyError, ValueError, TypeError):
+    except MediaFetchError as error:
+        # A ready-but-missing/corrupt file is not a temporary read opportunity.
+        # Only explicit storage transients after authorization offer retry.
+        if error.retryable and error.code in {"media_staging_busy", "media_staging_io_failed"}:
+            raise HTTPException(
+                status_code=503,
+                detail="attachment read unavailable",
+                headers={**headers, "Retry-After": "1"},
+            ) from None
+        raise HTTPException(
+            status_code=403, detail="attachment read unavailable", headers=headers
+        ) from None
+    except (KeyError, ValueError, TypeError):
         # Do not disclose which identity, file, lease or credential was wrong.
-        raise HTTPException(status_code=403, detail="attachment read unavailable") from None
+        raise HTTPException(
+            status_code=403, detail="attachment read unavailable", headers=headers
+        ) from None
     return Response(
         content=data,
         media_type=mime,

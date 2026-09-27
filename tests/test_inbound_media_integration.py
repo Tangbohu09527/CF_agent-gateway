@@ -3,6 +3,7 @@
 Synthetic HTTP peers only. This never proves a deployed WeChat PDF download.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -18,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 import uvicorn
+from inbound_media_download_peer import fetch_verified
 from sqlalchemy import func, select
 from test_hermes_dispatch_ingestion import allow_sender
 from test_inbound_media_staging import bound
@@ -134,15 +136,10 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
             state["calls"].append(content)
             if "cf-inbound-read/v1" in content:
                 descriptor = json.loads(content.split("\n", 1)[1])["attachment"]
-                response = httpx.get(
-                    descriptor["url"],
-                    headers={"Authorization": descriptor["authorization"]},
-                    trust_env=False,
-                )
-                assert response.status_code == 200
-                assert len(response.content) == descriptor["size"]
-                assert hashlib.sha256(response.content).hexdigest() == descriptor["sha256"]
-                state["downloads"].append(response.content)
+                data = asyncio.run(fetch_verified(descriptor))
+                assert len(data) == descriptor["size"]
+                assert hashlib.sha256(data).hexdigest() == descriptor["sha256"]
+                state["downloads"].append(data)
                 state["descriptors"].append(descriptor)
             return self.reply(
                 {

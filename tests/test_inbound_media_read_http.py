@@ -1,5 +1,6 @@
 """Real loopback Gateway reads through Linux private storage and native flock."""
 
+import asyncio
 import hashlib
 import os
 import threading
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import test_inbound_media_queue as queue_tests
+from inbound_media_download_peer import fetch_verified
 from sqlalchemy import select
 from test_inbound_media_integration import gateway_server
 from test_inbound_media_staging import bound
@@ -67,7 +69,7 @@ def locked(root):
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+        yield fd
     finally:
         os.close(fd)
 
@@ -94,6 +96,23 @@ def test_authorized_busy_read_is_retryable_then_succeeds(ready_http):
     with locked(value.root):
         assert_unavailable(value.client.get(value.url, headers=value.headers), value, 503)
     assert_bytes(value.client.get(value.url, headers=value.headers), value)
+
+
+def test_bounded_download_peer_recovers_after_real_lock_release(ready_http):
+    import fcntl
+
+    value = ready_http
+    statuses = []
+    with locked(value.root) as fd:
+
+        def release_after_busy(status):
+            statuses.append(status)
+            if status == 503:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+        data = asyncio.run(fetch_verified(value.descriptor, on_response=release_after_busy))
+    assert statuses == [503, 200]
+    assert data == queue_tests.IMAGE
 
 
 @pytest.mark.parametrize("denial", ["missing", "wrong", "expired", "identity", "source"])
