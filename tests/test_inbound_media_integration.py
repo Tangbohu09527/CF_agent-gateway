@@ -100,6 +100,8 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            if self.command == "POST":
+                self.send_header("X-Hermes-Session-Id", self.headers["X-Hermes-Session-Id"])
             self.end_headers()
             self.wfile.write(data)
 

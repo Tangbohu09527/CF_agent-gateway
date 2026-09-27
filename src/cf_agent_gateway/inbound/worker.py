@@ -71,18 +71,21 @@ class InboundMediaWorker:
             return (job_id, token) if changed.rowcount == 1 else None
 
     def _owned(self, session, claim):
-        job = session.scalar(
-            select(InboundMediaJob)
+        # A fenced no-op write also locks SQLite, where SELECT FOR UPDATE has no
+        # effect. Ownership cannot change between this check and registration.
+        changed = session.execute(
+            update(InboundMediaJob)
             .where(
                 InboundMediaJob.id == claim[0],
                 InboundMediaJob.claim_token == claim[1],
                 InboundMediaJob.lease_expires_at > self.clock(),
             )
-            .with_for_update()
+            .values(claim_token=claim[1])
+            .execution_options(synchronize_session=False)
         )
-        if job is None:
+        if changed.rowcount != 1:
             raise MediaFetchError("media_lease_lost")
-        return job
+        return session.get(InboundMediaJob, claim[0], populate_existing=True)
 
     def process_claim(self, claim):
         try:

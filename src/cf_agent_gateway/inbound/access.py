@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.adapters.wechat.inbound_media_http import MediaFetchError
@@ -22,6 +23,22 @@ from cf_agent_gateway.task.model.models import HermesDispatchStatus
 
 router = APIRouter()
 DatabaseSession = Annotated[Session, Depends(get_database_session)]
+
+
+@router.get(
+    "/messages/{message_id}/inbound-media",
+    tags=["inbound-media"],
+    dependencies=[Depends(require_api_token)],
+)
+def get_message_inbound_status(message_id: int, session: DatabaseSession):
+    job_id = session.scalar(
+        select(InboundMediaJob.id).where(
+            InboundMediaJob.message_id == message_id,
+        )
+    )
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="inbound media unavailable")
+    return get_inbound_status(job_id, session)
 
 
 def grant_read(session, job, *, public_base_url):

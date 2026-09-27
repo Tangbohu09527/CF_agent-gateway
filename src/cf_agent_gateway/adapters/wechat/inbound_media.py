@@ -1,4 +1,4 @@
-"""Pure inbound file/image response validation; not wired to the production worker.
+"""Pure inbound file/image response validation used by durable media intake.
 
 READY means inline bytes are available, not durable, authorized or safe to open.
 HTTP limits, message/account binding, persistence and retries belong to the caller.

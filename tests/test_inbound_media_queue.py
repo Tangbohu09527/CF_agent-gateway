@@ -410,3 +410,72 @@ def test_shared_group_accepts_two_identities_and_uses_scoped_v2_descriptors(rig)
             HermesDispatchService(session, hermes, inbound_media=MEDIA).dispatch_record(record)
             assert outcome.admission.enterprise_identity_id in hermes.contents[0]
             store.mark_success(record.id, claim_token="group-claim")
+
+
+def test_http_authorization_and_message_status_do_not_expose_read_secret(rig, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from cf_agent_gateway.config import DatabaseSettings, Settings
+    from cf_agent_gateway.gateway.app import create_app
+    from cf_agent_gateway.inbound import access
+
+    admit(rig)
+    assert worker(rig).run_once() == "ready"
+    with rig.sessions() as session:
+        HermesDispatchRecordStore(session).claim_next(claim_token="http-read")
+        descriptor = grant_read(
+            session, session.get(InboundMediaJob, 1), public_base_url=MEDIA.public_base_url
+        )
+        session.commit()
+    monkeypatch.setattr(access, "InboundMediaStaging", lambda _root: rig.staging)
+    monkeypatch.setenv("CF_GATEWAY_API_TOKEN", "synthetic-status-only")
+    settings = Settings(database=DatabaseSettings(url=str(rig.engine.url)), inbound_media=MEDIA)
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/messages/1/inbound-media").status_code == 401
+        status = client.get(
+            "/messages/1/inbound-media",
+            headers={
+                "Authorization": "Bearer synthetic-status-only",
+            },
+        )
+        assert status.status_code == 200 and status.json()["state"] == "ready"
+        assert descriptor["authorization"] not in status.text
+        assert "read_token_hash" not in status.text
+        assert client.get("/inbound-media/1/content").status_code == 403
+        assert (
+            client.get(
+                "/inbound-media/1/content",
+                headers={
+                    "Authorization": "Bearer synthetic-status-only",
+                },
+            ).status_code
+            == 403
+        )
+        headers = {"Authorization": descriptor["authorization"]}
+        content = client.get("/inbound-media/1/content", headers=headers)
+        assert content.status_code == 200 and content.content == IMAGE
+        assert content.headers["cache-control"] == "no-store"
+        with rig.sessions() as session:
+            session.get(InboundMediaJob, 1).read_expires_at = datetime.now(UTC) - timedelta(
+                seconds=1
+            )
+            session.commit()
+        assert client.get("/inbound-media/1/content", headers=headers).status_code == 403
+
+
+def test_two_workers_cannot_claim_same_job(rig):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    admit(rig)
+    barrier = Barrier(2)
+
+    def claim():
+        barrier.wait(timeout=5)
+        return worker(rig).claim_once()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim), pool.submit(claim)]
+        claims = [future.result(timeout=10) for future in futures]
+    assert sum(item is not None for item in claims) == 1
+    assert job(rig).attempt_count == 1
