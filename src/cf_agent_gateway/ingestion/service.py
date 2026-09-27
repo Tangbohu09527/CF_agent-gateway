@@ -23,11 +23,14 @@ from cf_agent_gateway.admission import (
     MessageAdmissionOutcome,
     MessageAdmissionOutcomeStore,
 )
+from cf_agent_gateway.config import InboundMediaSettings
 from cf_agent_gateway.hermes import (
     HermesDispatcher,
     HermesDispatchOutboxExecutor,
     HermesResponseRelay,
 )
+from cf_agent_gateway.inbound.models import InboundMediaJob
+from cf_agent_gateway.inbound.store import stage_job
 from cf_agent_gateway.ingestion.errors import PersistedMessageNotFoundError
 from cf_agent_gateway.ingestion.models import (
     MessageIngestionOutcome,
@@ -83,8 +86,10 @@ class MessageAdmissionService:
         dispatch_record_store: HermesDispatchRecordStore | None = None,
         admission_outcome_store: MessageAdmissionOutcomeStore | None = None,
         admission_lease_seconds: float = DEFAULT_ADMISSION_LEASE_SECONDS,
+        inbound_media: InboundMediaSettings | None = None,
     ) -> None:
         self._session = session
+        self._inbound_media = inbound_media or InboundMediaSettings()
         self._message_store = message_store if message_store is not None else MessageStore(session)
         self._request_resolver = (
             request_resolver if request_resolver is not None else DefaultAdmissionRequestResolver()
@@ -252,6 +257,7 @@ class MessageAdmissionService:
             and dispatch_record is not None
             and dispatch_record.status is HermesDispatchStatus.QUEUED
             and self._hermes_dispatcher is not None
+            and not self._has_media_job(message_id)
         ):
             hermes_dispatch = self._hermes_dispatcher.dispatch(admission)
         return MessageIngestionOutcome(
@@ -274,6 +280,12 @@ class MessageAdmissionService:
         for attempt in range(2):
             try:
                 dispatch_record, created = self._dispatch_record_store.stage_enqueue(admission)
+                if created and self._inbound_media.enabled:
+                    stage_job(
+                        self._session,
+                        dispatch_record,
+                        wait_seconds=self._inbound_media.wait_seconds,
+                    )
                 self._admission_outcome_store.stage_completion(
                     claim_token=claim_token,
                     admission=admission,
@@ -331,6 +343,18 @@ class MessageAdmissionService:
 
     def _get_dispatch_for_message(self, message_id: int) -> HermesDispatchRecord | None:
         return self._dispatch_record_store.get_by_message_id(message_id)
+
+    def _has_media_job(self, message_id: int) -> bool:
+        from sqlalchemy import select
+
+        return (
+            self._session.scalar(
+                select(InboundMediaJob.id).where(
+                    InboundMediaJob.message_id == message_id,
+                )
+            )
+            is not None
+        )
 
     @staticmethod
     def _log_legacy_dispatch_reconciliation(

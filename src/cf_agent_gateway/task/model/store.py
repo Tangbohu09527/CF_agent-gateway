@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
+from cf_agent_gateway.inbound.models import TERMINAL_STATES, InboundMediaJob
 from cf_agent_gateway.task.model.errors import (
     HermesDispatchAdmissionError,
     HermesDispatchStateConflictError,
@@ -487,13 +488,21 @@ def _claimable_predicate(
     retry_limit: int,
 ) -> object:
     max_attempts = retry_limit + 1
-    return or_(
-        record.status == HermesDispatchStatus.QUEUED,
-        and_(
-            record.status == HermesDispatchStatus.FAILED,
-            or_(
-                record.attempt_count < max_attempts,
-                record.manual_retry_approved.is_(True),
+    return and_(
+        ~exists(
+            select(InboundMediaJob.id).where(
+                InboundMediaJob.dispatch_id == record.id,
+                InboundMediaJob.state.not_in(TERMINAL_STATES),
+            )
+        ),
+        or_(
+            record.status == HermesDispatchStatus.QUEUED,
+            and_(
+                record.status == HermesDispatchStatus.FAILED,
+                or_(
+                    record.attempt_count < max_attempts,
+                    record.manual_retry_approved.is_(True),
+                ),
             ),
         ),
     )

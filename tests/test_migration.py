@@ -72,6 +72,7 @@ SCHEMA_TABLES = (
     | CONTEXT_SNAPSHOT_TABLES
     | DISPATCH_RECOVERY_TABLES
     | ADMISSION_TABLES
+    | {"inbound_media_jobs"}
 )
 FOUNDATION_REVISION = "20260806_01"
 ARCHIVE_REVISION = "20260806_0002"
@@ -91,7 +92,7 @@ RUNTIME_RECOVERY_REVISION = "20260823_04"
 def _head_revision() -> str:
     migration_config = migration.create_migration_config()
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert head_revision == RUNTIME_RECOVERY_REVISION
+    assert head_revision == "20260927_01"
     return head_revision
 
 

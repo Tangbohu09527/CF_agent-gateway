@@ -132,6 +132,7 @@ def build_dispatch_worker(
             observed_client,
             context_access_policy=EnabledContextAccessPolicy(),
             available_tools=HERMES_CONTEXT_TOOL_NAMES,
+            inbound_media=settings.inbound_media,
         ),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,

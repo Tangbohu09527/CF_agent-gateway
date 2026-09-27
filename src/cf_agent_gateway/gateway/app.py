@@ -17,6 +17,7 @@ from cf_agent_gateway.database import (
 )
 from cf_agent_gateway.gateway.middleware import RequestBodyLimitMiddleware
 from cf_agent_gateway.gateway.routes import router
+from cf_agent_gateway.inbound.access import router as inbound_router
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.runtime.health import DatabaseReadinessMonitor, RuntimeHealthService
 from cf_agent_gateway.runtime.startup import (
@@ -88,4 +89,5 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.include_router(router)
     app.include_router(admin_router)
+    app.include_router(inbound_router)
     return app
