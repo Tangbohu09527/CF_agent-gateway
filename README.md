@@ -118,6 +118,9 @@ was exercised during the September 17 site acceptance.
   path was not part of the recorded CFserver production acceptance.
 - Inbound image/file interpretation, OCR, and archive processing are not implemented as a
   general Gateway workflow. Message API attachment rows are metadata, not content upload.
+  Opt-in durable WeChat byte intake and scoped Hermes HTTP reads are implemented;
+  see the [intake contract and acceptance checklist](docs/development/inbound-media-stage3.md).
+  This does not establish live WeChat download or FileBrowser archival acceptance.
 - Cross-repository deployment and backup restoration are operator procedures, not
   automated or proven by this repository.
 
