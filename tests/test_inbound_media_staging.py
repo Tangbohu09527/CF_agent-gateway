@@ -16,6 +16,27 @@ from cf_agent_gateway.adapters.wechat.inbound_media_staging import InboundMediaS
 DATA = b"%PDF-1.7\nsynthetic-not-real-doc\n"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires Linux publication semantics")
+def test_recover_link_before_unlink_crash(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    staging = InboundMediaStaging(tmp_path)
+    original_unlink = os.unlink
+    crashed = []
+
+    def crash_once(name, **kwargs):
+        if name.startswith(".intake-") and not crashed:
+            crashed.append(name)
+            raise RuntimeError("simulated link publication crash")
+        return original_unlink(name, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", crash_once)
+    with pytest.raises(RuntimeError):
+        staging.publish(bound())
+    recovered = staging.publish(bound())
+    assert staging.read(recovered.reference, size=recovered.size, sha256=recovered.sha256) == DATA
+    assert all(path.stat().st_nlink == 1 for path in tmp_path.iterdir())
+
+
 def bound(data=DATA, **kwargs):
     payload = {
         "type": "file",

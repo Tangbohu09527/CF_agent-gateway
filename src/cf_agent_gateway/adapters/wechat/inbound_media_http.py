@@ -221,7 +221,7 @@ class InboundMediaHTTPClient:
                         "Accept": "application/json",
                         "Accept-Encoding": "identity",
                     },
-                    timeout=httpx.Timeout(connect=5, read=15, write=5, pool=5),
+                    timeout=httpx.Timeout(connect=5, read=self._deadline, write=5, pool=5),
                     trust_env=False,
                     follow_redirects=False,
                     transport=self._transport,

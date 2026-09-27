@@ -60,13 +60,20 @@ class InboundMediaStaging:
             info = os.fstat(fd)
             if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
                 raise MediaFetchError("media_staging_permissions")
+            # Serialize publication/recovery/read, including the link->unlink window.
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise MediaFetchError("media_staging_busy", retryable=True) from None
             return fd
         except Exception:
             os.close(fd)
             raise
 
     @staticmethod
-    def _verify(fd: int, name: str, expected: bytes) -> None:
+    def _verify(fd: int, name: str, expected: bytes, *, links: int = 1) -> None:
         file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         try:
             info = os.fstat(file_fd)
@@ -74,7 +81,7 @@ class InboundMediaStaging:
                 not stat.S_ISREG(info.st_mode)
                 or info.st_uid != os.geteuid()
                 or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_nlink != 1
+                or info.st_nlink != links
                 or info.st_size != len(expected)
             ):
                 raise MediaFetchError("media_staging_conflict")
@@ -102,12 +109,32 @@ class InboundMediaStaging:
             os.close(file_fd)
 
     @classmethod
+    def _recover_links(cls, fd: int, name: str, data: bytes) -> None:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if info.st_nlink == 1:
+            return
+        # Only our own UUID publication links, never arbitrary/external hard links.
+        orphans = []
+        for candidate in os.listdir(fd):
+            if re.fullmatch(r"\.intake-[0-9a-f]{32}", candidate):
+                other = os.stat(candidate, dir_fd=fd, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) == (other.st_dev, other.st_ino):
+                    orphans.append(candidate)
+        if not orphans or info.st_nlink != 1 + len(orphans):
+            raise MediaFetchError("media_staging_conflict")
+        cls._verify(fd, name, data, links=info.st_nlink)
+        for orphan in orphans:
+            os.unlink(orphan, dir_fd=fd)
+        os.fsync(fd)
+
+    @classmethod
     def _publish(cls, fd: int, name: str, data: bytes) -> bool:
         try:
             os.stat(name, dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
+            cls._recover_links(fd, name, data)
             cls._verify(fd, name, data)
             # May be a recoverable prior publication lacking its directory sync.
             os.fsync(fd)
@@ -137,6 +164,54 @@ class InboundMediaStaging:
         os.fsync(fd)
         cls._verify(fd, name, data)
         return reused
+
+    def read(self, reference: str, *, size: int, sha256: str) -> bytes:
+        """Read registered bytes through the same private/no-follow boundary.
+
+        Also recovers a verified publication interrupted between link and unlink.
+        A missing blob is distinct so the queue can retry a pre-publication crash.
+        """
+        if (
+            not isinstance(reference, str)
+            or _HEX.fullmatch(reference) is None
+            or not isinstance(sha256, str)
+            or _HEX.fullmatch(sha256) is None
+            or type(size) is not int
+            or not 1 <= size <= MAX_MEDIA_BYTES
+        ):
+            raise MediaFetchError("invalid_media_staging_reference")
+        fd = None
+        file_fd = None
+        try:
+            fd = self._root_fd()
+            name = reference + ".blob"
+            file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            info = os.fstat(file_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                raise MediaFetchError("media_staging_conflict")
+            chunks = []
+            remaining = size + 1
+            while remaining:
+                chunk = os.read(file_fd, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) != size or hashlib.sha256(data).hexdigest() != sha256:
+                raise MediaFetchError("media_staging_conflict")
+            self._recover_links(fd, name, data)
+            self._verify(fd, name, data)
+            return data
+        except FileNotFoundError:
+            raise MediaFetchError("media_staging_missing", retryable=True) from None
+        except OSError:
+            raise MediaFetchError("media_staging_io_failed", retryable=True) from None
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            if fd is not None:
+                os.close(fd)
 
     def publish(self, bound: BoundMediaResult) -> StagedMedia:
         if (
@@ -191,7 +266,7 @@ class InboundMediaStaging:
                 existing,
             )
         except OSError:
-            raise MediaFetchError("media_staging_io_failed") from None
+            raise MediaFetchError("media_staging_io_failed", retryable=True) from None
         finally:
             if fd is not None:
                 os.close(fd)
