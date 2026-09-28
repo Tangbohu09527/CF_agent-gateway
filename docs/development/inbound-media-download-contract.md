@@ -4,7 +4,7 @@
 
 ## 最小工具接口
 
-建议接口为 `download_inbound_attachment(descriptor, task_context)`；名称可由插件项目确定，下列行为必须保持。工具是可信插件操作，不把下载义务交给模型自由生成 shell 命令。
+下载器内部接口可为 `download_inbound_attachment(descriptor, task_context)`；模型侧只传附件 ID，不能提交 descriptor 或 Authorization。完整描述符必须通过 [cf-inbound-host-binding/v1 认证后台交接](inbound-host-binding-contract.md)进入宿主。现有 HostBridge 与下载器复用本接口，不再实现第二套下载器。工具是可信插件操作，不把下载义务交给模型自由生成 shell 命令。
 
 `descriptor` 为 Gateway 发出的 `cf-inbound-read/v1`：
 
