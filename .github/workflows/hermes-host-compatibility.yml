@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Check out Gateway
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Check out immutable official Hermes source
         uses: actions/checkout@v4
         with:

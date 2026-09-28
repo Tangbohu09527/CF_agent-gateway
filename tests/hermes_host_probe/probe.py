@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import mimetypes
 import os
 import platform
 import secrets
@@ -206,6 +207,44 @@ def normalized(messages):
     ]
 
 
+def initialize_builtin_mime() -> None:
+    """Use only Python's built-in MIME table, without OS files or Windows registry.
+
+    init(files=[]) alone still consults knownfiles and the Windows registry when
+    its database is absent. Seed the stdlib database from MimeTypes' built-in
+    table first. This changes only disposable test-process stdlib state, never
+    the pinned Hermes implementation or the filesystem audit allow-list.
+    """
+    checking = True
+
+    def no_mime_environment_reads(event, _args):
+        if checking and (event == "open" or event.startswith("winreg.")):
+            raise AssertionError("MIME bootstrap attempted environment file/registry access")
+
+    sys.addaudithook(no_mime_environment_reads)
+    try:
+        mimetypes.knownfiles = []
+        mimetypes.inited = True
+        mimetypes._db = mimetypes.MimeTypes(filenames=())
+        mimetypes.init(files=[])
+        assert mimetypes.guess_type("synthetic.pdf") == ("application/pdf", None)
+        assert mimetypes.guess_type("synthetic.jpg") == ("image/jpeg", None)
+    finally:
+        checking = False
+
+
+def verify_outside_reads_denied(source: Path) -> None:
+    # Opening is stopped by the audit hook before filesystem access, including
+    # the exact Linux MIME file which exposed the original CI bootstrap failure.
+    for path in (source.parent / "outside-isolated-roots", Path("/etc/mime.types")):
+        try:
+            path.read_bytes()
+        except RuntimeError as error:
+            assert str(error).startswith("probe denies access outside isolated roots:")
+        else:
+            raise AssertionError("Isolation audit allowed an external read")
+
+
 async def child(source: Path):
     platform.system()  # Windows stdlib may query the OS before the no-process guard.
     sandbox = Path.cwd()
@@ -223,6 +262,8 @@ async def child(source: Path):
     }
     (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
     rejected = guard(source, sandbox)
+    initialize_builtin_mime()
+    verify_outside_reads_denied(source)
     sys.path.insert(0, str(source))
     from aiohttp import ClientSession, ClientTimeout, web
     from gateway.config import PlatformConfig
@@ -249,6 +290,8 @@ async def child(source: Path):
         "official_agent": True,
         "model": "loopback synthetic stub",
         "plugin": "synthetic observer, not FileBridge",
+        "mime_source": "stdlib built-in table; no OS files or registry",
+        "outside_file_audit_self_check": True,
     }
     try:
         assert await adapter.connect()

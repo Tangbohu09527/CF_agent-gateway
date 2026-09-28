@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -160,7 +161,7 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
             if self.path.startswith("/api/sessions/"):
                 assert self.headers["Authorization"] == "Bearer synthetic-hermes-key"
                 path = self.path.split("?", 1)[0].split("/")
-                sid = path[3]
+                sid = unquote(path[3])
                 session = state["sessions"][sid]
                 if path[-1] == "messages":
                     return self.reply({"session_id": sid, "data": session["history"]})
@@ -191,7 +192,7 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
             if self.path.startswith("/api/sessions"):
                 assert self.headers["Authorization"] == "Bearer synthetic-hermes-key"
                 if self.path.endswith("/model"):
-                    sid = self.path.split("/")[3]
+                    sid = unquote(self.path.split("/")[3])
                     return self.reply(
                         {
                             "object": "hermes.session.model_lock",
@@ -208,7 +209,9 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
                         }
                     )
                 sid = request["id"]
-                parent_id = self.path.split("/")[3] if self.path.endswith("/fork") else None
+                parent_id = (
+                    unquote(self.path.split("/")[3]) if self.path.endswith("/fork") else None
+                )
                 parent = state["sessions"].get(parent_id)
                 state["sessions"][sid] = {
                     "row": {

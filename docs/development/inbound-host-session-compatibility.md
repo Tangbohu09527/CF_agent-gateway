@@ -103,6 +103,11 @@ Ruff lint 和 format check 通过。Linux/Windows 的
 签名与真实接口不符，均修正在探针内，没有修改官方实现或关闭断言。官方对 Windows
 自带 SQLite 的 WAL 版本警告及降级仍保留；没有升级用户环境来绕过它。
 
+首轮 Ubuntu CI 还发现 aiohttp 的标准库 MIME 初始化尝试读取 `/etc/mime.types`，
+被隔离审计正确拒绝。探针现只初始化 Python 内置 MIME 表，并断言初始化期间没有
+文件或 Windows 注册表读取；原 `/etc` 禁止规则保留，另有真实越界读取拒绝自检。
+修正后的 Windows 官方探针已成功，Linux 结果仍须核验修正提交对应的 CI。
+
 这些结果不表示实际 AI 主机、真实 FileBrowser HostBridge、生产 TLS 或附件下载
 已连通。插件接线、批准入口隔离、真实 Profile 选项、撤销监听及落盘仍需对应项目
 消费定版契约后的验收。PDF 上游长期 pending 仍是独立阻塞。
