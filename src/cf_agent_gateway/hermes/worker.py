@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from cf_agent_gateway.delivery.models import DeliveryOutboxRecord
+from cf_agent_gateway.hermes.errors import HermesResponseError
 from cf_agent_gateway.hermes.models import HermesDispatchOutcome
 from cf_agent_gateway.hermes.outbox import dispatch_error_code, dispatch_failure_status
 from cf_agent_gateway.hermes.response import HermesResponseProcessor
@@ -150,10 +152,13 @@ class HermesDispatchWorker:
             )
             return claim
 
-    def process_claim(self, claim: DispatchClaim) -> DispatchProcessResult:
+    def process_claim(
+        self, claim: DispatchClaim, *, stop_event: Event | None = None
+    ) -> DispatchProcessResult:
         """Execute one claim, persist its response, then invoke the delivery pipeline."""
 
         execution_session = self._session_factory()
+        host_barrier_attempted = False
         try:
             record = HermesDispatchRecordStore(execution_session).get(claim.record_id)
             if (
@@ -166,14 +171,25 @@ class HermesDispatchWorker:
                     expected_status=HermesDispatchStatus.RUNNING,
                 )
             dispatcher = self._dispatcher_factory(execution_session)
-            with self._lease_heartbeat(claim):
+            with self._lease_heartbeat(claim, stop_event=stop_event) as heartbeat:
                 try:
                     outcome = dispatcher.dispatch_record(record)
+                    execution_session.close()
+                    self._reject_invalidated_host_claim(claim, heartbeat)
                 except Exception as error:
                     with suppress(Exception):
                         execution_session.rollback()
+                    execution_session.close()
+                    host_barrier_attempted = True
+                    self._close_host_binding(claim, "dispatch_failed")
                     return self._record_failure(claim, error)
 
+                host_barrier_attempted = True
+                self._close_host_binding(claim, "completed")
+                try:
+                    self._reject_invalidated_host_claim(claim, heartbeat)
+                except HermesResponseError as error:
+                    return self._record_failure(claim, error)
                 execution_session.close()
                 with self._session_factory() as completion_session:
                     response = HermesDispatchResponseStore(completion_session).complete_success(
@@ -183,6 +199,12 @@ class HermesDispatchWorker:
                     )
         finally:
             execution_session.close()
+            if not host_barrier_attempted:
+                # Includes cancellation/BaseException and failures while persisting
+                # a result. Never leave a live grant because stack unwinding skipped
+                # the ordinary success/failure branch.
+                with suppress(Exception):
+                    self._close_host_binding(claim, "dispatch_interrupted")
 
         delivery_error_code = self._deliver(outcome)
         result = DispatchProcessResult(
@@ -481,7 +503,7 @@ class HermesDispatchWorker:
                         break
                     if claim is None:
                         break
-                    active.add(executor.submit(self.process_claim, claim))
+                    active.add(executor.submit(self.process_claim, claim, stop_event=stop_event))
                     claimed = True
 
                 if active:
@@ -563,11 +585,57 @@ class HermesDispatchWorker:
                 return error_code
         return None
 
-    def _lease_heartbeat(self, claim: DispatchClaim) -> _LeaseHeartbeat:
+    def _has_host_binding(self, claim: DispatchClaim) -> bool:
+        from cf_agent_gateway.inbound.host_binding_models import InboundHostBinding
+
+        with self._session_factory() as session:
+            return bool(
+                session.scalar(
+                    select(
+                        exists().where(
+                            InboundHostBinding.dispatch_id == claim.record_id,
+                            InboundHostBinding.claim_token_hash
+                            == hashlib.sha256(claim.claim_token.encode("utf-8")).hexdigest(),
+                        )
+                    )
+                )
+            )
+
+    def _revoke_host_binding(self, claim: DispatchClaim, reason: str) -> bool:
+        from cf_agent_gateway.inbound.host_binding import revoke_dispatch
+
+        if not self._has_host_binding(claim):
+            return False
+        with self._session_factory() as session:
+            revoke_dispatch(session, claim.record_id, reason, claim_token=claim.claim_token)
+            session.commit()
+        return True
+
+    def _close_host_binding(self, claim: DispatchClaim, reason: str) -> None:
+        from cf_agent_gateway.inbound.host_binding import revoke_and_wait
+
+        revoke_and_wait(
+            self._session_factory, claim.record_id, reason, claim_token=claim.claim_token
+        )
+
+    def _reject_invalidated_host_claim(
+        self, claim: DispatchClaim, heartbeat: _LeaseHeartbeat
+    ) -> None:
+        if (heartbeat.lease_lost or heartbeat.shutdown_requested) and self._has_host_binding(claim):
+            # The request may have executed remotely. Preserve UNCERTAIN rather
+            # than automatically replaying a call after ownership/cancellation loss.
+            raise HermesResponseError(operation="host_binding_lifecycle")
+
+    def _lease_heartbeat(
+        self, claim: DispatchClaim, *, stop_event: Event | None = None
+    ) -> _LeaseHeartbeat:
         return _LeaseHeartbeat(
             self._session_factory,
             claim,
             lease_seconds=self._lease_seconds,
+            shutdown_event=stop_event,
+            on_lease_lost=lambda: self._revoke_host_binding(claim, "dispatch_lease_lost"),
+            on_shutdown=lambda: self._revoke_host_binding(claim, "dispatch_cancelled"),
         )
 
     @staticmethod
@@ -622,12 +690,32 @@ class _LeaseHeartbeat:
         claim: DispatchClaim,
         *,
         lease_seconds: float,
+        shutdown_event: Event | None = None,
+        on_lease_lost: Callable[[], bool] | None = None,
+        on_shutdown: Callable[[], bool] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._claim = claim
         self._lease_seconds = lease_seconds
         self._stop_event = Event()
         self._thread: Thread | None = None
+        self._shutdown_event = shutdown_event
+        self._on_lease_lost = on_lease_lost
+        self._on_shutdown = on_shutdown
+        self._lease_lost = Event()
+        self._lease_revoked = Event()
+        self._shutdown_requested = Event()
+        self._shutdown_revoked = Event()
+
+    @property
+    def lease_lost(self) -> bool:
+        return self._lease_lost.is_set()
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_requested.is_set() or (
+            self._shutdown_event is not None and self._shutdown_event.is_set()
+        )
 
     def __enter__(self) -> _LeaseHeartbeat:
         with self._session_factory() as session:
@@ -653,7 +741,35 @@ class _LeaseHeartbeat:
             self._thread.join(timeout=max(1.0, self._lease_seconds))
 
     def _run(self, interval: float) -> None:
-        while not self._stop_event.wait(interval):
+        next_renewal = monotonic() + interval
+        while not self._stop_event.wait(min(interval, 0.1)):
+            if (
+                self._shutdown_event is not None
+                and self._shutdown_event.is_set()
+                and not self._shutdown_revoked.is_set()
+                and self._on_shutdown is not None
+            ):
+                # Keep checking until a media binding exists: shutdown may arrive
+                # while the claim is still preparing its dedicated Hermes session.
+                try:
+                    if self._on_shutdown():
+                        self._shutdown_requested.set()
+                        self._shutdown_revoked.set()
+                except Exception:
+                    # Database outages must not turn shutdown into a successful
+                    # attachment result. The fixed host lease remains the fallback.
+                    self._shutdown_requested.set()
+            if self._lease_lost.is_set():
+                # A failure can occur before preparation commits the binding, or
+                # while the DB is unavailable. Do not renew again; keep attempting
+                # bounded local cleanup until this call exits or revocation lands.
+                if self._on_lease_lost is not None and not self._lease_revoked.is_set():
+                    with suppress(Exception):
+                        if self._on_lease_lost():
+                            self._lease_revoked.set()
+                continue
+            if monotonic() < next_renewal:
+                continue
             try:
                 with self._session_factory() as session:
                     HermesDispatchRecordStore(session).renew_lease(
@@ -661,7 +777,13 @@ class _LeaseHeartbeat:
                         claim_token=self._claim.claim_token,
                         lease_seconds=self._lease_seconds,
                     )
+                next_renewal = monotonic() + interval
             except Exception as error:
+                self._lease_lost.set()
+                if self._on_lease_lost is not None:
+                    with suppress(Exception):
+                        if self._on_lease_lost():
+                            self._lease_revoked.set()
                 logger.warning(
                     "worker lease lost",
                     extra={
@@ -672,7 +794,6 @@ class _LeaseHeartbeat:
                         }
                     },
                 )
-                return
 
 
 def _validated_reconciliation_now(value: datetime) -> datetime:

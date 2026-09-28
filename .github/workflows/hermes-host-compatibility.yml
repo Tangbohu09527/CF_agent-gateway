@@ -1,0 +1,62 @@
+name: Fixed Hermes host compatibility
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-host-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-hermes-api:
+    name: Real Hermes API (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out Gateway
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check out immutable official Hermes source
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 4d55ca91656ac5f83e1506679b7f81e0238e5e16
+          path: .pytest_cache/hermes-host-probe/source
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tests/hermes_host_probe/requirements.txt
+      - name: Build isolated probe environment
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          root = Path('.pytest_cache/hermes-host-probe/venv')
+          subprocess.run([sys.executable, '-m', 'venv', str(root)], check=True)
+          python = root / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-m', 'pip', 'install', '-r',
+                          'tests/hermes_host_probe/requirements.txt'], check=True)
+      - name: Exercise real authenticated APIs with loopback model only
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          python = Path('.pytest_cache/hermes-host-probe/venv') / (
+              'Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-I', '-B', 'tests/hermes_host_probe/probe.py',
+                          '--hermes-source', '.pytest_cache/hermes-host-probe/source'], check=True)

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
+from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
 
 _POLLING_INTERVAL_ERROR = (
     "runtime.polling_interval_seconds must be within the supported positive timeout range"
@@ -243,6 +244,42 @@ class WorkerSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class InboundMediaSettings:
+    enabled: bool = False
+    staging_root: str = "/var/lib/cf-agent-gateway/inbound-media"
+    public_base_url: str = ""
+    wait_seconds: int = 900
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("inbound_media.enabled must be boolean")
+        if type(self.wait_seconds) is not int or not 1 <= self.wait_seconds <= 86400:
+            raise ValueError("inbound_media.wait_seconds must be between 1 and 86400")
+        # POSIX deployment paths remain valid in Windows configuration tooling.
+        if not isinstance(self.staging_root, str) or (
+            not Path(self.staging_root).is_absolute() and not self.staging_root.startswith("/")
+        ):
+            raise ValueError("inbound_media.staging_root must be absolute")
+        if ".." in Path(self.staging_root).parts or "\x00" in self.staging_root:
+            raise ValueError("invalid inbound media staging root")
+        if self.enabled or self.public_base_url:
+            parsed = urlsplit(self.public_base_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.port == 0
+                or "\\" in self.public_base_url
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.path not in {"", "/"}
+                or any(ord(c) < 33 or ord(c) > 126 for c in self.public_base_url)
+            ):
+                raise ValueError("inbound_media.public_base_url must be an HTTP(S) origin")
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     server: ServerSettings = ServerSettings()
     database: DatabaseSettings = DatabaseSettings()
@@ -253,6 +290,20 @@ class Settings:
     hermes: HermesSettings = HermesSettings()
     worker: WorkerSettings = WorkerSettings()
     runtime: RuntimeSettings = RuntimeSettings()
+    inbound_media: InboundMediaSettings = InboundMediaSettings()
+    host_binding: HostBindingSettings = HostBindingSettings()
+
+    def __post_init__(self):
+        protected = {
+            self.api.token_env,
+            self.api.admin_token_env,
+            self.hermes.api_key_env,
+            self.wechat.token_env,
+        }
+        if self.host_binding.service_token_env in protected or (
+            self.host_binding.encryption_key_env in protected
+        ):
+            raise ValueError("host_binding requires separate service and encryption secrets")
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -276,6 +327,8 @@ def load_settings(path: str | Path) -> Settings:
     wechat = _mapping(raw, "wechat")
     hermes = _mapping(raw, "hermes")
     worker = _mapping(raw, "worker")
+    inbound_media = _mapping(raw, "inbound_media")
+    host_binding = _mapping(raw, "host_binding")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
@@ -298,6 +351,8 @@ def load_settings(path: str | Path) -> Settings:
         raise ValueError(f"unsupported logging.level: {log_level}")
 
     return Settings(
+        inbound_media=InboundMediaSettings(**inbound_media),
+        host_binding=HostBindingSettings(**host_binding),
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),

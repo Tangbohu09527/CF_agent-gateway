@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
+from cf_agent_gateway.inbound.models import TERMINAL_STATES, InboundMediaJob
 from cf_agent_gateway.task.model.errors import (
     HermesDispatchAdmissionError,
     HermesDispatchStateConflictError,
@@ -352,6 +353,8 @@ class HermesDispatchRecordStore:
         status: HermesDispatchStatus | object,
         error_code: str | None,
     ) -> HermesDispatchRecord:
+        from cf_agent_gateway.inbound.host_binding import host_barrier_clear
+
         token = _validated_required_string(
             claim_token,
             field_name="claim_token",
@@ -364,6 +367,7 @@ class HermesDispatchRecordStore:
                 HermesDispatchRecord.status == HermesDispatchStatus.RUNNING,
                 HermesDispatchRecord.claim_token == token,
                 HermesDispatchRecord.lease_expires_at > func.now(),
+                host_barrier_clear(dispatch_id=HermesDispatchRecord.id),
             )
             .values(
                 status=status,
@@ -382,6 +386,8 @@ class HermesDispatchRecordStore:
         )
 
     def _finalize_exhausted(self, *, now: datetime, retry_limit: int) -> None:
+        from cf_agent_gateway.inbound.host_binding import host_barrier_clear, revoke_dispatch
+
         max_attempts = retry_limit + 1
         failed_statement = (
             update(HermesDispatchRecord)
@@ -389,6 +395,7 @@ class HermesDispatchRecordStore:
                 HermesDispatchRecord.status == HermesDispatchStatus.FAILED,
                 HermesDispatchRecord.attempt_count >= max_attempts,
                 HermesDispatchRecord.manual_retry_approved.is_(False),
+                host_barrier_clear(dispatch_id=HermesDispatchRecord.id),
             )
             .values(status=HermesDispatchStatus.DEAD, updated_at=func.now())
             .execution_options(synchronize_session=False)
@@ -412,7 +419,29 @@ class HermesDispatchRecordStore:
         )
         try:
             self._session.execute(failed_statement)
-            self._session.execute(expired_statement)
+            expired = list(
+                self._session.execute(
+                    select(HermesDispatchRecord.id, HermesDispatchRecord.claim_token).where(
+                        HermesDispatchRecord.status == HermesDispatchStatus.RUNNING,
+                        HermesDispatchRecord.lease_expires_at <= now,
+                    )
+                )
+            )
+            for record_id, claim_token in expired:
+                # A concurrent renewal or replacement claim must not be revoked.
+                result = self._session.execute(
+                    expired_statement.where(
+                        HermesDispatchRecord.id == record_id,
+                        HermesDispatchRecord.claim_token == claim_token,
+                    )
+                )
+                if result.rowcount == 1:
+                    revoke_dispatch(
+                        self._session,
+                        record_id,
+                        "dispatch_lease_expired",
+                        claim_token=claim_token,
+                    )
             self._session.commit()
         except Exception:
             self._session.rollback()
@@ -487,13 +516,21 @@ def _claimable_predicate(
     retry_limit: int,
 ) -> object:
     max_attempts = retry_limit + 1
-    return or_(
-        record.status == HermesDispatchStatus.QUEUED,
-        and_(
-            record.status == HermesDispatchStatus.FAILED,
-            or_(
-                record.attempt_count < max_attempts,
-                record.manual_retry_approved.is_(True),
+    return and_(
+        ~exists(
+            select(InboundMediaJob.id).where(
+                InboundMediaJob.dispatch_id == record.id,
+                InboundMediaJob.state.not_in(TERMINAL_STATES),
+            )
+        ),
+        or_(
+            record.status == HermesDispatchStatus.QUEUED,
+            and_(
+                record.status == HermesDispatchStatus.FAILED,
+                or_(
+                    record.attempt_count < max_attempts,
+                    record.manual_retry_approved.is_(True),
+                ),
             ),
         ),
     )
@@ -515,13 +552,18 @@ def _thread_head_predicate(record: type[HermesDispatchRecord]) -> object:
 
 
 def _thread_idle_predicate(record: type[HermesDispatchRecord]) -> object:
+    from cf_agent_gateway.inbound.host_binding import host_barrier_clear
+
     running = aliased(HermesDispatchRecord)
-    return ~exists(
-        select(running.id).where(
-            running.ai_thread_id == record.ai_thread_id,
-            running.id != record.id,
-            running.status == HermesDispatchStatus.RUNNING,
-        )
+    return and_(
+        host_barrier_clear(ai_thread_id=record.ai_thread_id),
+        ~exists(
+            select(running.id).where(
+                running.ai_thread_id == record.ai_thread_id,
+                running.id != record.id,
+                running.status == HermesDispatchStatus.RUNNING,
+            )
+        ),
     )
 
 

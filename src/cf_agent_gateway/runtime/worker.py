@@ -23,6 +23,7 @@ from cf_agent_gateway.runtime.heartbeat import (
     HeartbeatPublisher,
     create_worker_heartbeat_from_environment,
 )
+from cf_agent_gateway.runtime.inbound_media import media_intake_runtime
 from cf_agent_gateway.runtime.startup import (
     database_startup_check_enabled,
     run_database_startup,
@@ -61,6 +62,17 @@ _PollHistoryShape = tuple[
 
 
 def run_worker(
+    settings: Settings,
+    *,
+    stop_event: Event | None = None,
+    poll_once: PollOnce | None = None,
+    heartbeat: HeartbeatPublisher | None = None,
+) -> None:
+    with media_intake_runtime(settings, enabled=poll_once is None):
+        _run_poll_worker(settings, stop_event=stop_event, poll_once=poll_once, heartbeat=heartbeat)
+
+
+def _run_poll_worker(
     settings: Settings,
     *,
     stop_event: Event | None = None,
