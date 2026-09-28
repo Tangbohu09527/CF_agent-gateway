@@ -1,5 +1,6 @@
 """Real Gateway auth/SQL/claims/HTTP; the plugin host is a protocol test peer."""
 
+import asyncio
 import base64
 import json
 import time
@@ -10,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from inbound_media_download_peer import fetch_verified
 from sqlalchemy import select
 from test_inbound_media_integration import gateway_server
 from test_inbound_media_queue import admit, worker
@@ -273,6 +275,47 @@ def test_real_event_disconnect_revokes_without_end_hook(host):
         else:
             pytest.fail("disconnected host retained authority")
     assert resolve(client, body).status_code == 403
+
+
+def test_live_events_kept_through_real_http_download_and_closed(host, monkeypatch):
+    rig, client, body, binding, settings = host
+    # Portable storage double only. Linux full integration separately uses the
+    # real private filesystem; HTTP, auth, fences, events and downloader are real.
+    monkeypatch.setattr(
+        "cf_agent_gateway.inbound.access.InboundMediaStaging", lambda _path: rig.staging
+    )
+    grant = resolve(client, body).json()
+    with gateway_server(settings) as live:
+        origin = live.inbound_media.public_base_url
+        with (
+            httpx.Client(base_url=origin, trust_env=False) as peer,
+            peer.stream(
+                "GET", PREFIX + f"/{binding.id}/events", headers=event_headers(body, grant)
+            ) as stream,
+        ):
+            assert stream.status_code == 200
+            event_lines = stream.iter_lines()
+            for line in event_lines:
+                if line.startswith("data: "):
+                    assert json.loads(line[6:])["state"] == "running"
+                    break
+            descriptor = dict(grant["attachments"][0])
+            descriptor["url"] = origin + "/inbound-media/1/content"
+            assert asyncio.run(fetch_verified(descriptor))
+            assert (
+                peer.post(
+                    PREFIX + f"/{binding.id}/closed",
+                    json=owner_body(body, grant),
+                    headers={"Authorization": "Bearer " + TOKEN},
+                ).status_code
+                == 200
+            )
+            assert (
+                peer.get(
+                    descriptor["url"], headers={"Authorization": descriptor["authorization"]}
+                ).status_code
+                == 403
+            )
 
 
 def test_real_gateway_events_read_gate_disconnect_and_sequence_gap(host):

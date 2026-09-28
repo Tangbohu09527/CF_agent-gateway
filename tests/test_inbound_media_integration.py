@@ -129,7 +129,11 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
                 "GET", prefix + f"/{grant['binding_id']}/events", headers=event_headers
             ) as stream:
                 assert stream.status_code == 200
-                for line in stream.iter_lines():
+                # Keep the iterator alive through download/closed: httpx closes
+                # the response when an abandoned temporary generator is collected.
+                # A disconnected event stream correctly revokes the capability.
+                event_lines = stream.iter_lines()
+                for line in event_lines:
                     if line.startswith("data: "):
                         assert json.loads(line[6:])["state"] == "running"
                         break
