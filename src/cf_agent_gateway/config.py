@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
+from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
 
 _POLLING_INTERVAL_ERROR = (
     "runtime.polling_interval_seconds must be within the supported positive timeout range"
@@ -290,6 +291,19 @@ class Settings:
     worker: WorkerSettings = WorkerSettings()
     runtime: RuntimeSettings = RuntimeSettings()
     inbound_media: InboundMediaSettings = InboundMediaSettings()
+    host_binding: HostBindingSettings = HostBindingSettings()
+
+    def __post_init__(self):
+        protected = {
+            self.api.token_env,
+            self.api.admin_token_env,
+            self.hermes.api_key_env,
+            self.wechat.token_env,
+        }
+        if self.host_binding.service_token_env in protected or (
+            self.host_binding.encryption_key_env in protected
+        ):
+            raise ValueError("host_binding requires separate service and encryption secrets")
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -314,6 +328,7 @@ def load_settings(path: str | Path) -> Settings:
     hermes = _mapping(raw, "hermes")
     worker = _mapping(raw, "worker")
     inbound_media = _mapping(raw, "inbound_media")
+    host_binding = _mapping(raw, "host_binding")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
@@ -337,6 +352,7 @@ def load_settings(path: str | Path) -> Settings:
 
     return Settings(
         inbound_media=InboundMediaSettings(**inbound_media),
+        host_binding=HostBindingSettings(**host_binding),
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),

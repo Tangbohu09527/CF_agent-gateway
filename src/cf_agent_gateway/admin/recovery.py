@@ -174,6 +174,8 @@ class DispatchRecoveryStore:
         reason: str,
         require_success_evidence: bool = False,
     ) -> DispatchRecoveryResult:
+        from cf_agent_gateway.inbound.host_binding import host_barrier_clear
+
         existing = self._audit_for(dispatch_record_id, action, reference)
         if existing is not None:
             return self._idempotent_result(
@@ -205,6 +207,7 @@ class DispatchRecoveryStore:
             .where(
                 HermesDispatchRecord.id == dispatch_record_id,
                 HermesDispatchRecord.status == HermesDispatchStatus.UNCERTAIN,
+                host_barrier_clear(dispatch_id=HermesDispatchRecord.id),
             )
             .values(**values)
             .execution_options(synchronize_session=False)

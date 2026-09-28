@@ -87,7 +87,17 @@ class _OperationObservedHermesClient:
         thread_id: str | None = None,
         session_metadata: dict[str, object] | None = None,
         idempotency_key: str | None = None,
+        runtime_model: str | None = None,
+        runtime_provider: str | None = None,
+        runtime_model_options: dict[str, object] | None = None,
     ) -> HermesChatResult:
+        runtime = {}
+        if runtime_model is not None:
+            runtime = {
+                "runtime_model": runtime_model,
+                "runtime_provider": runtime_provider,
+                "runtime_model_options": runtime_model_options,
+            }
         try:
             result = self._client.chat(
                 content,
@@ -97,12 +107,27 @@ class _OperationObservedHermesClient:
                 thread_id=thread_id,
                 session_metadata=session_metadata,
                 idempotency_key=idempotency_key,
+                **runtime,
             )
         except Exception:
             self._notify(False)
             raise
         self._notify(True)
         return result
+
+    def prepare_inbound_session(self, session_id: str, **kwargs) -> None:
+        try:
+            return self._client.prepare_inbound_session(session_id, **kwargs)
+        except Exception:
+            self._notify(False)
+            raise
+
+    def verify_inbound_session_tip(self, session_id: str) -> None:
+        try:
+            return self._client.verify_inbound_session_tip(session_id)
+        except Exception:
+            self._notify(False)
+            raise
 
     def _notify(self, succeeded: bool) -> None:
         with suppress(Exception):
@@ -133,6 +158,7 @@ def build_dispatch_worker(
             context_access_policy=EnabledContextAccessPolicy(),
             available_tools=HERMES_CONTEXT_TOOL_NAMES,
             inbound_media=settings.inbound_media,
+            host_binding=settings.host_binding,
         ),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,

@@ -37,6 +37,7 @@ from cf_agent_gateway.database import (
 )
 from cf_agent_gateway.gateway.app import create_app
 from cf_agent_gateway.hermes import HermesClient
+from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
 from cf_agent_gateway.inbound.models import InboundMediaJob
 from cf_agent_gateway.inbound.worker import InboundMediaWorker
 from cf_agent_gateway.message.models import Attachment, Message
@@ -80,6 +81,9 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
     monkeypatch.delenv("CF_AGENT_WECHAT_TOKEN_FILE", raising=False)
     monkeypatch.setenv("TEST_INBOUND_TOKEN", TOKEN)
     monkeypatch.setenv("CF_GATEWAY_API_TOKEN", "synthetic-status-token")
+    host_token = "synthetic-host-service-" + "x" * 32
+    monkeypatch.setenv("TEST_INBOUND_HOST_TOKEN", host_token)
+    monkeypatch.setenv("TEST_INBOUND_HOST_KEY", base64.b64encode(b"k" * 32).decode())
     bodies = [(1, "first"), (3, ""), (49, "资料.pdf"), (3, ""), (1, "last")]
     rows = [
         {
@@ -94,20 +98,73 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
         }
         for index, (kind, text) in enumerate(bodies, 1)
     ]
-    state = {"pdf_gets": 0, "calls": [], "downloads": [], "descriptors": []}
+    state = {"pdf_gets": 0, "calls": [], "downloads": [], "descriptors": [], "sessions": {}}
+
+    def host_download(session_id):
+        # This is a protocol test host, NOT the real FileBrowser user plugin.
+        prefix = state["gateway_origin"] + "/internal/hermes/inbound-bindings"
+        body = {
+            "schema": "cf-inbound-host-binding/v1",
+            "session_id": session_id,
+            "task_id": session_id,
+            "host_instance_id": "integration-host",
+            "host_nonce": "synthetic-nonce-" + "n" * 32,
+        }
+        auth = {"Authorization": "Bearer " + host_token}
+        with httpx.Client(trust_env=False) as peer:
+            response = peer.post(prefix + "/resolve", headers=auth, json=body)
+            assert response.status_code == 200
+            grant = response.json()
+            assert peer.post(prefix + "/resolve", headers=auth, json=body).json() == grant
+            event_headers = {
+                **auth,
+                "X-CF-Session-Id": session_id,
+                "X-CF-Task-Id": session_id,
+                "X-CF-Host-Instance-Id": body["host_instance_id"],
+                "X-CF-Host-Nonce": body["host_nonce"],
+                "X-CF-Claim-Epoch": grant["claim_epoch"],
+            }
+            with peer.stream(
+                "GET", prefix + f"/{grant['binding_id']}/events", headers=event_headers
+            ) as stream:
+                assert stream.status_code == 200
+                for line in stream.iter_lines():
+                    if line.startswith("data: "):
+                        assert json.loads(line[6:])["state"] == "running"
+                        break
+                descriptor = grant["attachments"][0]
+                data = asyncio.run(fetch_verified(descriptor))
+                assert len(data) == descriptor["size"]
+                assert hashlib.sha256(data).hexdigest() == descriptor["sha256"]
+                state["downloads"].append(data)
+                state["descriptors"].append(descriptor)
+                response = peer.post(
+                    prefix + f"/{grant['binding_id']}/closed",
+                    headers=auth,
+                    json={**body, "claim_epoch": grant["claim_epoch"]},
+                )
+                assert response.status_code == 200
 
     class Peer(BaseHTTPRequestHandler):
-        def reply(self, payload):
+        def reply(self, payload, status=200):
             data = json.dumps(payload).encode()
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
-            if self.command == "POST":
+            if self.headers.get("X-Hermes-Session-Id"):
                 self.send_header("X-Hermes-Session-Id", self.headers["X-Hermes-Session-Id"])
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self):
+            if self.path.startswith("/api/sessions/"):
+                assert self.headers["Authorization"] == "Bearer synthetic-hermes-key"
+                path = self.path.split("?", 1)[0].split("/")
+                sid = path[3]
+                session = state["sessions"][sid]
+                if path[-1] == "messages":
+                    return self.reply({"session_id": sid, "data": session["history"]})
+                return self.reply({"object": "hermes.session", "session": session["row"]})
             assert self.headers["Authorization"] == "Bearer " + TOKEN
             if self.path == "/api/status/auth":
                 return self.reply({"status": "logged_in", "loggedInUser": "wxid-gateway"})
@@ -130,17 +187,70 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
             )
 
         def do_POST(self):
-            assert self.path == "/v1/chat/completions"
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path.startswith("/api/sessions"):
+                assert self.headers["Authorization"] == "Bearer synthetic-hermes-key"
+                if self.path.endswith("/model"):
+                    sid = self.path.split("/")[3]
+                    return self.reply(
+                        {
+                            "object": "hermes.session.model_lock",
+                            "session_id": sid,
+                            "runtime": {
+                                "model": request["model"],
+                                "provider": request["provider"],
+                                "requested": {
+                                    "model": request["model"],
+                                    "provider": request["provider"],
+                                },
+                                "model_lock": "accepted",
+                            },
+                        }
+                    )
+                sid = request["id"]
+                parent_id = self.path.split("/")[3] if self.path.endswith("/fork") else None
+                parent = state["sessions"].get(parent_id)
+                state["sessions"][sid] = {
+                    "row": {
+                        "id": sid,
+                        "parent_session_id": parent_id,
+                        "model": "fixture",
+                        "has_system_prompt": False,
+                    },
+                    "history": list(parent["history"]) if parent else [],
+                }
+                if parent:
+                    parent["row"]["end_reason"] = "branched"
+                return self.reply(
+                    {"object": "hermes.session", "session": state["sessions"][sid]["row"]}, 201
+                )
+            assert self.path == "/v1/chat/completions"
+            sid = self.headers["X-Hermes-Session-Id"]
+            session = state["sessions"].setdefault(
+                sid,
+                {
+                    "row": {
+                        "id": sid,
+                        "parent_session_id": None,
+                        "model": "fixture",
+                        "has_system_prompt": False,
+                    },
+                    "history": [],
+                },
+            )
             content = request["messages"][0]["content"]
             state["calls"].append(content)
-            if "cf-inbound-read/v1" in content:
-                descriptor = json.loads(content.split("\n", 1)[1])["attachment"]
-                data = asyncio.run(fetch_verified(descriptor))
-                assert len(data) == descriptor["size"]
-                assert hashlib.sha256(data).hexdigest() == descriptor["sha256"]
-                state["downloads"].append(data)
-                state["descriptors"].append(descriptor)
+            assert "cf-inbound-read/v1" not in json.dumps(request)
+            assert "Bearer " not in json.dumps(request)
+            if '"attachment_id":' in content:
+                assert request["provider"] == "custom"
+                host_download(sid)
+            session["history"].extend(
+                [
+                    {"role": "user", "content": content},
+                    {"role": "assistant", "content": "received bytes"},
+                ]
+            )
             return self.reply(
                 {
                     "id": "synthetic-completion",
@@ -167,6 +277,17 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
         inbound_media=InboundMediaSettings(
             enabled=True, staging_root=str(cache), public_base_url="http://127.0.0.1"
         ),
+        host_binding=HostBindingSettings(
+            enabled=True,
+            dedicated_endpoint_confirmed=True,
+            host_id="synthetic-host",
+            profile_reference="synthetic-profile",
+            runtime_model="fixture",
+            runtime_provider="custom",
+            legacy_runtime_confirmed=True,
+            service_token_env="TEST_INBOUND_HOST_TOKEN",
+            encryption_key_env="TEST_INBOUND_HOST_KEY",
+        ),
     )
     engine = create_database_engine(settings.database.url)
     initialize_database(engine)
@@ -175,6 +296,7 @@ def test_real_poll_mixed_messages_pending_and_http_handoff(tmp_path, monkeypatch
         with sessions() as session:
             allow_sender(session)
         with gateway_server(settings) as configured:
+            state["gateway_origin"] = configured.inbound_media.public_base_url
             assert run_wechat_poll_once(configured).messages_processed == 5
             now = [datetime.now(UTC)]
             intake = InboundMediaWorker(

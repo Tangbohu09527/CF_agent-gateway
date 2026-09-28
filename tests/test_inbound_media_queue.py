@@ -24,6 +24,7 @@ from cf_agent_gateway.identity.models import (
     SourceIdentityMapping,
 )
 from cf_agent_gateway.inbound.access import grant_read, read_authorized
+from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
 from cf_agent_gateway.inbound.models import InboundMediaJob
 from cf_agent_gateway.inbound.worker import InboundMediaWorker, _manifest
 from cf_agent_gateway.ingestion import MessageAdmissionService
@@ -32,6 +33,15 @@ from cf_agent_gateway.task.model import HermesDispatchRecord, HermesDispatchReco
 
 IMAGE = b"\xff\xd8\xffsynthetic-jpeg"
 MEDIA = InboundMediaSettings(enabled=True, public_base_url="http://127.0.0.1:8000")
+HOST = HostBindingSettings(
+    enabled=True,
+    dedicated_endpoint_confirmed=True,
+    host_id="synthetic-host",
+    profile_reference="profiles/runtime-assistant/1",
+    runtime_model="fixture",
+    runtime_provider="custom",
+    legacy_runtime_confirmed=True,
+)
 
 
 class MemoryStaging:
@@ -79,7 +89,8 @@ class Fetcher:
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, monkeypatch):
+    monkeypatch.setenv("CF_GATEWAY_HOST_GRANT_KEY", base64.b64encode(b"x" * 32).decode())
     engine = create_database_engine(f"sqlite:///{(tmp_path / 'queue.db').as_posix()}")
     initialize_database(engine)
     sessions = create_database_session_factory(engine)
@@ -127,12 +138,24 @@ def job(rig, index=1):
 
 
 class Hermes:
+    """Unit-test execution host; real official API probe is a separate test gate."""
+
     def __init__(self):
         self.contents = []
+        self.invocations = []
+
+    def prepare_inbound_session(self, session_id, **kwargs):
+        kwargs["record_history"]("0" * 64)
+
+    def verify_inbound_session_tip(self, session_id):
+        pass
 
     def chat(self, content, **kwargs):
         self.contents.append(content)
-        return HermesChatResult(assistant_content="received", hermes_thread_id="synthetic-session")
+        self.invocations.append(kwargs)
+        return HermesChatResult(
+            assistant_content="received", hermes_thread_id=kwargs["hermes_thread_id"]
+        )
 
 
 def test_empty_image_pending_ready_fifo_and_plain_text_regression(rig):
@@ -152,9 +175,12 @@ def test_empty_image_pending_ready_fifo_and_plain_text_regression(rig):
         record = store.claim_next(claim_token="image-claim")
         assert record.message_id == image.message_id
         hermes = Hermes()
-        HermesDispatchService(session, hermes, inbound_media=MEDIA).dispatch_record(record)
-        assert '"schema": "cf-inbound-read/v1"' in hermes.contents[0]
-        assert '"size":' in hermes.contents[0] and "base64" not in hermes.contents[0]
+        HermesDispatchService(
+            session, hermes, inbound_media=MEDIA, host_binding=HOST
+        ).dispatch_record(record)
+        assert '"attachment_id":' in hermes.contents[0]
+        assert "cf-inbound-read" not in hermes.contents[0]
+        assert "Bearer " not in hermes.contents[0] and "base64" not in hermes.contents[0]
         assert session.get(Message, image.message_id).content == ""
         store.mark_success(record.id, claim_token="image-claim")
         record = store.claim_next(claim_token="text-claim")
@@ -362,7 +388,7 @@ def test_upgrade_existing_database_leaves_historical_dead_untouched(rig):
         assert HermesDispatchRecordStore(session).claim_next() is None
 
 
-def test_shared_group_accepts_two_identities_and_uses_scoped_v2_descriptors(rig):
+def test_shared_group_accepts_two_identities_without_model_credentials(rig):
     from test_routing_runtime import (
         bind_group_type,
         create_conversation,
@@ -407,8 +433,14 @@ def test_shared_group_accepts_two_identities_and_uses_scoped_v2_descriptors(rig)
         for outcome in outcomes:
             record = store.claim_next(claim_token="group-claim")
             hermes = Hermes()
-            HermesDispatchService(session, hermes, inbound_media=MEDIA).dispatch_record(record)
-            assert outcome.admission.enterprise_identity_id in hermes.contents[0]
+            HermesDispatchService(
+                session, hermes, inbound_media=MEDIA, host_binding=HOST
+            ).dispatch_record(record)
+            metadata = hermes.invocations[0]["session_metadata"]
+            assert metadata["enterprise_identity_id"] == outcome.admission.enterprise_identity_id
+            assert metadata["inbound_attachment_ids"]
+            assert "inbound_attachments" not in metadata
+            assert "Bearer " not in str(metadata) + hermes.contents[0]
             store.mark_success(record.id, claim_token="group-claim")
 
 

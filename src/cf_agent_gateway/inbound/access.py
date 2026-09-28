@@ -86,7 +86,7 @@ def grant_read(session, job, *, public_base_url):
     }
 
 
-def _authorized_manifest(session, job_id, header):
+def _authorized_manifest(session, job_id, header, *, check_host=True, require_host=False):
     job = session.get(InboundMediaJob, job_id, populate_existing=True)
     now = datetime.now(UTC)
     if not isinstance(header, str) or not header.startswith("Bearer ") or len(header) > 128:
@@ -109,6 +109,10 @@ def _authorized_manifest(session, job_id, header):
         or aware(record.lease_expires_at) <= now
     ):
         raise MediaFetchError("media_read_not_authorized")
+    if check_host:
+        from cf_agent_gateway.inbound.host_binding import require_read_binding
+
+        require_read_binding(session, job, record, required=require_host)
     attachment = session.get(Attachment, job.attachment_id, populate_existing=True)
     manifest = job.manifest
     if (
@@ -130,12 +134,12 @@ def _authorized_manifest(session, job_id, header):
     return dict(manifest)
 
 
-def read_authorized(session, job_id, header, staging):
-    manifest = _authorized_manifest(session, job_id, header)
+def read_authorized(session, job_id, header, staging, *, require_host=False):
+    manifest = _authorized_manifest(session, job_id, header, require_host=require_host)
     data = staging.read(manifest["reference"], size=manifest["size"], sha256=manifest["sha256"])
     # Disk access may outlast a claim/lease or an identity change. Revalidate before
     # releasing the buffered bytes; no database lock spans file or network I/O.
-    if _authorized_manifest(session, job_id, header) != manifest:
+    if _authorized_manifest(session, job_id, header, require_host=require_host) != manifest:
         raise MediaFetchError("media_registry_conflict")
     return data, _mime(manifest["signature"])
 
@@ -152,6 +156,7 @@ def get_inbound_content(job_id: int, request: Request, session: DatabaseSession)
             job_id,
             request.headers.get("authorization"),
             InboundMediaStaging(Path(settings.staging_root)),
+            require_host=request.app.state.settings.host_binding.enabled,
         )
     except MediaFetchError as error:
         # A ready-but-missing/corrupt file is not a temporary read opportunity.

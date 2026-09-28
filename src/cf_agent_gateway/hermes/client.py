@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json as json_module
+from collections.abc import Callable
 from typing import Any, Self
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from pydantic import ValidationError
@@ -94,6 +97,9 @@ class HermesClient:
         thread_id: str | None = None,
         session_metadata: dict[str, object] | None = None,
         idempotency_key: str | None = None,
+        runtime_model: str | None = None,
+        runtime_provider: str | None = None,
+        runtime_model_options: dict[str, object] | None = None,
     ) -> HermesChatResult:
         """Send one user message, creating or continuing a Hermes thread."""
 
@@ -107,7 +113,7 @@ class HermesClient:
 
         operation = "chat_completion"
         request = HermesChatCompletionRequest(
-            model=self._model,
+            model=runtime_model or self._model,
             messages=[HermesUserMessage(content=content)],
             profile_reference=profile_reference,
             profile_revision=profile_revision,
@@ -119,11 +125,19 @@ class HermesClient:
             request_headers[HERMES_SESSION_HEADER] = hermes_thread_id
         if idempotency_key is not None:
             request_headers[HERMES_IDEMPOTENCY_HEADER] = idempotency_key
+        payload = request.model_dump(mode="json", exclude_none=True)
+        if runtime_model is not None:
+            # The pinned OpenAI route does not read a session's persisted /model
+            # lock. An explicit provider makes its per-request selection apply.
+            if not runtime_provider:
+                raise ValueError("runtime_provider is required with runtime_model")
+            payload["provider"] = runtime_provider
+            payload["model_options"] = runtime_model_options or {}
         response = self._request(
             "POST",
             "v1/chat/completions",
             operation=operation,
-            json=request.model_dump(mode="json", exclude_none=True),
+            json=payload,
             headers=request_headers or None,
         )
         try:
@@ -154,13 +168,156 @@ class HermesClient:
             hermes_thread_id=effective_thread_id,
         )
 
+    def prepare_inbound_session(
+        self,
+        session_id: str,
+        *,
+        parent_session_id: str | None,
+        runtime_model: str,
+        runtime_provider: str,
+        runtime_model_options: dict[str, object],
+        allow_create: bool,
+        expected_history_digest: str | None,
+        record_history: Callable[[str], None],
+    ) -> None:
+        """Create once or inspect the same durable intent after an uncertain call.
+
+        This deliberately never repairs an unprovable partial fork. The durable
+        Dispatch remains uncertain for operator reconciliation, preserving FIFO.
+        """
+        operation = "inbound_session_preparation"
+        child_path = _session_path(session_id)
+        parent = None
+        try:
+            if parent_session_id is not None:
+                parent = self._get_session(parent_session_id)
+                if parent.get("model") != runtime_model:
+                    raise ValueError("parent runtime differs")
+            if allow_create:
+                if parent is not None:
+                    if parent.get("ended_at") is not None or parent.get("end_reason"):
+                        raise ValueError("parent is not a live session")
+                    expected_history_digest = self._history_digest(parent_session_id)
+                else:
+                    expected_history_digest = _history_digest([])
+                # Caller commits the history proof before a possibly ambiguous
+                # create/fork request. Recovery never substitutes another ID.
+                record_history(expected_history_digest)
+                endpoint = (
+                    _session_path(parent_session_id) + "/fork"
+                    if parent_session_id is not None
+                    else "api/sessions"
+                )
+                create_payload: dict[str, Any] = {"id": session_id}
+                if parent_session_id is None:
+                    create_payload.update(
+                        model=runtime_model,
+                        provider=runtime_provider,
+                        model_options=runtime_model_options,
+                        require_model_lock=True,
+                    )
+                response = self._request("POST", endpoint, operation=operation, json=create_payload)
+                if response.status_code != 201:
+                    raise ValueError("creation was not acknowledged")
+                _session_payload(response, session_id)
+            if expected_history_digest is None:
+                raise ValueError("no durable history proof")
+            child = self._get_session(session_id)
+            if (
+                child.get("parent_session_id") != parent_session_id
+                or child.get("ended_at") is not None
+                or child.get("end_reason")
+                or child.get("model") != runtime_model
+                or self._history_digest(session_id) != expected_history_digest
+                or (
+                    parent is not None
+                    and child.get("has_system_prompt") != parent.get("has_system_prompt")
+                )
+            ):
+                raise ValueError("fork proof differs")
+            # Official fork copies history/system_prompt, but not the provider
+            # or options lock. Reapply the approved immutable execution Profile.
+            response = self._request(
+                "POST",
+                child_path + "/model",
+                operation=operation,
+                json={
+                    "model": runtime_model,
+                    "provider": runtime_provider,
+                    "model_options": runtime_model_options,
+                    "require_model_lock": True,
+                },
+            )
+            ack = response.json()
+            runtime = ack.get("runtime", {})
+            if (
+                ack.get("object") != "hermes.session.model_lock"
+                or ack.get("session_id") != session_id
+                or runtime.get("model_lock") != "accepted"
+                or runtime.get("model") != runtime_model
+                or runtime.get("provider") != runtime_provider
+                or runtime.get("requested")
+                != {
+                    "model": runtime_model,
+                    "provider": runtime_provider,
+                }
+            ):
+                raise ValueError("runtime lock differs")
+        except Exception:
+            # Includes transport timeout and partially completed fork/config.
+            # None of these may become the ordinary failed/retry path.
+            raise HermesResponseError(operation=operation) from None
+
+    def verify_inbound_session_tip(self, session_id: str) -> None:
+        """An echoed header is not proof: official old IDs can resolve a new tip."""
+        try:
+            session = self._get_session(session_id)
+            if session.get("ended_at") is not None or session.get("end_reason"):
+                raise ValueError("execution session rotated")
+            self._history_digest(session_id)  # also checks exact resolved session ID
+        except Exception:
+            raise HermesResponseError(operation="inbound_session_tip") from None
+
+    def _get_session(self, session_id: str) -> dict[str, Any]:
+        response = self._request(
+            "GET", _session_path(session_id), operation="inbound_session_inspect", json=None
+        )
+        return _session_payload(response, session_id)
+
+    def _history_digest(self, session_id: str) -> str:
+        messages = []
+        # Bound both count and network operations. Oversized history is a visible
+        # preparation failure, never silently truncated or replaced with empty.
+        for offset in range(0, 10001, 500):
+            response = self._request(
+                "GET",
+                _session_path(session_id) + f"/messages?order=oldest&limit=500&offset={offset}",
+                operation="inbound_session_history",
+                json=None,
+            )
+            payload = response.json()
+            page = payload.get("data")
+            if (
+                payload.get("session_id") != session_id
+                or not isinstance(page, list)
+                or len(page) > 500
+                or any(not isinstance(item, dict) for item in page)
+            ):
+                raise ValueError("history belongs to another session")
+            messages.extend(page)
+            if len(messages) > 10000:
+                raise ValueError("history exceeds preparation limit")
+            if len(page) < 500:
+                return _history_digest(messages)
+        raise ValueError("history exceeds preparation limit")
+
     def _request(
         self,
         method: str,
         endpoint: str,
         *,
         operation: str,
-        json: dict[str, Any],
+        json: dict[str, Any] | None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         if self._closed:
@@ -184,7 +341,7 @@ class HermesClient:
         method: str,
         endpoint: str,
         *,
-        json: dict[str, Any],
+        json: dict[str, Any] | None,
         headers: dict[str, str] | None,
     ) -> httpx.Response:
         async with httpx.AsyncClient(
@@ -216,6 +373,34 @@ def _explicit_incomplete_response(response: httpx.Response, payload: object) -> 
         or metadata.get("failed") is True
         or bool(metadata.get("error"))
     )
+
+
+def _session_path(value: str) -> str:
+    return "api/sessions/" + quote(_hermes_thread_id(value), safe="")
+
+
+def _session_payload(response: httpx.Response, expected_id: str) -> dict[str, Any]:
+    payload = response.json()
+    session = payload.get("session")
+    if (
+        payload.get("object") != "hermes.session"
+        or not isinstance(session, dict)
+        or session.get("id") != expected_id
+    ):
+        raise ValueError("unexpected session response")
+    return session
+
+
+def _history_digest(messages: list[dict[str, Any]]) -> str:
+    # Row IDs/session IDs/timestamps change when official fork copies messages;
+    # all public semantic content, tool calls and reasoning must be preserved.
+    copied = [
+        {key: value for key, value in item.items() if key not in {"id", "session_id", "timestamp"}}
+        for item in messages
+    ]
+    return hashlib.sha256(
+        json_module.dumps(copied, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _base_url(value: object) -> str:

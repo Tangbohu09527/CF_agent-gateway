@@ -37,6 +37,8 @@ class HermesDispatchResponseStore:
         claim_token: str,
         outcome: HermesDispatchOutcome,
     ) -> HermesDispatchResponse:
+        from cf_agent_gateway.inbound.host_binding import host_barrier_clear
+
         envelope = outcome.response
         response = HermesDispatchResponse(
             dispatch_record_id=dispatch_record_id,
@@ -51,6 +53,7 @@ class HermesDispatchResponseStore:
                 HermesDispatchRecord.status == HermesDispatchStatus.RUNNING,
                 HermesDispatchRecord.claim_token == claim_token,
                 HermesDispatchRecord.lease_expires_at > func.now(),
+                host_barrier_clear(dispatch_id=HermesDispatchRecord.id),
                 HermesDispatchRecord.message_id == outcome.message_id,
                 HermesDispatchRecord.workspace_id == outcome.workspace_id,
                 HermesDispatchRecord.ai_thread_id == outcome.ai_thread_id,

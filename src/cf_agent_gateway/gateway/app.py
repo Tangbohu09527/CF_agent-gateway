@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -18,6 +19,8 @@ from cf_agent_gateway.database import (
 from cf_agent_gateway.gateway.middleware import RequestBodyLimitMiddleware
 from cf_agent_gateway.gateway.routes import router
 from cf_agent_gateway.inbound.access import router as inbound_router
+from cf_agent_gateway.inbound.host_binding import expire_bindings
+from cf_agent_gateway.inbound.host_binding_routes import router as host_binding_router
 from cf_agent_gateway.logging import configure_logging
 from cf_agent_gateway.runtime.health import DatabaseReadinessMonitor, RuntimeHealthService
 from cf_agent_gateway.runtime.startup import (
@@ -36,6 +39,7 @@ def create_app(settings: Settings) -> FastAPI:
         app.state.ready = False
         engine = create_database_engine(settings.database.url)
         readiness_monitor: DatabaseReadinessMonitor | None = None
+        cleanup_task = None
         try:
             if database_startup_check_enabled():
                 check_database_migrations(engine)
@@ -43,6 +47,22 @@ def create_app(settings: Settings) -> FastAPI:
                 initialize_database(engine)
             app.state.database_engine = engine
             app.state.database_session_factory = create_database_session_factory(engine)
+            if settings.host_binding.enabled:
+
+                def cleanup():
+                    with app.state.database_session_factory() as session:
+                        expire_bindings(session)
+
+                async def reap():
+                    while True:
+                        try:
+                            await asyncio.to_thread(cleanup)
+                        except Exception:
+                            # No exception body/SQL/grant data reaches ordinary logs.
+                            logger.warning("host binding cleanup unavailable")
+                        await asyncio.sleep(1)
+
+                cleanup_task = asyncio.create_task(reap())
             readiness_monitor = DatabaseReadinessMonitor(engine)
             app.state.database_readiness = readiness_monitor
             app.state.runtime_health = RuntimeHealthService(engine, settings)
@@ -55,6 +75,10 @@ def create_app(settings: Settings) -> FastAPI:
             yield
         finally:
             app.state.ready = False
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
             if readiness_monitor is not None:
                 readiness_monitor.stop()
             engine.dispose()
@@ -90,4 +114,5 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(router)
     app.include_router(admin_router)
     app.include_router(inbound_router)
+    app.include_router(host_binding_router)
     return app
