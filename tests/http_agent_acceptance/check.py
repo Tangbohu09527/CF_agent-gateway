@@ -127,6 +127,16 @@ def response_complete(response: dict) -> bool:
     )
 
 
+def verifier_file_path(file: dict) -> str:
+    """Use the scoped production format, retaining older synthetic fixtures."""
+    if "scoped_path" in file and "path" in file and file["scoped_path"] != file["path"]:
+        raise ValueError("Verifier file path fields conflict")
+    path = file.get("scoped_path", file.get("path"))
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("Verifier file needs an absolute scoped path")
+    return path
+
+
 def score_case(evidence: dict, expected_file: dict) -> tuple[dict[str, bool], dict]:
     case, intent = evidence["case"], evidence["intent"]
     requests, responses = evidence["requests"], evidence["responses"]
@@ -218,7 +228,7 @@ def score_case(evidence: dict, expected_file: dict) -> tuple[dict[str, bool], di
     )
     downloads = read_json(case / "downloads.json")
     checks["one_download"] = len(downloads) == 1
-    checks["approved_remote_path"] = intent.get("remote_path") == expected_file["path"]
+    checks["approved_remote_path"] = intent.get("remote_path") == verifier_file_path(expected_file)
     visibility = {"model_transport_image_bytes": "unobserved"}
     if len(downloads) != 1:
         return checks, visibility
@@ -251,13 +261,30 @@ def score_case(evidence: dict, expected_file: dict) -> tuple[dict[str, bool], di
         for receipt in receipts
     )
     reader = "read_file" if intent["task"] == "pdf" else "vision_analyze"
-    reads = [c for c in calls if c.get("function", {}).get("name") == reader]
-    read = reads[0] if len(reads) == 1 else {}
-    arguments = as_dict(read.get("function", {}).get("arguments"))
-    checks["reads_downloaded_file"] = len(reads) == 1 and any(
-        isinstance(value, str) and Path(value).resolve() == path.resolve()
-        for value in arguments.values()
+
+    def reader_target(call: dict) -> Path | None:
+        function = call.get("function", {})
+        argument = "path" if function.get("name") == "read_file" else "image_url"
+        value = as_dict(function.get("arguments")).get(argument)
+        return Path(value).resolve() if isinstance(value, str) and value else None
+
+    reads = [
+        c
+        for c in calls
+        if c.get("function", {}).get("name") == reader and reader_target(c) == path.resolve()
+    ]
+    checks["reader_targets_allowed"] = all(
+        reader_target(c)
+        in (
+            {path.resolve(), (case / "http-reference.json").resolve()}
+            if c.get("function", {}).get("name") == "read_file"
+            else {path.resolve()}
+        )
+        for c in calls
+        if c.get("function", {}).get("name") in {"read_file", "vision_analyze"}
     )
+    read = reads[0] if len(reads) == 1 else {}
+    checks["reads_downloaded_file"] = len(reads) == 1
     reply = by_id.get(read.get("id"), {})
     result = as_dict(reply.get("content"))
     if reader == "read_file":
@@ -311,7 +338,9 @@ def evaluate(root: Path, verifier_path: Path, verifier_sha256: str) -> dict:
     visibility = {}
     for name, evidence in cases.items():
         expected_files = [
-            f for f in verifier["files"] if f["path"] == evidence["intent"]["remote_path"]
+            f
+            for f in verifier["files"]
+            if verifier_file_path(f) == evidence["intent"]["remote_path"]
         ]
         if len(expected_files) != 1:
             raise ValueError("No unique approved sample for this case")

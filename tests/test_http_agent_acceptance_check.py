@@ -100,7 +100,12 @@ def case(checker, tmp_path):
                 "tool_calls": [
                     {
                         "id": "read",
-                        "function": {"name": reader, "arguments": json.dumps({"path": str(path)})},
+                        "function": {
+                            "name": reader,
+                            "arguments": json.dumps(
+                                {"path" if task == "pdf" else "image_url": str(path)}
+                            ),
+                        },
                     }
                 ],
             },
@@ -169,6 +174,30 @@ def case(checker, tmp_path):
 def test_valid_pdf_evidence(checker, case):
     checks, _ = checker.score_case(*case())
     assert all(checks.values()), checks
+
+
+@pytest.mark.parametrize("format", ["path", "scoped_path", "both"])
+def test_verifier_path_formats(checker, case, format):
+    evidence, file = case()
+    if format != "path":
+        file["scoped_path"] = file["path"]
+    if format == "scoped_path":
+        del file["path"]
+    checks, _ = checker.score_case(evidence, file)
+    assert all(checks.values()), checks
+
+
+def test_conflicting_verifier_paths_rejected(checker, case):
+    evidence, file = case()
+    file["scoped_path"] = "/another.pdf"
+    with pytest.raises(ValueError, match="path fields conflict"):
+        checker.score_case(evidence, file)
+
+
+def test_scoped_path_requires_exact_remote_match(checker, case):
+    evidence, file = case()
+    file["scoped_path"] = "/scope" + file.pop("path")
+    assert not checker.score_case(evidence, file)[0]["approved_remote_path"]
 
 
 def test_image_projection_never_claims_wire_observation(checker, case):
@@ -268,6 +297,75 @@ def test_wrong_reader_target_rejected(checker, case):
     messages = evidence["responses"]["04"]["body"]["data"]
     messages[3]["tool_calls"][0]["function"]["arguments"] = '{"path":"unrelated.pdf"}'
     assert not checker.score_case(evidence, file)[0]["reads_downloaded_file"]
+
+
+@pytest.mark.parametrize("task", ["pdf", "image"])
+@pytest.mark.parametrize("mode", ["reference", "unrelated", "duplicate"])
+def test_additional_reader_targets(checker, case, task, mode):
+    evidence, file = case(task)
+    page = evidence["responses"]["04"]["body"]
+    messages = page["data"]
+    if mode == "duplicate":
+        function = messages[3]["tool_calls"][0]["function"].copy()
+    else:
+        path = evidence["case"] / (
+            "http-reference.json" if mode == "reference" else "unrelated.txt"
+        )
+        function = {"name": "read_file", "arguments": json.dumps({"path": str(path)})}
+    messages[1:1] = [
+        {
+            "session_id": evidence["intent"]["session_id"],
+            "role": "assistant",
+            "tool_calls": [{"id": "extra-read", "function": function}],
+        },
+        {
+            "session_id": evidence["intent"]["session_id"],
+            "role": "tool",
+            "tool_call_id": "extra-read",
+            "content": '{"content":"non-secret synthetic reference"}',
+        },
+    ]
+    page["pagination"]["returned"] = len(messages)
+    checks, _ = checker.score_case(evidence, file)
+    assert checks["reads_downloaded_file"] is (mode != "duplicate")
+    assert checks["reader_targets_allowed"] is (mode != "unrelated")
+    if mode == "reference":
+        assert all(checks.values()), checks
+
+
+@pytest.mark.parametrize("task", ["pdf", "image"])
+def test_path_in_other_reader_argument_is_not_evidence(checker, case, task):
+    evidence, file = case(task)
+    function = evidence["responses"]["04"]["body"]["data"][3]["tool_calls"][0]["function"]
+    args = json.loads(function["arguments"])
+    correct = "path" if task == "pdf" else "image_url"
+    function["arguments"] = json.dumps({correct: "unrelated", "prompt": args[correct]})
+    checks, _ = checker.score_case(evidence, file)
+    assert not checks["reads_downloaded_file"]
+    assert not checks["reader_targets_allowed"]
+
+
+def test_skill_view_remains_unapproved(checker, case):
+    evidence, file = case()
+    page = evidence["responses"]["04"]["body"]
+    page["data"][1:1] = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "skill",
+                    "function": {
+                        "name": "skill_view",
+                        "arguments": '{"name":"ocr-and-documents"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "skill", "content": '{"success":true}'},
+    ]
+    checks, _ = checker.score_case(evidence, file)
+    assert checks["reads_downloaded_file"]
+    assert not checks["allowed_tools_only"]
 
 
 def test_download_receipt_and_digest_checked(checker, case):
@@ -388,9 +486,17 @@ def test_junction_case_rejected_before_any_file_read(checker, tmp_path, monkeypa
         checker.load_frozen(case)
 
 
-def test_full_offline_report_keeps_visibility_gap(checker, case, tmp_path):
+@pytest.mark.parametrize("format", ["path", "scoped_path", "both", "conflict"])
+def test_full_offline_report_keeps_visibility_gap(checker, case, tmp_path, format):
     pdf, pdf_file = case()
     image, image_file = case("image")
+    for file in (pdf_file, image_file):
+        if format != "path":
+            file["scoped_path"] = file["path"]
+        if format == "scoped_path":
+            del file["path"]
+        elif format == "conflict":
+            file["scoped_path"] = "/different" + file["path"]
     verifier = tmp_path / "synthetic-verifier.json"
     write(
         verifier,
@@ -402,6 +508,10 @@ def test_full_offline_report_keeps_visibility_gap(checker, case, tmp_path):
             },
         },
     )
+    if format == "conflict":
+        with pytest.raises(ValueError, match="path fields conflict"):
+            checker.evaluate(tmp_path, verifier, checker.sha(verifier.read_bytes()))
+        return
     report = checker.evaluate(tmp_path, verifier, checker.sha(verifier.read_bytes()))
     assert report["passed"] == report["total"]
     assert report["failed"] == []
