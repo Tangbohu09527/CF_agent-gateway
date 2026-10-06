@@ -60,4 +60,81 @@ API/Worker 镜像、迁移、队列、CFserver → Hermes 网络/认证，以及
 仍未核对；不恢复 Worker、不扫码、不发微信或处理历史任务。微信入站 PDF 持续 pending
 继续单列上游阻塞，与读取已经存入 FileBrowser 的 PNG 样本无关。
 
-正式 PNG 结果将在一次实际请求结束、回答冻结并独立核对后追加。
+## PNG 正式 HTTP 结果
+
+正常审批通过后，使用 `f3dc8c8bda30ed1c1e52cadb355fc875402c1db3` 的驱动和规则，
+从 Windows 向现用 Hermes HTTP 发出唯一一次业务 POST。没有重发、换会话或挑选结果。
+原批准模型和既有较广工具权限保持原样，未临时映射辅助视觉。
+
+| 项目 | 本次 PNG 证据 |
+| --- | --- |
+| 规则 | `hermes-http-png-v2`，规则快照摘要 `273fa9ed1e56d070adddb4e6769f1286eca25b0261baaba503bfdbccf4f8f4d5` |
+| session | `cf-http-7700dcfe152e4421bdef32cb5ac1cf25` |
+| intent / idempotency | `cf-http-acceptance-3d338a0d42a445c68e7924e073b29904` |
+| HTTP completion | `chatcmpl-88d5f4e8645c480394e5cfa56a6a9` |
+| 请求 / 响应本地保存时间 | 2026-10-06 15:44:25 / 15:47:34，Asia/Shanghai |
+| 返回 | HTTP 200、finish_reason=stop、会话匹配、Gateway client 接受；无显式 failed/partial/error |
+| 正向完成字段 | 官方成功响应省略 hermes/Completed 头；session ended_at=null，不以结束 hook 作成功依据 |
+| 实际会话 | source=api_server、model=gpt-6-astra、无 parent；完整一页 14 条消息、6 次工具调用 |
+| 下载 | 47740 字节；仅一次样本 GET，保存新任务 work 目录内唯一文件 |
+| 下载 SHA-256 | `102c46ea4ba8225d9c6bde10226f4ea902590cfc3666891579d8feac449668a4` |
+| 文件名 | `CF-NATIVE-IMAGE-20261006-B1-16e6c4980eb244ca814a84d3229b8a8a.png` |
+| 冻结后独立核对 | 答案 21/21、执行与 v2 约束 28/28，共 49/49 |
+| 图像观测限制 | 原生工具文本及 [screenshot] 投影；model_transport_image_bytes=unobserved |
+
+实际工具顺序：
+
+1. `skill_view`：仅精确参数 `{"name":"ocr-and-documents"}`；来源路径、正文摘要、
+   available、空依赖/setup 条件与固定版本一致，没有读取 linked scripts。
+2. `read_file`：仅读取本次非秘密 HTTP 引用 JSON。
+3. `terminal`：普通 HTTPS GET self；最初错误假定 `perm.admin`，在 identity validation
+   处返回 exit 1，**尚未执行下载或写文件**。这次失败保留在原轨迹。
+4. `terminal`：再次只读 GET self，仅返回 username 与非管理员字段，确认实际为
+   `permissions.admin=false`，不回显完整响应或凭据。
+5. `terminal`：保留原 CA、主机名/证书验证、直连无重定向与 1 MiB 上限；GET self
+   校验后 GET 指定 PNG，`xb` 排他写入、回读比对字节并输出大小/SHA-256/路径。
+6. `vision_analyze`：对刚下载的同一路径进行原生读取，随后 Agent 自己生成最终回答。
+
+三次 terminal 均经当前服务正常 smart approval；没有绕过拒绝。前两次 self 只读核查
+发生在同一 Agent 工具循环中，不是重发业务 POST，也不是重复下载样本。未见安装、
+Skill 脚本、FileBridge 专用工具、外部解析器、远端业务写入或配置/服务变更。
+前后 Skill、加载器及配置摘要一致。
+
+Agent 原回答中的图像结论为：核验码 `PIC-6V9K4R`；A 左上红色圆形 3 个、B 右上
+蓝色正方形 2 个、C 左下黄色三角形 4 个、D 右下绿色五角星 1 个；箭头
+A → B 向右、B → D 向下、D → C 向左。**这些内容是在回答冻结后才与原核验 JSON
+对照**；未在任务、说明或工具输入中提供答案。原始回答还包含本次下载凭证，完整保留。
+
+原核验 JSON 摘要仍为 `2b055f8472167755cd60d16e87d24dc18382dd5433b1bf27bb252da275e76765`。
+独立核验只加载冻结 image case；旧 PDF 不重新评分。PNG 49/49 不代表 PDF 的原工具
+约束已通过，也不证明模型供应商线上的原始图像字节已被独立观测。
+
+私有证据根沿用原验收目录，新增 `image/`，绝对下载路径保存在
+`image/downloads.json`、工具 receipt 和 `image/final.txt`；新评分在
+`png-v2-verification.json`，没有改动任何 PDF 文件。关键原始文件 SHA-256：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| image/final.txt（原始文件字节） | `c74123c02339e3a9f78f3f952ee542b9d9f1c908f5bc573cea2286d3eb623f96` |
+| image/frozen.json | `9d72689d3d3d386a94519ced89b66687d1647ce609788fe8b90186bf7c36d06c` |
+| image/response-02.json | `153994d30e3e68cb60f5e1c9c8f455b642145a7adbc6c45e4445ab5def9e2995` |
+| image/response-04.json | `389c33a8e925cd3ea4bb30f51e0f06c10095be7ce770a0df7edc9b0e0d5b5756` |
+| 未改变的 pdf/frozen.json | `79cfa432dafb028503ed95513eb20a38cb74201862046d541c900ceec8cc4d59` |
+
+## 代码回归与后续边界
+
+- 原 HTTP/客户端/库级验收资产离线回归 145/145；新 PNG v2 针对性回归 66/66。
+  所有这些测试使用合成证据，不替代上述正式 HTTP 结果。
+- Windows 完整仓库回归：1769 passed、98 skipped、18 failed（306.24 秒）。其中
+  17 项触及 Linux/POSIX 暂存、权限或 symlink 语义；另外一次续租日志测试失败，
+  单独复查 1/1 通过，首次失败不抹除。没有为 Windows 改动生产安全检查或新增 skip。
+  PostgreSQL 和部分 Linux/安装测试由原条件跳过；完整 Linux、迁移、容器与 clean-device
+  结果以该提交对应 GitHub CI 为准，不声称 Windows 完整套件通过。
+- Ruff format/check 通过。PR #14 保持 Draft/Open，普通追加提交和 push；未部署。
+
+本次自然语言 → 现用 HTTP Agent → 普通 HTTPS 下载 → 原生图片读取 → 最终回答
+按 v2 约束通过；无需持久 Skill、Profile 或模型接线修改。这里只新增验收资产。
+下一轮若要受控恢复，仍须先取得既有授权管理通道，核对 CFserver 实际 Gateway 配置、
+API/三个 Worker 镜像、数据库迁移/队列和 CFserver → Hermes 认证，再单独批准恢复动作。
+本轮没有验证 Gateway 派发、宿主 grant/revoke、微信实收或出站交付；历史 PDF pending
+及 [原恢复前置条件](2026-10-06-hermes-http-media-acceptance.md)继续保留。

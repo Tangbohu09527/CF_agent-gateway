@@ -1,6 +1,6 @@
 """Offline checks for frozen, once-only Hermes HTTP acceptance evidence.
 
-The answer key is opened only after both frozen case trees pass integrity checks.
+The answer key is opened only after the selected frozen case trees pass integrity checks.
 HTTP session projections are not model transport captures: image visibility gaps
 remain explicit even when the independent answer checks pass.
 """

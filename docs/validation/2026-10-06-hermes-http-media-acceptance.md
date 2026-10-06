@@ -1,5 +1,8 @@
 # 2026-10-06：现用 Hermes HTTP 验收与受控恢复前置条件
 
+后续 PNG 已按单独授权的 [v2 规则完成正式 HTTP 验收](2026-10-06-hermes-http-png-v2.md)。
+下文 PDF 原会话、原评分与当时停止 PNG 的记录保留，不追溯更改其工具约束失败结论。
+
 承接 Gateway `08551b7a926966ea700149bf2a514be23a3037e4`，继续
 `feat/wechat-inbound-media` / Draft PR #14。之前库级完整 Agent 的 PDF/PNG
 [77/77 记录](2026-10-06-native-agent-media-acceptance.md)保留，没有重复执行。
