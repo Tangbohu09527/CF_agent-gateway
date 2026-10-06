@@ -14,6 +14,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+PNG_RULES = Path(__file__).with_name("png-rules-v2.json")
+
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -137,6 +139,85 @@ def verifier_file_path(file: dict) -> str:
     return path
 
 
+def allowed_tools(case: Path, intent: dict, calls: list, by_id: dict) -> tuple[bool, dict]:
+    """Versioned evidence check, not a permissions boundary for the live Agent."""
+    basic = {"terminal", "read_file", "vision_analyze"}
+    version = intent.get("rules_version")
+    if "rules_version" not in intent:
+        # Missing version is the original strict contract, including the frozen PDF.
+        return bool(calls) and all(c.get("function", {}).get("name") in basic for c in calls), {}
+    valid = False
+    rules, proof = {}, {}
+    try:
+        rules_raw = (case / "rules.json").read_bytes()
+        rules = json.loads(rules_raw)
+        pinned = read_json(PNG_RULES)
+        proof = read_json(case / "skill-preflight.json")
+        valid = (
+            version == "hermes-http-png-v2"
+            and intent.get("task") == "image"
+            and rules == pinned
+            and intent.get("rules_sha256") == proof.get("rules_sha256") == sha(rules_raw)
+            and proof.get("sha256") == {"skill": rules["skill"]["sha256"], **rules["loader_sha256"]}
+            and isinstance(proof.get("skill_file"), str)
+            and bool(proof["skill_file"])
+            and isinstance(proof.get("source_root"), str)
+            and bool(proof["source_root"])
+            and isinstance(proof.get("config_sha256"), str)
+            and len(proof["config_sha256"]) == 64
+            and all(c in "0123456789abcdef" for c in proof["config_sha256"])
+            and proof.get("resolver")
+            == "default profile skills; no external or trusted project roots"
+            and read_json(case / "skill-postflight.json") == proof
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    skills = [c for c in calls if c.get("function", {}).get("name") == "skill_view"]
+
+    def pinned_description(call: dict) -> bool:
+        if not valid:
+            return False
+        result = as_dict(by_id.get(call.get("id"), {}).get("content"))
+        content = result.get("content")
+        return (
+            as_dict(call["function"].get("arguments")) == {"name": rules["skill"]["name"]}
+            and result.get("success") is True
+            and result.get("name") == rules["skill"]["name"]
+            and isinstance(result.get("_source_path"), str)
+            and result.get("_source_path", "").replace("\\", "/")
+            == proof["skill_file"].replace("\\", "/")
+            and isinstance(content, str)
+            and sha(content.encode("utf-8")) == rules["skill"]["content_sha256"]
+            and result.get("readiness_status") == "available"
+            and result.get("setup_needed") is False
+            and result.get("setup_skipped") is False
+            and all(
+                result.get(key) == []
+                for key in (
+                    "required_environment_variables",
+                    "required_commands",
+                    "missing_required_environment_variables",
+                    "missing_credential_files",
+                    "missing_required_commands",
+                )
+            )
+            and not any(
+                result.get(key)
+                for key in ("deps_note", "setup_note", "setup_help", "gateway_setup_hint", "error")
+            )
+            and "file" not in result
+        )
+
+    descriptions = len(skills) <= 1 and all(pinned_description(c) for c in skills)
+    allowed = (
+        valid
+        and descriptions
+        and bool(calls)
+        and all(c.get("function", {}).get("name") in basic | {"skill_view"} for c in calls)
+    )
+    return allowed, {"png_v2_pinned_rule": valid, "png_v2_skill_descriptions_only": descriptions}
+
+
 def score_case(evidence: dict, expected_file: dict) -> tuple[dict[str, bool], dict]:
     case, intent = evidence["case"], evidence["intent"]
     requests, responses = evidence["requests"], evidence["responses"]
@@ -216,10 +297,8 @@ def score_case(evidence: dict, expected_file: dict) -> tuple[dict[str, bool], di
         and set(call_ids) == set(reply_ids)
     )
     by_id = {m.get("tool_call_id"): m for m in replies}
-    checks["allowed_tools_only"] = bool(calls) and all(
-        c.get("function", {}).get("name") in {"terminal", "read_file", "vision_analyze"}
-        for c in calls
-    )
+    checks["allowed_tools_only"], rule_checks = allowed_tools(case, intent, calls, by_id)
+    checks.update(rule_checks)
     checks["terminal_used"] = any(c.get("function", {}).get("name") == "terminal" for c in calls)
     checks["tool_results_after_calls"] = all(
         next((i for i, m in enumerate(messages) if c in (m.get("tool_calls") or [])), -1)
@@ -325,16 +404,23 @@ def score_answers(expected: dict, pdf: str, image: str) -> dict[str, bool]:
     return scorer.score_answers(expected, pdf, image)
 
 
-def evaluate(root: Path, verifier_path: Path, verifier_sha256: str) -> dict:
+def evaluate(
+    root: Path, verifier_path: Path, verifier_sha256: str, task: str | None = None
+) -> dict:
     # Do not move answer-key access before this full freeze verification.
-    cases = {name: load_frozen(root / name) for name in ("pdf", "image")}
+    if task not in (None, "pdf", "image"):
+        raise ValueError("Unknown case")
+    cases = {name: load_frozen(root / name) for name in ((task,) if task else ("pdf", "image"))}
     raw = verifier_path.read_bytes()
     if sha(raw) != verifier_sha256:
         raise ValueError("Original verifier digest differs")
     verifier = json.loads(raw)
     checks = score_answers(
-        verifier["verifier_only_expected"], cases["pdf"]["final"], cases["image"]["final"]
+        verifier["verifier_only_expected"],
+        cases.get("pdf", {}).get("final", ""),
+        cases.get("image", {}).get("final", ""),
     )
+    checks = {key: value for key, value in checks.items() if key.split(".")[0] in cases}
     visibility = {}
     for name, evidence in cases.items():
         expected_files = [
@@ -354,6 +440,10 @@ def evaluate(root: Path, verifier_path: Path, verifier_sha256: str) -> dict:
         "total": len(checks),
         "failed": [name for name, passed in checks.items() if not passed],
         "visibility": visibility,
+        "rules_versions": {
+            name: case["intent"].get("rules_version", "original-strict-v1")
+            for name, case in cases.items()
+        },
         "scope": "Windows to installed Hermes HTTP; CFserver and WeChat unverified",
     }
 
@@ -364,8 +454,9 @@ def main() -> None:
     parser.add_argument("--verifier", type=Path, required=True)
     parser.add_argument("--verifier-sha256", required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--task", choices=("pdf", "image"))
     args = parser.parse_args()
-    report = evaluate(args.root, args.verifier, args.verifier_sha256)
+    report = evaluate(args.root, args.verifier, args.verifier_sha256, args.task)
     with args.report.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, ensure_ascii=False, indent=2)
     print(json.dumps({key: report[key] for key in ("passed", "total", "failed", "visibility")}))

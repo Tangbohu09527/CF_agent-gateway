@@ -44,16 +44,70 @@ def freeze(case: Path) -> None:
     write_new(case / "frozen.json", proofs)
 
 
-def prompt(task: str, remote: str, work: Path, reference: Path, python: Path) -> str:
+PNG_RULES = Path(__file__).with_name("png-rules-v2.json")
+
+
+def verify_png_skill(args) -> tuple[bytes, dict]:
+    """Read pinned bytes only: never import Hermes or activate its skill loader."""
+    import yaml
+
+    if args.task != "image":
+        raise ValueError("PNG v2 cannot change the historical PDF contract")
+    rules_raw = PNG_RULES.read_bytes()
+    rules = json.loads(rules_raw)
+    source = args.hermes_source
+    skill = args.skill_file
+    config_path = args.hermes_config
+    if any(p.is_symlink() or p.is_junction() for p in (config_path, *config_path.parents)):
+        raise ValueError("Hermes config reference is a link")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    skills_config = config.get("skills", {})
+    # This installed default profile has no external/project override. Refuse
+    # changes rather than importing the dynamic resolver or visiting other roots.
+    if skills_config.get("external_dirs") or skills_config.get("trusted_project_dirs"):
+        raise ValueError("Skill search roots differ from reviewed default profile")
+    if skill.resolve() != (config_path.parent / rules["skill"]["path"]).resolve():
+        raise ValueError("Skill is not in the reviewed profile's skills directory")
+    paths = {"skill": skill, **{name: source / name for name in rules["loader_sha256"]}}
+    expected = {"skill": rules["skill"]["sha256"], **rules["loader_sha256"]}
+    observed = {}
+    for name, path in paths.items():
+        if any(p.is_symlink() or p.is_junction() for p in (path, *path.parents)):
+            raise ValueError("Pinned Skill/source path is a link")
+        observed[name] = fingerprint(path)["sha256"]
+        if observed[name] != expected[name]:
+            raise ValueError("Pinned Skill/source bytes changed: " + name)
+    return rules_raw, {
+        "rules_sha256": hashlib.sha256(rules_raw).hexdigest(),
+        "skill_file": str(skill.resolve()),
+        "source_root": str(source.resolve()),
+        "config_sha256": fingerprint(config_path)["sha256"],
+        "resolver": "default profile skills; no external or trusted project roots",
+        "sha256": observed,
+        "method": "static pinned-source review; no skill_view or Hermes import",
+    }
+
+
+def prompt(
+    task: str, remote: str, work: Path, reference: Path, python: Path, *, png_v2: bool = False
+) -> str:
     action = (
         "实际读取 PDF，返回完整正文、数字表格和末尾标记，保留数值与顺序。"
         if task == "pdf"
         else "实际分析 PNG，返回核验码、四个区域的位置/图形/颜色/数量及箭头方向。"
     )
+    tools = """只使用 terminal、read_file、vision_analyze；不调用 FileBridge 客户端、插件或安装器。
+不要搜索历史会话、记忆、其他文件，不加载 Skill 或写入记忆，不委派其他 Agent。"""
+    if png_v2:
+        tools = """执行工具只使用 terminal、read_file、vision_analyze。
+不调用 FileBridge 客户端、插件或安装器。
+如需查看相关官方 Skill，只允许 skill_view({"name":"ocr-and-documents"}) 一次。
+这份本机既有官方说明已核验来源与加载行为；不传 file_path 或其他参数，不查看其他 Skill。
+只允许读说明：其中安装、setup、脚本及其他工具示例均不获授权，不执行或修改 Skill。
+不要搜索历史会话、记忆、其他文件，不写入记忆，不委派其他 Agent。"""
     return f"""从企业文件服务下载 `{remote}`，{action}
 这是全新独立验收任务。请自己调用现有工具下载、原生读取并给出最终回答。
-只使用 terminal、read_file、vision_analyze；不调用 FileBridge 客户端、插件或安装器。
-不要搜索历史会话、记忆、其他文件，不加载 Skill 或写入记忆，不委派其他 Agent。
+{tools}
 接口说明：非秘密 JSON 引用 `{reference.as_posix()}` 包含 base_url、ca_file、ca_sha256、
 token_file、source、max_download_bytes。现有 Python 为 `{python.as_posix()}`。
 在 terminal 内用普通 Python 标准库 HTTPS；在进程内读取 token_file，去掉末尾换行，
@@ -78,8 +132,13 @@ def run(args) -> None:
     from cf_agent_gateway.hermes.client import HermesClient
     from cf_agent_gateway.hermes.errors import HermesAPIError
 
+    png_v2 = getattr(args, "png_rules_v2", False)
+    pinned = verify_png_skill(args) if png_v2 else None
     case = args.output.resolve() / args.task
     case.mkdir()  # Durable once-only intent; even a failed attempt cannot be overwritten.
+    if pinned:
+        (case / "rules.json").write_bytes(pinned[0])
+        write_new(case / "skill-preflight.json", pinned[1])
     work = case / "work"
     work.mkdir()
     reference = json.loads(args.reference.read_text(encoding="utf-8"))
@@ -98,7 +157,9 @@ def run(args) -> None:
         raise ValueError("Existing API_SERVER_KEY reference missing")
     session = "cf-http-" + uuid.uuid4().hex
     key = "cf-http-acceptance-" + uuid.uuid4().hex
-    content = prompt(args.task, args.remote_path, work, case / "http-reference.json", args.python)
+    content = prompt(
+        args.task, args.remote_path, work, case / "http-reference.json", args.python, png_v2=png_v2
+    )
     (case / "prompt.txt").write_text(content, encoding="utf-8")
     write_new(
         case / "intent.json",
@@ -114,6 +175,14 @@ def run(args) -> None:
             "task": args.task,
             "remote_path": args.remote_path,
             "driver": fingerprint(Path(__file__)),
+            **(
+                {
+                    "rules_version": json.loads(pinned[0])["version"],
+                    "rules_sha256": pinned[1]["rules_sha256"],
+                }
+                if pinned
+                else {}
+            ),
             "started_at": time.time(),
         },
     )
@@ -197,6 +266,12 @@ def run(args) -> None:
                     / ("session-read-error.json" if not suffix else "messages-read-error.json"),
                     {"error_type": type(error).__name__},
                 )
+    if pinned:
+        try:
+            _, postflight = verify_png_skill(args)
+        except (OSError, ValueError) as error:
+            postflight = {"error_type": type(error).__name__}
+        write_new(case / "skill-postflight.json", postflight)
     write_new(
         case / "downloads.json",
         {str(p.relative_to(work)): fingerprint(p) for p in private_files(work)},
@@ -213,7 +288,15 @@ def main() -> None:
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--extra-site-packages", type=Path, action="append", default=[])
     parser.add_argument("--task", choices=("pdf", "image"), required=True)
+    parser.add_argument("--png-rules-v2", action="store_true")
+    parser.add_argument("--hermes-source", type=Path)
+    parser.add_argument("--skill-file", type=Path)
+    parser.add_argument("--hermes-config", type=Path)
     args = parser.parse_args()
+    if args.png_rules_v2 and any(
+        value is None for value in (args.hermes_source, args.skill_file, args.hermes_config)
+    ):
+        parser.error("PNG v2 requires existing source, Skill and config references")
     sys.path.insert(0, str(args.site_packages.resolve()))
     for path in args.extra_site_packages:
         sys.path.insert(0, str(path.resolve()))

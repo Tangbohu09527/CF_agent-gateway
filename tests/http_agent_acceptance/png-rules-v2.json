@@ -1,0 +1,31 @@
+{
+  "version": "hermes-http-png-v2",
+  "task": "image",
+  "skill": {
+    "name": "ocr-and-documents",
+    "repository": "https://github.com/NousResearch/hermes-agent",
+    "commit": "4a2198bf5124f0c4d915cb958f141116ae8607f0",
+    "path": "skills/productivity/ocr-and-documents/SKILL.md",
+    "blob": "0677b70a1598ff270ce78de2b027ce6dc5162750",
+    "bytes": 5784,
+    "sha256": "856c1bce359ca7da0cc83f06e7b6b59f9445c16084d0510fc1541101af57f263",
+    "content_sha256": "856c1bce359ca7da0cc83f06e7b6b59f9445c16084d0510fc1541101af57f263"
+  },
+  "loader_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+  "loader_sha256": {
+    "tools/skills_tool.py": "61219f9ccdccd700a98a681ad7786e24308634379d29a128440f08a3d8533a06",
+    "tools/skills_tool_setup.py": "afcbbfba8c5c4dfc796b5ea13a9a2cc4cb215a3c45e3d66521fd657cd3aca73c",
+    "tools/skills_tool_plugin.py": "e181f67718c44891a4217c2a6dc0fa067f5d83b04cabcdfb1d3379c97d595e2a",
+    "tools/skills_tool_dedup.py": "205e324ceb338a908616adda7698eeb0c5c89ebbd25a1bbef62d3b6e53124b3a",
+    "agent/skill_utils.py": "5a4cae54bc4f16c1dbe3132a33ca3ec1ae9b0ab06aa4340f4f5f26129c2013e0",
+    "agent/skill_preprocessing.py": "3bf69baec106435e2c4d7d228814101fb771d830e5f711ac81da0de8bc01cb60",
+    "tools/skill_usage.py": "d5434792828129290cd705093451cea0c49c58f2f7dfebbd25edce789fc1e39e"
+  },
+  "review": {
+    "deps_setup_environment_credentials": "absent from pinned frontmatter",
+    "inline_shell_and_template_tokens": "absent from pinned content",
+    "linked_files": "listing only; viewing or executing scripts is not authorized",
+    "ordinary_usage_accounting": "existing loader view/use bookkeeping only",
+    "permissions_boundary": false
+  }
+}
