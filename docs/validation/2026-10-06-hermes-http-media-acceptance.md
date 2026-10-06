@@ -58,35 +58,95 @@ HTTPS 说明；Token 只由被测工具在进程内从原引用读取，CA、1 M
 Agent 自述都不是单独的成功依据；还需真实工具链、下载摘要和内容核对。
 
 当前官方实现的非流式会话 API 会把图像部分持久化为 `[screenshot]`。因此它可以保留
-本次 vision_analyze 调用、下载文件、原生视觉文本投影及最终答案，但不能独立提供
+vision_analyze 调用、下载文件、原生视觉文本投影及最终答案，但不能独立提供
 模型供应商请求中的原始图像字节。不得把上一轮库级 HTTPX 观察结果移植成这次的证据，
 也不为补证据改用不同请求入口或重复任务挑选答案。
 
 ## 本轮执行状态
 
-首次正式 PDF 启动命令被自动审批拒绝，原因是当前服务工具集较广且无法按请求隔离。
-拒绝发生在进程启动前，没有发送 PDF POST，没有创建 PDF/PNG case 或下载样本。
-已向用户说明具体风险并请求批准现有工具集下的两项只读任务；确认前不间接执行。
-此状态不能记为模型失败，也不能记为验收通过。
+准备阶段的首次启动命令被自动审批拒绝，发生在进程启动前，没有发送业务请求。
+用户随后明确接受现用工具集不能按次隔离的风险，批准两项各一次，并要求先核查 PDF，
+发现偏离则不继续 PNG。本次经正常审批执行了 **一个 PDF POST**，没有重试或更换会话。
+
+**PDF 已完成现用 HTTP Agent 自主下载、原生读取和最终回答，内容核对 20/20；
+因调用了原驱动禁止的 `skill_view`，整项验收不通过。PNG 按约停止，尚未提交。**
+
+| 实际证据 | PDF |
+| --- | --- |
+| 入口 | 未改动的 `e6232b1c` 驱动 → 生产 `HermesClient.chat` → 现用 `/v1/chat/completions` |
+| 起点 | 新 session 的先行 GET 404；请求体仅一条新用户任务，无旧历史/工具结果/答案 |
+| session | `cf-http-8b65ca6869eb40159faab7ec5f22cc04` |
+| HTTP completion | `chatcmpl-e74eea0514224f3ba6f9f6ced95d5` |
+| 请求/响应保存时间 | 2026-10-06 14:55:44 / 14:57:52（Asia/Shanghai；是本地保存时间） |
+| HTTP 与客户端 | 200；`finish_reason=stop`；响应会话与 intent 一致；`client_accepted=true` |
+| 完成/失败字段 | 成功响应按官方契约省略 `hermes` 和 Completed 头，无显式 failed/partial/error；不伪造正值 |
+| 实际会话 | `source=api_server`，`model=gpt-6-astra`，无 parent；一页 12 条消息完整关联 |
+| 下载 | 79083 字节，普通 HTTPS，服务端指定样本只读 |
+| 下载 SHA-256 | `ed8bcf88549b664f456b83891b7435c4e3963323f411fc74a21b36ece441ef44` |
+| 原生读取 | 实际 `read_file` 返回 47 行，`extracted_document=true`、`truncated=false` |
+| 内容核对 | 原基准 PDF 正文、表格数值与尾标 20/20；实际提取的 29 条正文全部保留 |
+| 执行核对 | 26/27，唯一失败项 `allowed_tools_only`；没有将其豁免 |
+
+实际工具顺序及结果为：
+
+1. `skill_view("ocr-and-documents")`：成功读取通用文档 Skill，偏离原驱动约束。
+2. `read_file`：读取本次新建的非秘密 HTTP 引用 JSON，没有读取 Token 文件。
+3. `terminal`：普通 HTTPS GET self，确认 `hermes-agent-test` 且非管理员。
+4. `terminal`：普通 HTTPS GET 唯一批准 PDF，`xb` 创建带唯一后缀的任务副本，再回读核对摘要。
+5. `read_file`：读取刚下载的副本；随后 Agent 自己生成最终回答，并在回答中说明多用了 Skill。
+
+两段真实 terminal 代码均核对 CA 摘要，使用证书链和主机名校验，直连且不跟随重定向；
+下载最多读 1 MiB + 1，超限拒绝。Token 仅在进程内进入 Authorization，不在命令参数或
+工具输出中回显。未见 FileBridge 专用工具/安装器、Skill 脚本执行、依赖安装、远端业务写入、
+服务或配置修改。本机 config.yaml 执行前后摘要一致；没有改动半升级插件。
+
+这次暴露的是**验收提示与现用官方 Skills 提示的兼容冲突**：官方
+`agent/prompt_builder.py` 的 Skills 段要求相关任务加载 Skill，而原验收驱动明确禁止。
+不能仅靠请求提示建立工具权限边界，也不能把已读取 Skill 默认为满足原验收约束。
+它不是专用 FileBridge 插件被调用的证据。后续需明确只读通用 Skill 是否属于允许的任务工具，
+使验收契约与现用服务一致；本轮不事后放宽白名单、不改 Profile 或继续第二项。
+
+答案冻结后才独立读取原核验 JSON，摘要仍为
+`2b055f8472167755cd60d16e87d24dc18382dd5433b1bf27bb252da275e76765`。
+PNG 没有 case，不伪造其结果或运行两例总评分。PDF 通过现有核验器的冻结读取、答案评分和
+单例执行评分函数独立核对，明确仅针对 PDF。正文逐行核对只忽略 Markdown 标题、表格分隔符
+和空白排版，保留全部文字、数字和标点；初始字面比较与规范化比较报告都保留。
+
+| 私有证据 | SHA-256 |
+| --- | --- |
+| HTTP response | `e8a77ff29e618a45f0146cf1cc31f3ecb64aa01081a1197782d805179139bb93` |
+| 会话工具轨迹 | `86cda04640af76e1a6ae86ac4301e5bc4f9ad4ef6a4cd4c4b395a915a32e3ef1` |
+| 最终回答文件 | `06337e9fe9729feb529946d6f826fd9c8d3e643d84ec2cca774e93d3a69a2c6c` |
+| 原 case 冻结清单 | `79cfa432dafb028503ed95513eb20a38cb74201862046d541c900ceec8cc4d59` |
+
+副本绝对路径、原始参数/工具结果、原始最终回答及核对报告保存在私有任务目录，不进入 Git。
+Windows 本机结果不代表 CFserver 网络、Gateway Dispatch/claim、宿主绑定或微信端到端通过。
 
 ## 验收资产验证
 
-新增 [驱动回归](../../tests/test_http_agent_acceptance.py) **21 项**和
+准备阶段的 [驱动回归](../../tests/test_http_agent_acceptance.py) **21 项**和
 [离线核验器回归](../../tests/test_http_agent_acceptance_check.py) **38 项**通过。
-连同原 HermesClient 和原库级验收资产回归，本地 **128 passed**；ruff lint/format 通过。
+当时连同原 HermesClient 和原库级验收资产回归，本地 **128 passed**；ruff lint/format 通过。
 这些均为合成离线证据，不冒充正式 PDF/PNG 结果。唯一警告来自现有 Starlette 的
 httpx TestClient 弃用提示，没有为此安装或升级依赖。
 
 只读错误认证探针首次尝试在 Hermes 3.14 generation 中导入 Gateway 时缺少 SQLAlchemy，
 发生在网络调用前。改用既有 Gateway Python **3.12.10** 和现有测试依赖后完成该 GET；
 没有向 Hermes 安装依赖。HTTP 驱动与服务端解释器分开，实际 listener 的解释器路径为
-**3.14.7**；待执行任务也指定已有的该 generation，不能把驱动版本混写成 Agent 版本。
+**3.14.7**；PDF 的实际 terminal 命令也使用已有的该 generation，不能把驱动版本混写成 Agent 版本。
 
 [独立核验器](../../tests/http_agent_acceptance/check.py)需两个 case 的冻结完整性均通过，
 才打开原核验 JSON。它复用已有答案评分逻辑，额外验证真实 HTTP 请求、会话工具配对、
 下载与原基准大小/摘要，以及原生读取。工具返回中的原生图像标记只算会话投影，
-`model_transport_image_bytes` 始终单列为 `unobserved`。本轮尚无正式 case，所以未读取
-原核验 JSON、未生成新的答案通过数，也未重复先前已获准且已完成的一次离线凭据扫描。
+`model_transport_image_bytes` 始终单列为 `unobserved`，本轮 PNG 尚未执行。
+没有重复先前已获准且已完成的一次额外离线凭据扫描。
+
+真实 PDF 证据暴露两个离线格式假设错误：原基准用 `scoped_path` 而非 `path`；
+Agent 先读本次非秘密接口引用，再读 PDF，不能用所有 read_file 的总数判断原生读取是否发生。
+本轮仅修正核验器：兼容原基准路径字段并拒绝冲突，按实际 path/image_url 精确匹配下载目标，
+额外读取只允许本次非秘密引用；仍拒绝 `skill_view`。首次 KeyError 记录保留，冻结证据和驱动
+没有更改。修正后的核验器合成回归 **55 项通过**，连同原客户端和验收资产共 **145 passed**，
+ruff lint/format 通过；这些代码回归不替代上述正式任务结论。
 
 ## 下一次受控恢复的前置条件与操作顺序
 
