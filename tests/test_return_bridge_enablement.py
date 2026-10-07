@@ -49,6 +49,38 @@ def bridge_settings(tmp_path):
     }
 
 
+def test_missing_explicit_tools_accepts_only_verified_inherited_list(tmp_path):
+    path, config = hermes_config(tmp_path)
+    del config["platform_toolsets"]
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(deploy.EnablementError, match="explicit_existing_api_toolsets_required"):
+        deploy.plan_hermes(path, tmp_path / "plugins/cf-artifact-return", bridge_settings(tmp_path))
+    plan = deploy.plan_hermes(
+        path,
+        tmp_path / "plugins/cf-artifact-return",
+        bridge_settings(tmp_path),
+        inherited_api_toolsets=["file", "vision"],
+    )
+    revised = yaml.safe_load(plan.changes[-1].after)
+    assert revised["platform_toolsets"]["api_server"] == ["file", "vision", "cf_artifact_return"]
+    assert yaml.safe_load(path.read_bytes()) == config
+
+
+def test_existing_explicit_tools_never_replaced_by_inherited_list(tmp_path):
+    path, _ = hermes_config(tmp_path)
+    plan = deploy.plan_hermes(
+        path,
+        tmp_path / "plugins/cf-artifact-return",
+        bridge_settings(tmp_path),
+        inherited_api_toolsets=["all"],
+    )
+    assert yaml.safe_load(plan.changes[-1].after)["platform_toolsets"]["api_server"] == [
+        "terminal",
+        "vision",
+        "cf_artifact_return",
+    ]
+
+
 def apply(plan, tmp_path):
     return deploy.apply_plan(
         plan, tmp_path / "private-journal", expected_plan_sha256=plan.summary()["plan_sha256"]

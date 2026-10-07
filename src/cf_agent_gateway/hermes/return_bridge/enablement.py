@@ -17,7 +17,7 @@ import re
 import stat
 import tempfile
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -29,6 +29,7 @@ GATEWAY_FIELDS = frozenset(
     {
         "hermes.base_url",
         "hermes.ca_file",
+        "api.max_request_body_bytes",
         "artifact.storage_root",
         "artifact_return.enabled",
         "artifact_return.host_contract_confirmed",
@@ -240,7 +241,10 @@ def plan_gateway(config_path: str | Path, delta: dict[str, object]) -> Plan:
             or not result.public_base_url.startswith("https://")
         ):
             raise ValueError()
-        if not Path(revised.get("artifact", {}).get("storage_root", "")).is_absolute():
+        storage = revised.get("artifact", {}).get("storage_root", "")
+        # A Linux container configuration may be planned on Windows; this is a
+        # configuration value, never a path opened by this helper.
+        if not (Path(storage).is_absolute() or PurePosixPath(storage).is_absolute()):
             raise ValueError()
     except (TypeError, ValueError):
         raise EnablementError("invalid_gateway_enablement") from None
@@ -277,6 +281,7 @@ def plan_hermes(
     settings: dict[str, object],
     *,
     package_source: str | Path | None = None,
+    inherited_api_toolsets: list[str] | None = None,
 ) -> Plan:
     """Plan the fixed official plugin bundle and config, preserving existing tools/model/auth.
 
@@ -325,6 +330,13 @@ def plan_hermes(
     entries[PLUGIN_NAME] = expected
     toolsets = _section(revised, "platform_toolsets")
     tools = toolsets.get("api_server")
+    if tools is None and inherited_api_toolsets is not None:
+        if not isinstance(inherited_api_toolsets, list) or any(
+            not isinstance(item, str) or not item for item in inherited_api_toolsets
+        ):
+            raise EnablementError("invalid_inherited_api_toolsets")
+        tools = list(inherited_api_toolsets)
+        toolsets["api_server"] = tools
     if not isinstance(tools, list) or any(not isinstance(item, str) for item in tools):
         raise EnablementError("explicit_existing_api_toolsets_required")
     if TOOLSET not in tools:
