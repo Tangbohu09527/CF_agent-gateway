@@ -110,6 +110,18 @@ ACK、并发隔离、旧授权、重启重放、结束/取消/迟到线程、503
 官方 HTTPS/Agent 合成模型 CI，保留原 4d55 双平台兼容性 job。CI 结果以具体提交
 的 GitHub 检查为准，不用它代替上面两项获批模型正式结果。
 
+首轮 CI 密钥扫描将探针两个公开源码 blob SHA 误判为 generic-api-key。已再次通过
+官方 GitHub 固定提交核对，只在该规则中对 `tests/hermes_return_probe/probe.py` 与
+这两个完整 SHA 同时匹配的情况排除误报；不跳过文件、提交或其他秘密规则。已提交
+历史保持不变，正式两项模型任务不因 CI 修正而重跑。
+
+首次新增 Linux 官方探针被测试审计拒绝：OpenAI SDK 构造平台 header 时通过 distro
+读取 `/etc/os-release`。该次 HTTP 200 同时有 `hermes.failed=true`、error finish，
+Gateway 正确保持 UNCERTAIN，零 PUT/投递；失败轨迹保留。随后仅增加该文件及其
+规范目标 `/usr/lib/os-release` 的精确只读例外，增加业务请求前平台预检和两项
+写入/邻近敏感路径拒绝回归，不放宽目录、正式工具或配置权限。正式 PDF/PNG 使用
+上述 Windows 轨迹，不因 Linux 测试驱动修正而重跑；接入核心字节未改变。
+
 ## 现场最少待办
 
 统一入口调用 [启用／回退助手](../development/hermes-artifact-return-enablement.md)，

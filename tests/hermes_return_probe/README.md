@@ -65,6 +65,14 @@ an explicitly authorized live-model run. Installed `.env` reads and subprocess
 tools are refused. This Python audit is **not** a system sandbox for other
 processes running as the same Windows user.
 
+On Linux, exact read-only OS metadata files are also allowed, including
+`/etc/os-release` and `/usr/lib/os-release` used by OpenAI 2.24.0's
+`platform_headers -> distro.id -> os_release_attr` request header construction.
+This does not grant reads of their parent directories or permit writes.
+SDK platform detection runs before the HTTP listener becomes ready, and audit
+denials retain their path only in the private `events.jsonl`, so a CI environment
+mismatch fails early instead of waiting through provider retries.
+
 ## Separately approved model/sample invocation
 
 The main task may invoke `run_case(...)` with an already-approved `model_config`

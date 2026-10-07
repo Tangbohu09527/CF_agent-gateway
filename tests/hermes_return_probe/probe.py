@@ -672,6 +672,25 @@ def prepare_scope(scope):
         )
 
 
+def _readonly_metadata_paths(platform_name: str, process_id: int) -> set[Path]:
+    if platform_name == "nt":
+        return set()
+    return {
+        Path(value).resolve()
+        for value in (
+            "/proc/stat",
+            "/proc/version",
+            "/proc/1/cgroup",
+            f"/proc/{process_id}/stat",
+            "/dev/null",
+            # OpenAI 2.24.0 platform_headers -> distro.id -> os_release_attr.
+            # distro selects these two public OS metadata files, not an /etc tree.
+            "/etc/os-release",
+            "/usr/lib/os-release",
+        )
+    }
+
+
 def _install_child_audit(source: Path, repository: Path, case: Path, model: dict):
     """Bound this probe's I/O; this Python audit is not a host OS sandbox."""
     allowed = [
@@ -684,20 +703,7 @@ def _install_child_audit(source: Path, repository: Path, case: Path, model: dict
     for path in sys.path:
         if path and "site-packages" in path:
             allowed.append(Path(path).resolve())
-    metadata = (
-        {
-            Path(value).resolve()
-            for value in (
-                "/proc/stat",
-                "/proc/version",
-                "/proc/1/cgroup",
-                f"/proc/{os.getpid()}/stat",
-                "/dev/null",
-            )
-        }
-        if os.name != "nt"
-        else set()
-    )
+    metadata = _readonly_metadata_paths(os.name, os.getpid())
     host = urlsplit(model["base_url"]).hostname
     approved = {"127.0.0.1", "::1", "localhost"}
     if host not in approved:
@@ -706,40 +712,52 @@ def _install_child_audit(source: Path, repository: Path, case: Path, model: dict
         approved.add(host)
         approved.update(item[4][0] for item in socket.getaddrinfo(host, 443))
 
+    def reject(message: str, event: str, path: Path | None = None):
+        # Only the private trace gets a denied path, never the model-facing error.
+        details = {"event": event, "reason": message}
+        if path is not None:
+            details["path"] = str(path)
+        record("probe_audit_denied", details)
+        raise PermissionError(message)
+
     def audit(event, args):
         if event == "socket.connect":
             address = args[1]
             if isinstance(address, tuple) and address[0] not in approved:
-                raise PermissionError("Probe rejected network destination")
+                reject("Probe rejected network destination", event)
         if event == "socket.getaddrinfo":
             requested_host = args[0].decode("ascii") if isinstance(args[0], bytes) else args[0]
             if requested_host not in approved | {None}:
-                raise PermissionError("Probe rejected DNS destination")
+                reject("Probe rejected DNS destination", event)
         if event in {"subprocess.Popen", "os.system", "os.posix_spawn", "os.exec"}:
-            raise PermissionError("Probe does not authorize subprocess tools")
+            reject("Probe does not authorize subprocess tools", event)
         if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
             path = Path(os.fsdecode(args[0])).resolve()
             if path.name == ".env" and not path.is_relative_to(case):
-                raise PermissionError("Probe does not read installed credentials")
+                reject("Probe does not read installed credentials", event, path)
             if (
                 not any(path.is_relative_to(root) for root in allowed)
                 and path not in metadata
                 and os.path.normcase(str(path)) not in {"nul", os.path.normcase(os.devnull)}
             ):
-                raise PermissionError("Probe rejected file outside isolated/read-only roots")
+                reject("Probe rejected file outside isolated/read-only roots", event, path)
             mode = args[1] if len(args) > 1 else "r"
             flags = args[2] if len(args) > 2 else 0
             writing = isinstance(mode, str) and any(v in mode for v in "wax+")
             writing = writing or bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT))
             if writing and not path.is_relative_to(case):
-                raise PermissionError("Probe rejected write outside its task directory")
+                reject("Probe rejected write outside its task directory", event, path)
         if event in {"os.mkdir", "os.remove", "os.rmdir", "os.chmod", "os.rename"}:
             candidates = args[:2] if event == "os.rename" else args[:1]
             for candidate in candidates:
                 if isinstance(candidate, (str, bytes, os.PathLike)) and not Path(
                     os.fsdecode(candidate)
                 ).resolve().is_relative_to(case):
-                    raise PermissionError("Probe rejected mutation outside its task directory")
+                    reject(
+                        "Probe rejected mutation outside its task directory",
+                        event,
+                        Path(os.fsdecode(candidate)),
+                    )
 
     sys.addaudithook(audit)
 
@@ -760,6 +778,11 @@ async def child():
     mimetypes.init(files=[])
     config = json.loads((case / "home/config.yaml").read_text())
     _install_child_audit(source, Path(_PAYLOAD["repository"]), case, config["model"])
+    # Fail before submitting any business request if SDK platform detection needs
+    # an unapproved OS file; otherwise its internal provider retry delays obscure it.
+    from openai._base_client import get_platform
+
+    record("sdk_platform_preflight", {"platform": str(get_platform())})
     from agent.secret_scope import reset_secret_scope, set_secret_scope
     from gateway.config import PlatformConfig
     from gateway.platforms.api_server import APIServerAdapter
