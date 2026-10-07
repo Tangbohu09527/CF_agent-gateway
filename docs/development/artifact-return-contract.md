@@ -7,6 +7,11 @@ Response、Delivery 和微信媒体发送适配器返回发起任务的原聊天
 Markdown 图片链接或图片分析文字解释为附件，也不改变普通读取任务的文字返回行为。
 功能默认关闭。本轮开发和隔离测试不能代替现场微信文件／图片实收验收。
 
+官方 Hermes 的实际插件入口、任务作用域与两向 TLS 接线已在本仓提供，详见
+[官方宿主接入](hermes-artifact-return.md)和
+[统一入口启用／回退](hermes-artifact-return-enablement.md)。
+这些代码与隔离验证不表示现用 Hermes 或 Gateway 已部署。
+
 ## 已有能力和补齐的边界
 
 已有 `WechatHttpMediaSender.send_media`、`ChannelDeliveryWorker` 的 `artifact_ref`
@@ -195,7 +200,7 @@ READY 和落盘完整性，PDF 走 file 消息并保留正确文件名，PNG 走
 
 ## 隔离联合测试与证据范围
 
-本仓测试沿用现有框架：真实 Gateway HTTP、隔离数据库、真实 Artifact 文件及
+原 Gateway 测试沿用现有框架：真实 Gateway HTTP、隔离数据库、真实 Artifact 文件及
 Response/Delivery 状态机，与协议 Hermes 宿主及微信接收端测试替身联合运行。
 测试应覆盖私聊和群聊源目标、PDF/PNG/文字、同 slot 重试及冲突、跨任务/账号/
 聊天拒绝、身份和 claim 变化、过期、限长/摘要/类型/路径拒绝、完成与上传竞争、
@@ -205,13 +210,18 @@ Response/Delivery 状态机，与协议 Hermes 宿主及微信接收端测试替
 测试微信接收端确认请求字节和状态机，不等于现场微信实收。验收结果和具体运行
 证据由对应提交/CI 报告，不用已有读取报告或新增测试数量代替真实附件投递证据。
 
+后续新增的 [固定官方探针](../../tests/hermes_return_probe/README.md)将 Hermes
+宿主替换为真实官方 HTTP、插件加载器和 Agent 工具循环，经最终 ACK 门禁运行。
+合成模型与获批真实模型分别记录；微信接收端仍是替身。旧 ACK 门禁之前的隔离
+报告保持原结论，不追溯改写成新接线的证据。
+
 ## 后续现场所需的最少变更与操作
 
 本轮不应用以下现场变更。批准进入现场验收后，应按顺序完成：
 
-1. 验证既有 Hermes 宿主能消费后台 header、限制到真实当前任务作用域、执行明确
-   返回动作，并证明授权不进入模型、工具结果、历史或普通日志。若适配尚无实现，
-   先补该最小宿主适配；不能只改 Gateway 开关、提示词或 Skill 便进入发送验收。
+1. 通过统一入口规划并加载本仓已实现的官方 Hermes 接入模块，核验固定源码版本、
+   实际工具作用域和配置保留。证明授权不进入模型、工具结果、历史或普通日志；
+   不能只改 Gateway 开关、提示词或 Skill 便进入发送验收。
 2. 确认 AI 主机能访问 Gateway HTTPS 入口，且 Gateway → Hermes 后台授权交接
    也使用经过验证的 HTTPS；两个方向均检查证书链和主机名，不经公开临时链接。
    现有 LAN 明文 Hermes HTTP 入口不能直接承载本授权。按既有受控方式配置
