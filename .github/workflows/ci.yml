@@ -175,8 +175,23 @@ jobs:
           tests/test_host_binding_fixture.py
           --basetemp="${RUNNER_TEMP}/pytest-host-handoff"
 
+      - name: Prepare isolated Nginx deployment regression
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends nginx-light
+
       - name: Run full test suite
+        env:
+          CF_RETURN_REQUIRE_NGINX: "1"
         run: python -m pytest -q --basetemp="${RUNNER_TEMP}/pytest-full"
+
+      - name: Preserve isolated Nginx return evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-return-nginx
+          path: ${{ runner.temp }}/pytest-full/**/nginx-isolated-evidence.json
+          if-no-files-found: warn
 
       - name: Run migration fixtures explicitly
         run: >-

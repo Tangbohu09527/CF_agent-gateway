@@ -5,6 +5,10 @@
 没有增加服务、安装器、EXE、下载器，也不会调用 subprocess、网络、模型或服务管理。
 现有 `deploy/install-clean-device.sh` 仅适用于首次安装，本功能没有将其改成现用环境升级器。
 
+2026-10-07 补充：两台机器的可执行规划/维护窗口衔接现在见
+[现场准备入口](../deployment/artifact-return-site.md)。它们复用本 helper 和已有 Controller /
+官方 Hermes 管理命令；下面的低层 helper 自身仍不负责服务管理。现场尚未应用。
+
 固定兼容目标是官方 Hermes `0f4a98f87c17007b81500239d0bd5b9574027b73`。
 统一部署入口必须先核验安装源码与选定执行器，不能仅凭 manifest 中的版本常量视为现场已核验。
 
@@ -15,7 +19,8 @@
   引用/修订、TLS host/port/cert/key 引用）。不提交新的 model/provider/API Key/Skill 配置。
 - `plan_hermes()` 读取并保留现有 model/provider/options、API key 字段、其他插件及原工具选择；
   只启用本插件、在现有 `platform_toolsets.api_server` 列表追加 `cf_artifact_return`。
-  为防无意改变既有有效工具选择，缺少显式列表时拒绝规划，统一入口须先解析并保留有效列表；
+  为防无意改变既有有效工具选择，缺少显式列表且未提供已核验的 `inherited_api_toolsets`
+  时拒绝规划；Windows 入口按固定官方源码与认证只读工具目录核验并保留有效列表；
   不回退为全工具。
 - 官方 `PlatformConfig.from_dict` 会将顶层 host 提升到 extra，显式 extra.host 优先。
   helper 将已有 extra.host 固定为 127.0.0.1；顶层 host 同时存在时也固定，避免歧义；
@@ -24,6 +29,7 @@
 - TLS 由本插件在官方现有 Application/runner 上新增 TLS site，字段是插件的
   `tls_host/tls_port/tls_cert_file/tls_key_file`，不是捏造的官方 TLS 字段。
 - Gateway 侧 `plan_gateway(config_path, delta)` 只接受 `hermes.base_url/ca_file`、
+  `api.max_request_body_bytes`、
   `artifact.storage_root`、`artifact_return.*` 白名单；不会改变 model、API Key 引用、数据库、
   Worker、legacy_runtime_confirmed 等。默认 Feature 仍关闭，调用 apply 才落配置。
 
@@ -82,7 +88,7 @@ CLI 在新进程中凭原 request 摘要和已审核 plan SHA 从私有 before/a
 部分完成的当前配置重新规划后扩大权限。若首次 journal 尚未写 manifest 就中断，
 目标尚未改变，报告 `incomplete_private_journal` 并保留残留，不自动删除或猜测恢复。
 
-## 统一入口仍需完成的最少现场动作
+## 统一入口调用的最少现场动作
 
 1. 经批准窗口核验实际源码/执行器和未决任务，自动读取并保留现有配置引用，生成并审核 plan。
 2. 提供两向可达、主机名验证正确的 HTTPS endpoint 与公司 CA：Gateway 的 hermes.ca_file
