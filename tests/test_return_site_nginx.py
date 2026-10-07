@@ -104,6 +104,10 @@ def test_quotes_and_comment_braces_do_not_forge_locations(tmp_path):
         'server_name "localhost"; # location ^~ /internal/hermes/returns/ {\n'
         '        add_header X-Synthetic "quoted # {} ; value";',
     )
+    assert (
+        b'add_header X-Synthetic "quoted # {} ; value";'
+        in plan_nginx(_source(tmp_path, source)).changes[0].after
+    )
 
 
 @pytest.mark.parametrize(
@@ -143,10 +147,6 @@ def test_normal_combined_log_format_and_sensitive_comment_are_preserved(tmp_path
     assert formatting in result.changes[0].after.decode()
     screen = next(r for r in result.requirements if r["kind"] == "nginx_log_format_screen")
     assert screen["not_verified"] == "arbitrary module or indirect variable logging"
-    assert (
-        b'add_header X-Synthetic "quoted # {} ; value";'
-        in plan_nginx(_source(tmp_path, source)).changes[0].after
-    )
 
 
 @pytest.mark.parametrize(
