@@ -4,6 +4,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
+from cf_agent_gateway.artifact.return_handoff import seal_returns
 from cf_agent_gateway.hermes.models import HermesDispatchOutcome, ResponseEnvelope
 from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
 from cf_agent_gateway.task.model.errors import HermesDispatchStateConflictError
@@ -36,16 +38,11 @@ class HermesDispatchResponseStore:
         *,
         claim_token: str,
         outcome: HermesDispatchOutcome,
+        artifact_return: ArtifactReturnSettings | None = None,
+        artifact_storage_root: str | None = None,
     ) -> HermesDispatchResponse:
         from cf_agent_gateway.inbound.host_binding import host_barrier_clear
 
-        envelope = outcome.response
-        response = HermesDispatchResponse(
-            dispatch_record_id=dispatch_record_id,
-            hermes_response_id=envelope.response_id if envelope is not None else None,
-            assistant_content=outcome.assistant_content,
-            response_payload=(envelope.model_dump(mode="json") if envelope is not None else None),
-        )
         statement = (
             update(HermesDispatchRecord)
             .where(
@@ -69,6 +66,24 @@ class HermesDispatchResponseStore:
             .execution_options(synchronize_session=False)
         )
         try:
+            if artifact_return is not None and artifact_return.enabled:
+                if artifact_storage_root is None:
+                    raise ValueError("artifact return storage is required")
+                outcome = seal_returns(
+                    self._session,
+                    dispatch_record_id,
+                    claim_token,
+                    outcome,
+                    settings=artifact_return,
+                    storage_root=artifact_storage_root,
+                )
+            envelope = outcome.response
+            response = HermesDispatchResponse(
+                dispatch_record_id=dispatch_record_id,
+                hermes_response_id=envelope.response_id if envelope is not None else None,
+                assistant_content=outcome.assistant_content,
+                response_payload=envelope.model_dump(mode="json") if envelope is not None else None,
+            )
             result = self._session.execute(statement)
             if result.rowcount != 1:
                 self._session.rollback()

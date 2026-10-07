@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from cf_agent_gateway.adapters.wechat.inbound_media_http import MediaFetchError
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
 from cf_agent_gateway.agent_profile import AgentProfile, AgentProfileStatus
+from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
+from cf_agent_gateway.artifact.return_handoff import issue_context
 from cf_agent_gateway.config import InboundMediaSettings
 from cf_agent_gateway.hermes.errors import HermesDispatchError, HermesResponseError
 from cf_agent_gateway.hermes.models import (
@@ -63,6 +65,7 @@ class HermesChatClient(Protocol):
         runtime_model: str | None = None,
         runtime_provider: str | None = None,
         runtime_model_options: dict[str, object] | None = None,
+        artifact_return_context: dict[str, str] | None = None,
     ) -> HermesChatResult: ...
 
     def prepare_inbound_session(self, session_id: str, **kwargs: object) -> None: ...
@@ -88,6 +91,7 @@ class HermesDispatchService:
         available_tools: tuple[str, ...] = (),
         inbound_media: InboundMediaSettings | None = None,
         host_binding: HostBindingSettings | None = None,
+        artifact_return: ArtifactReturnSettings | None = None,
     ) -> None:
         self._session = session
         self._client = client
@@ -99,6 +103,7 @@ class HermesDispatchService:
         self._available_tools = _context_tool_names(available_tools)
         self._inbound_media = inbound_media or InboundMediaSettings()
         self._host_binding = host_binding or HostBindingSettings()
+        self._artifact_return = artifact_return or ArtifactReturnSettings()
 
     def dispatch(self, admission: AdmissionOutcome) -> HermesDispatchOutcome:
         return self._dispatch(admission, idempotency_key=None)
@@ -279,6 +284,23 @@ class HermesDispatchService:
                 profile_revision=profile.revision,
                 thread_id=thread.id,
                 session_metadata=metadata,
+            )
+        if self._artifact_return.enabled:
+            if not defer_binding_update or not expected_claim_token:
+                raise HermesDispatchError(reason="artifact_return_requires_durable_claim")
+            record = self._session.scalar(
+                select(HermesDispatchRecord).where(
+                    HermesDispatchRecord.message_id == message_id,
+                    HermesDispatchRecord.claim_token == expected_claim_token,
+                )
+            )
+            if record is None:
+                raise HermesDispatchError(reason="artifact_return_claim_unavailable")
+            invocation["artifact_return_context"] = issue_context(
+                self._session,
+                record,
+                self._artifact_return,
+                session_id=invocation["hermes_thread_id"],
             )
         if defer_binding_update:
             self._session.commit()

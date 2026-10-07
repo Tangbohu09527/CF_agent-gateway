@@ -90,14 +90,19 @@ class _OperationObservedHermesClient:
         runtime_model: str | None = None,
         runtime_provider: str | None = None,
         runtime_model_options: dict[str, object] | None = None,
+        artifact_return_context: dict[str, str] | None = None,
     ) -> HermesChatResult:
         runtime = {}
+        if artifact_return_context is not None:
+            runtime["artifact_return_context"] = artifact_return_context
         if runtime_model is not None:
-            runtime = {
-                "runtime_model": runtime_model,
-                "runtime_provider": runtime_provider,
-                "runtime_model_options": runtime_model_options,
-            }
+            runtime.update(
+                {
+                    "runtime_model": runtime_model,
+                    "runtime_provider": runtime_provider,
+                    "runtime_model_options": runtime_model_options,
+                }
+            )
         try:
             result = self._client.chat(
                 content,
@@ -159,11 +164,14 @@ def build_dispatch_worker(
             available_tools=HERMES_CONTEXT_TOOL_NAMES,
             inbound_media=settings.inbound_media,
             host_binding=settings.host_binding,
+            artifact_return=settings.artifact_return,
         ),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,
         response_processor_factory=ResponsePersistenceProcessor,
         reconcile_persisted_responses=True,
+        artifact_return=settings.artifact_return,
+        artifact_storage_root=settings.artifact.storage_root,
     )
 
 

@@ -10,6 +10,11 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import ValidationError
 
+from cf_agent_gateway.artifact.return_config import (
+    RETURN_ACK_HEADER,
+    RETURN_AUTH_HEADER,
+    RETURN_URL_HEADER,
+)
 from cf_agent_gateway.hermes.errors import (
     HermesAPIError,
     HermesAPIKeyError,
@@ -100,6 +105,7 @@ class HermesClient:
         runtime_model: str | None = None,
         runtime_provider: str | None = None,
         runtime_model_options: dict[str, object] | None = None,
+        artifact_return_context: dict[str, str] | None = None,
     ) -> HermesChatResult:
         """Send one user message, creating or continuing a Hermes thread."""
 
@@ -125,6 +131,16 @@ class HermesClient:
             request_headers[HERMES_SESSION_HEADER] = hermes_thread_id
         if idempotency_key is not None:
             request_headers[HERMES_IDEMPOTENCY_HEADER] = idempotency_key
+        if artifact_return_context is not None:
+            url = urlsplit(self._base_url)
+            if url.scheme != "https" and url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError("artifact return requires verified TLS to the Hermes host")
+            if set(artifact_return_context) != {"url", "authorization"}:
+                raise ValueError("invalid artifact return context")
+            # Trusted request middleware consumes these headers. They never enter
+            # messages, session_metadata, model tool arguments, or persisted history.
+            request_headers[RETURN_URL_HEADER] = artifact_return_context["url"]
+            request_headers[RETURN_AUTH_HEADER] = artifact_return_context["authorization"]
         payload = request.model_dump(mode="json", exclude_none=True)
         if runtime_model is not None:
             # The pinned OpenAI route does not read a session's persisted /model
@@ -140,6 +156,14 @@ class HermesClient:
             json=payload,
             headers=request_headers or None,
         )
+        if artifact_return_context is not None:
+            expected_ack = hashlib.sha256(
+                artifact_return_context["authorization"].encode("utf-8")
+            ).hexdigest()
+            if response.headers.get(RETURN_ACK_HEADER) != expected_ack:
+                # An ordinary official endpoint ignores the new request headers.
+                # Never silently treat that as a host supporting artifact returns.
+                raise HermesResponseError(operation="artifact_return_host_ack")
         try:
             payload = response.json()
             effective_thread_id = _hermes_thread_id(response.headers.get(HERMES_SESSION_HEADER))

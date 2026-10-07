@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
 from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
 
@@ -292,6 +293,7 @@ class Settings:
     runtime: RuntimeSettings = RuntimeSettings()
     inbound_media: InboundMediaSettings = InboundMediaSettings()
     host_binding: HostBindingSettings = HostBindingSettings()
+    artifact_return: ArtifactReturnSettings = ArtifactReturnSettings()
 
     def __post_init__(self):
         protected = {
@@ -304,6 +306,16 @@ class Settings:
             self.host_binding.encryption_key_env in protected
         ):
             raise ValueError("host_binding requires separate service and encryption secrets")
+        if self.artifact_return.signing_key_env in protected | {
+            self.host_binding.service_token_env,
+            self.host_binding.encryption_key_env,
+            "FILEBROWSER_RUNTIME_TOKEN",
+        }:
+            raise ValueError("artifact_return requires a separate signing secret")
+        if self.artifact_return.enabled and self.artifact_return.max_bytes > (
+            self.api.max_request_body_bytes
+        ):
+            raise ValueError("artifact_return exceeds the API body limit")
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -329,6 +341,7 @@ def load_settings(path: str | Path) -> Settings:
     worker = _mapping(raw, "worker")
     inbound_media = _mapping(raw, "inbound_media")
     host_binding = _mapping(raw, "host_binding")
+    artifact_return = _mapping(raw, "artifact_return")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
@@ -353,6 +366,7 @@ def load_settings(path: str | Path) -> Settings:
     return Settings(
         inbound_media=InboundMediaSettings(**inbound_media),
         host_binding=HostBindingSettings(**host_binding),
+        artifact_return=ArtifactReturnSettings(**artifact_return),
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),

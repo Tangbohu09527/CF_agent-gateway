@@ -93,8 +93,25 @@ def authorized_source(
     session: Session, job: InboundMediaJob
 ) -> tuple[Message, HermesDispatchRecord]:
     """Recheck current source identity, not merely a historical allowed outcome."""
-    message = session.get(Message, job.message_id, populate_existing=True)
-    record = session.get(HermesDispatchRecord, job.dispatch_id, populate_existing=True)
+    message, record = authorized_dispatch_source(
+        session,
+        message_id=job.message_id,
+        dispatch_id=job.dispatch_id,
+    )
+    if source_for(message).fingerprint != job.source_fingerprint:
+        raise MediaFetchError("media_source_binding_changed")
+    return message, record
+
+
+def authorized_dispatch_source(
+    session: Session,
+    *,
+    message_id: int,
+    dispatch_id: int,
+) -> tuple[Message, HermesDispatchRecord]:
+    """Shared current identity/source check for inbound and explicit task outputs."""
+    message = session.get(Message, message_id, populate_existing=True)
+    record = session.get(HermesDispatchRecord, dispatch_id, populate_existing=True)
     if message is None or record is None or record.message_id != message.id:
         raise MediaFetchError("media_source_binding_changed")
     mapping = session.scalar(
@@ -141,6 +158,4 @@ def authorized_source(
         )
         if expected_key != thread.thread_key:
             raise MediaFetchError("media_identity_unavailable")
-    if source_for(message).fingerprint != job.source_fingerprint:
-        raise MediaFetchError("media_source_binding_changed")
     return message, record

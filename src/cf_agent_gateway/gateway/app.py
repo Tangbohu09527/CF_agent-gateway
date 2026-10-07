@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from cf_agent_gateway.admin.routes import router as admin_router
+from cf_agent_gateway.artifact.return_routes import router as artifact_return_router
 from cf_agent_gateway.config import Settings
 from cf_agent_gateway.database import (
     create_database_engine,
@@ -115,4 +116,5 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(admin_router)
     app.include_router(inbound_router)
     app.include_router(host_binding_router)
+    app.include_router(artifact_return_router)
     return app

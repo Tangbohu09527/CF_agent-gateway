@@ -17,6 +17,7 @@ from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
+from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
 from cf_agent_gateway.delivery.models import DeliveryOutboxRecord
 from cf_agent_gateway.hermes.errors import HermesResponseError
 from cf_agent_gateway.hermes.models import HermesDispatchOutcome
@@ -89,6 +90,8 @@ class HermesDispatchWorker:
         retry_limit: int,
         response_processor_factory: ResponseProcessorFactory | None = None,
         reconcile_persisted_responses: bool = False,
+        artifact_return: ArtifactReturnSettings | None = None,
+        artifact_storage_root: str | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
@@ -108,6 +111,8 @@ class HermesDispatchWorker:
         self._dispatcher_factory = dispatcher_factory
         self._response_processor_factory = response_processor_factory
         self._reconcile_persisted_responses = reconcile_persisted_responses
+        self._artifact_return = artifact_return
+        self._artifact_storage_root = artifact_storage_root
         self._reconciliation_cursor = 0
         self._next_reconciliation_scan_at = 0.0
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -192,11 +197,23 @@ class HermesDispatchWorker:
                     return self._record_failure(claim, error)
                 execution_session.close()
                 with self._session_factory() as completion_session:
-                    response = HermesDispatchResponseStore(completion_session).complete_success(
-                        claim.record_id,
-                        claim_token=claim.claim_token,
-                        outcome=outcome,
-                    )
+                    try:
+                        response = HermesDispatchResponseStore(completion_session).complete_success(
+                            claim.record_id,
+                            claim_token=claim.claim_token,
+                            outcome=outcome,
+                            artifact_return=self._artifact_return,
+                            artifact_storage_root=self._artifact_storage_root,
+                        )
+                        # Use the sealed persisted result on FIRST delivery too;
+                        # reconciliation reads this same record after a restart.
+                        completed_record = completion_session.get(
+                            HermesDispatchRecord, claim.record_id
+                        )
+                        outcome = HermesDispatchResponseStore.to_outcome(response, completed_record)
+                    except HermesResponseError as error:
+                        completion_session.rollback()
+                        return self._record_failure(claim, error)
         finally:
             execution_session.close()
             if not host_barrier_attempted:
