@@ -3,9 +3,15 @@
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-RETURN_URL_HEADER = "X-CF-Artifact-Return-URL"
-RETURN_AUTH_HEADER = "X-CF-Artifact-Return-Authorization"
-RETURN_ACK_HEADER = "X-CF-Artifact-Return-Accepted"
+from cf_agent_gateway.hermes.return_bridge.protocol import (
+    RETURN_ACK_HEADER as RETURN_ACK_HEADER,
+)
+from cf_agent_gateway.hermes.return_bridge.protocol import (
+    RETURN_AUTH_HEADER as RETURN_AUTH_HEADER,
+)
+from cf_agent_gateway.hermes.return_bridge.protocol import (
+    RETURN_URL_HEADER as RETURN_URL_HEADER,
+)
 
 
 @dataclass(frozen=True, slots=True)
