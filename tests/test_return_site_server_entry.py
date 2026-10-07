@@ -365,35 +365,82 @@ def test_request_rejects_credentials_and_nonlocal_health(module, site_request):
         )
 
 
-def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatch):
+@pytest.mark.parametrize("native", [False, True])
+def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatch, native):
     initialize(entry)
     directory = entry.asset_dir / ("e" * 64)
     compose = protected(directory / "0.after", b"candidate-compose")
     nginx = protected(directory / "1.after", b"candidate-nginx")
+    probe = protected(directory / "references.validation.yaml", b"private-reference-probe")
+    resolved = protected(directory / "resolved.validation.yaml", b"private-resolved-probe")
     services = {
         name: {"image": entry.request["candidate_image"], "env_file": []} for name in rows(entry)
     }
     for name in ("gateway", "dispatch-worker"):
         services[name]["env_file"] = [{"path": entry.request["signing_env_file"]}]
     commands, nginx_tests = [], []
+
+    def docker(args, **kw):
+        commands.append(args)
+        if args == ["compose", "config", "--help"]:
+            return "  --no-env-resolution  Skip env files" if native else "  --format string"
+        if args == ["compose", "version", "--short"]:
+            return "2.39.4" if native else "2.26.1"
+        result = {"services": services}
+        if str(resolved) in args:
+            result = {"services": {k: {"image": v["image"]} for k, v in services.items()}}
+        else:
+            result["x-cf-return-validation-env"] = {
+                name: service["env_file"] for name, service in services.items()
+            }
+        return json.dumps(result)
+
+    monkeypatch.setattr(entry, "docker", docker)
     monkeypatch.setattr(
         entry,
-        "docker",
-        lambda args, **kw: commands.append(args) or json.dumps({"services": services}),
+        "assets",
+        lambda *a, **kw: {
+            "plan_sha256": "e" * 64,
+            "reference_candidate": str(probe),
+            "validation_candidate": str(resolved),
+        },
     )
     monkeypatch.setattr(entry, "nginx_test", lambda **kw: nginx_tests.append(kw))
     result = {
+        "plan_sha256": "e" * 64,
         "candidates": [
             {"path": str(entry.root / "docker-compose.prod.yml"), "candidate_file": str(compose)},
             {"path": str(entry.nginx / "nginx.conf"), "candidate_file": str(nginx)},
-        ]
+        ],
     }
-    entry.validate_candidates(result)
-    assert "--no-env-resolution" in commands[0]
+    report = entry.validate_candidates(result)
+    assert report["original_env_files_resolved"] is True
+    assert ("--no-env-resolution" in commands[2]) is native
+    assert "--no-env-resolution" not in commands[3]
+    assert commands[2][commands[2].index("--profile") + 1] == "*"
+    assert str(resolved) in commands[3]
     assert nginx_tests == [{"candidate": nginx}]
     services["delivery-worker"]["env_file"] = [{"path": entry.request["signing_env_file"]}]
     with pytest.raises(RuntimeError, match="candidate_signing_scope_violation"):
         entry.validate_candidates(result)
+
+    services["delivery-worker"]["env_file"] = []
+    commands.clear()
+
+    def broken(args, **kw):
+        if args[:3] == ["compose", "config", "--help"] or args[:3] == [
+            "compose",
+            "version",
+            "--short",
+        ]:
+            return docker(args, **kw)
+        commands.append(args)
+        raise RuntimeError("command_failed")
+
+    monkeypatch.setattr(entry, "docker", broken)
+    with pytest.raises(RuntimeError, match="command_failed"):
+        entry.validate_candidates(result)
+    assert len(commands) == 3  # No retry/fallback after a real config failure.
 
 
 def test_start_creates_all_four_but_starts_only_core_then_recreates_https(entry, monkeypatch):
@@ -415,8 +462,9 @@ def test_start_creates_all_four_but_starts_only_core_then_recreates_https(entry,
     monkeypatch.setattr(entry, "docker", lambda args: effects.append(("docker", args)))
     monkeypatch.setattr(entry, "inspect", lambda _: {"Image": entry.request["nginx_image"]})
     result = entry.start()
-    creates = [row for row in effects if row[0] == "compose" and row[1][0] == "create"]
+    creates = [row for row in effects if row[0] == "compose" and "--no-start" in row[1]]
     assert len(creates) == 1 and set(rows(entry)).issubset(creates[0][1])
+    assert creates[0][1][:3] == ["up", "--no-start", "--no-deps"]
     starts = [row[1] for row in effects if row[0] == "docker"]
     assert starts == [
         ["start", current["gateway"]["id"]],

@@ -40,7 +40,7 @@ skills、terminal、todo、vision、web。保留这个实际选择后仅追加 `
 每次规划及停机前重新核对动态集合；已有显式列表不被替换，存在默认 MCP 等无法等价
 冻结的情况拒绝规划。保留旧插件配置不等于使用 FileBridge 作为返回前置条件。
 
-**当前尚未具备可应用的现场 TLS 候选：**
+**初次现场准备时的 TLS 缺口（保留原失败记录）：**
 
 - 已找到的 `C:/Users/Admin/CF-FileBridge/client-04c7e717/trust/ca.crt` 属于
   `CF File Service Integration CA`，文件 SHA-256 为
@@ -53,6 +53,15 @@ skills、terminal、todo、vision、web。保留这个实际选择后仅追加 `
   两端共用的新引用必须先准备，不能先把 8642 改为 loopback。
 - 拟用工作根 `<HermesHome>/cf-artifact-return-work`、插件目标
   `<HermesHome>/plugins/cf-artifact-return` 是计划目标，当前不表示已创建或已安装。
+
+后续证书准备已单独完成：`cf-return-site-readonly-20261007-r2` 使用独立
+`trust/cf-gateway-ca.crt`（PEM SHA-256
+`5b8427df223360e2e7397f58dac0e9d2eb5c814689805b78817c82c1c81db578`），
+Windows 已实际验证 Gateway 18444 的链、IP 和 `/health=200`。操作者提供的 Hermes
+服务端证书已在本机核对签名、SAN `192.168.1.232`、用途及 CSR/私钥公钥配对；
+候选 origin 为 `https://192.168.1.232:18642`。这些材料不表示 HTTPS 已监听或模块已安装。
+本次兼容修复后必须重新运行 Windows `plan/export-public`，旧 `f76245a8` 回执原位保留，
+不能修改旧回执里的发布 SHA 来冒充新规划。
 
 ## 入口及固定发布获取
 
@@ -128,8 +137,54 @@ docker image inspect --format '{{.Id}} {{index .Config.Labels "org.opencontainer
 入口还会核对镜像来源标签、包内实际代码与该 release 的文件摘要；不会只相信镜像标签。
 新镜像 ID 在实际构建前未知，本记录不伪造可拉取的 registry digest。保留旧镜像 ID
 作为回退基线，不清理旧镜像、不重装现用环境、不运行 `install-clean-device.sh`。
-`APPROVED_BASE_IMAGE_DIGEST` 沿用现有发布记录中已审核的基础镜像 digest；入口不负责
-重新选择基础镜像，也不隐式执行 pull/build。构建出的最终 image ID 仍须由入口独立核验。
+操作者本轮取得的固定基础镜像为
+`python@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254`，
+linux/amd64；现场对应 Image ID 为
+`sha256:59bf1d95c965f12dfc14afaf5af778fc1dbe5b372bd5c281645fc34d4c75d4e7`。
+这是操作者提供的证据，未由 Codex 连接服务器核验。将 `APPROVED_BASE_IMAGE_DIGEST`
+固定为上述引用，构建前用 `docker image inspect` 复核 ID、平台和 RepoDigests；不改用
+另一份基础层不匹配的 `python:3.12-slim`，不清理旧镜像。入口不隐式 pull/build，
+构建出的候选 Gateway Image ID 仍须独立核验，不能把 Python 基础镜像 ID 当候选应用 ID。
+
+## Compose 2.26.1 兼容校验
+
+操作者提供的现场 Docker Server 为 `26.1.5+dfsg1`、Compose 为 `2.26.1-4`。
+入口读取实际 `config --help` 选择校验路径，不根据版本号猜测，也不在 `config` 失败后
+降级重试。原完整部署候选及备份保持不变：
+
+1. 镜像内已有 YAML helper 生成私有 `*validation-only.yaml`：把各服务 env_file
+   原样存入受管 extension，仅在这个引用探针中清空服务 env_file。实际 Compose 负责
+   插值，入口核对所有 Profile、共享扩展及路径；`--no-interpolate` 不参与替代。
+   按帮助中实际能力决定是否给探针传 `--no-env-resolution`。即使新版声明支持此参数，
+   也可能仍加载 required 文件，不能直接用于尚缺签名文件的完整候选；两版都不依赖
+   该参数来证明引用范围，必须通过探针及后续完整环境校验。
+2. 两条路径都执行完整环境校验副本。它只省略 API/Dispatch 新追加的、尚未生成的
+   专用签名引用，所有原有 env_file 的顺序、变量、相对路径、required/format 和显式
+   environment 保持。真实 Compose 必须成功读取原必需文件并处理覆盖语义，且原件与
+   验证副本每个服务的解析后 environment 必须完全相等；例如 YAML `yes/on` 被重写成
+   布尔值导致语义变化时拒绝。没有假秘密文件或生产目录占位；真实配置错误直接失败。
+3. 四应用 image 必须等于固定候选 ID；签名引用只可出现在 API/Dispatch 最后一个位置。
+   其他 Profile、共享 `x-runtime`、其他服务及原有环境出现签名引用/变量均拒绝。
+   重复键/merge、重复引用、链接、父目录跳转、Gateway 根目录外的 env 路径，以及
+   include/extends 等不能证明等价的结构给出具体错误，保留原件待审，不自动放行。
+   标准 YAML 锚点/单一 merge（含 merge 序列）、显式覆盖和短/长 env_file 均保留。
+4. 验证副本只属于私有 journal，不可部署；原始 Compose 展开结果及已有环境值只在进程
+   内存流转，不写公共输出。2.26.1 不支持的 env_file `format` 保留给真实 schema 校验
+   拒绝，不能剥掉字段来通过。
+
+另一个实测参数阻塞是 `create --no-deps`。入口改用官方支持的
+`up --no-start --no-deps --no-build --pull never`，仅创建指定四应用，后续仍按原顺序
+显式启动 API/Dispatch，Poll/Delivery Gate 保持关闭。新旧版真实二进制测试还核对本入口
+其他 Compose 参数；没有要求升级现场 CLI。依据：
+[固定版本 config](https://github.com/docker/compose/blob/v2.26.1/cmd/compose/config.go)、
+[固定版本 up](https://github.com/docker/compose/blob/v2.26.1/cmd/compose/up.go)。
+
+本次已用校验过官方 SHA-256 的 Windows 独立二进制实际执行 Compose **2.26.1 / 2.39.4**，
+32/32 回归通过，包含原命令失败复现和修复后的完整校验；服务器入口/资产/真实 Compose
+合计 91 项通过。测试不连接 Docker daemon；仅镜像执行边界和 Nginx 调用由测试替身承接，
+YAML helper、私有 journal、入口及 Compose config 均真实执行。CI 在现有完整测试作业中
+另取固定官方 Linux 二进制并核对 SHA，强制运行相同两版回归，保存脱敏证据；缺少二进制
+不能跳过。实际 Linux CI 结果以新发布提交对应检查为准，不代表 CFserver 已运行 plan。
 
 ## 受管差异与校验
 

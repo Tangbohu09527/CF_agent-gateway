@@ -26,6 +26,7 @@ APPS = ("gateway", "dispatch-worker", "worker", "delivery-worker")
 SIGNING_ENV = "CF_GATEWAY_ARTIFACT_RETURN_KEY"
 CA_TARGET = "/run/cf-gateway/ca/hermes-ca.pem"
 STATE_TARGET = "/var/lib/cf-agent-gateway"
+VALIDATION_ENV = "x-cf-return-validation-env"
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -38,6 +39,8 @@ def _compose_mapping(loader, node):
     explicit = [key.value for key, _ in node.value if key.tag != "tag:yaml.org,2002:merge"]
     if len(set(explicit)) != len(explicit):
         raise assets.EnablementError("duplicate_compose_key")
+    if sum(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value) > 1:
+        raise assets.EnablementError("duplicate_compose_merge_key")
     loader.flatten_mapping(node)
     return dict(loader.construct_pairs(node, deep=True))
 
@@ -112,7 +115,13 @@ def _env_files(service):
 
 
 def _env_path(value, root):
-    if isinstance(value, dict) and set(value) <= {"path", "required", "format"}:
+    if isinstance(value, dict):
+        if (
+            not set(value) <= {"path", "required", "format"}
+            or ("required" in value and type(value["required"]) is not bool)
+            or ("format" in value and not isinstance(value["format"], str))
+        ):
+            raise assets.EnablementError("compose_env_shape_unsupported")
         value = value.get("path")
     if not isinstance(value, str) or not value:
         raise assets.EnablementError("compose_env_shape_unsupported")
@@ -121,6 +130,25 @@ def _env_path(value, root):
         return value
     path = Path(value)
     return str(path if path.is_absolute() else (root / path).resolve())
+
+
+def _compose_structure(value, root):
+    # External Compose sources cannot be proven equivalent by examining this
+    # one protected asset; do not silently skip their env_file references.
+    if "include" in value:
+        raise assets.EnablementError("compose_include_requires_review")
+    if VALIDATION_ENV in value:
+        raise assets.EnablementError("compose_validation_extension_conflict")
+    services = value.get("services")
+    if not isinstance(services, dict):
+        raise assets.EnablementError("compose_services_shape_unsupported")
+    for name, service in services.items():
+        if not isinstance(name, str) or not isinstance(service, dict):
+            raise assets.EnablementError("compose_services_shape_unsupported")
+        if "extends" in service:
+            raise assets.EnablementError("compose_extends_requires_review")
+        for item in _env_files(service):
+            _env_path(item, root)
 
 
 def _volume(value):
@@ -137,6 +165,7 @@ def _volume(value):
 
 def plan_compose(path, request):
     before, original = _yaml(path)
+    _compose_structure(original, path.parent)
     revised = copy.deepcopy(original)
     services = revised.get("services", {})
     state_sources = []
@@ -318,9 +347,72 @@ def _restore_plan(request, state, digest):
     return plan, manifest
 
 
+def prepare_compose_validation(request, state, digest):
+    """Private, non-deployable inputs for real Compose interpolation and loading.
+
+    The reference probe retains original env_file values in an extension while
+    avoiding any env-file reads. The resolved validation copy removes only the
+    two newly appended signing references: all existing files still undergo
+    Compose's normal required-file, interpolation and override processing.
+    Neither copy introduces a secret or a placeholder in the production tree.
+    """
+    plan, manifest = _restore_plan(request, state, digest)
+    target = Path(request["gateway_root"]) / "docker-compose.prod.yml"
+    changes = [change for change in plan.changes if change.path == target]
+    if len(changes) != 1:
+        raise assets.EnablementError("site_compose_candidate_missing")
+    change = changes[0]
+    if assets._read(target) != change.before:
+        raise assets.EnablementError("asset_changed_since_plan")
+    if plan_compose(target, request).after != change.after:
+        raise assets.EnablementError("compose_candidate_differs_from_plan")
+    # Read the protected candidate itself, rather than reconstructing it from a
+    # Compose export (which could expose expanded environment secrets).
+    candidate_file = manifest.parent / f"{plan.changes.index(change)}.after"
+    _, candidate = _yaml(candidate_file)
+    _compose_structure(candidate, target.parent)
+    probe, validation = copy.deepcopy(candidate), copy.deepcopy(candidate)
+    references = {}
+    signing = request["signing_env_file"]
+    for name, service in candidate["services"].items():
+        env_files = _env_files(service)
+        references[name] = copy.deepcopy(env_files)
+        probe["services"][name]["env_file"] = []
+        if name in {"gateway", "dispatch-worker"}:
+            if not env_files or env_files[-1] != signing or env_files.count(signing) != 1:
+                raise assets.EnablementError("compose_signing_reference_order_changed")
+            validation["services"][name]["env_file"] = copy.deepcopy(env_files[:-1])
+        elif signing in [_env_path(item, target.parent) for item in env_files]:
+            raise assets.EnablementError("signing_reference_in_unapproved_service")
+    probe[VALIDATION_ENV] = references
+    paths = {
+        "reference_candidate": manifest.parent / "compose-reference-validation-only.yaml",
+        "validation_candidate": manifest.parent / "compose-resolved-validation-only.yaml",
+    }
+    with assets._lock(assets._path(state)):
+        for label, content in (
+            ("reference_candidate", probe),
+            ("validation_candidate", validation),
+        ):
+            data = yaml.safe_dump(content, sort_keys=False, allow_unicode=True).encode()
+            existing = assets._read(paths[label])
+            if existing is not None and existing != data:
+                raise assets.EnablementError("compose_validation_candidate_conflict")
+            if existing is None:
+                assets._replace(paths[label], data, private=True)
+    return {
+        "plan_sha256": digest,
+        **{name: str(path) for name, path in paths.items()},
+        "purpose": "compose_validation_only_not_deployment_assets",
+        "production_changed": False,
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plan", "apply", "rollback", "verify-assets"))
+    parser.add_argument(
+        "action", choices=("plan", "compose-validation", "apply", "rollback", "verify-assets")
+    )
     parser.add_argument("--request", required=True)
     parser.add_argument("--state-directory", required=True)
     parser.add_argument("--expected-plan-sha256")
@@ -330,6 +422,10 @@ def main(argv=None):
         validate_request(request)
         if options.action == "plan":
             result = prepare(plan_server(request), options.state_directory)
+        elif options.action == "compose-validation":
+            result = prepare_compose_validation(
+                request, options.state_directory, options.expected_plan_sha256
+            )
         elif options.action == "rollback":
             digest = options.expected_plan_sha256
             if not re.fullmatch(r"[0-9a-f]{64}", digest or ""):

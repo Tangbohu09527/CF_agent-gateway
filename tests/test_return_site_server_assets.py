@@ -179,3 +179,135 @@ def test_larger_existing_global_request_limit_requires_review(deployment, monkey
     path.write_text(yaml.safe_dump(config))
     with pytest.raises(assets.EnablementError, match="larger_global_body_limit"):
         site.plan_server(deployment)
+
+
+def test_private_compose_validation_preserves_original_references_and_overrides(
+    deployment, tmp_path, monkeypatch
+):
+    mock_ingress(monkeypatch)
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    sequence = [
+        "${CF_GATEWAY_ENV_FILE:-.env}",
+        {"path": "./optional.env", "required": False},
+        {"path": "${LAST_ENV:?required}", "required": True},
+    ]
+    original["services"]["gateway"]["env_file"] = sequence
+    original["services"]["isolated-extra"] = {
+        "image": "kept",
+        "profiles": ["unrelated"],
+        "env_file": "${EXTRA_ENV:-extra.env}",
+    }
+    path.write_text(yaml.safe_dump(original, sort_keys=False))
+    original_bytes = path.read_bytes()
+    plan = site.plan_server(deployment)
+    state = tmp_path / "private-state"
+    prepared = site.prepare(plan, state)
+    result = site.prepare_compose_validation(deployment, state, prepared["plan_sha256"])
+    assert result["purpose"] == "compose_validation_only_not_deployment_assets"
+    assert result["production_changed"] is False
+    assert result["plan_sha256"] == prepared["plan_sha256"]
+    probe = yaml.safe_load(Path(result["reference_candidate"]).read_bytes())
+    resolved = yaml.safe_load(Path(result["validation_candidate"]).read_bytes())
+    candidate = yaml.safe_load(plan.changes[1].after)
+    assert probe["x-runtime"] == candidate["x-runtime"]
+    assert probe[site.VALIDATION_ENV]["gateway"] == [
+        *sequence,
+        deployment["signing_env_file"],
+    ]
+    assert probe[site.VALIDATION_ENV]["isolated-extra"] == ["${EXTRA_ENV:-extra.env}"]
+    for name, service in candidate["services"].items():
+        assert probe["services"][name]["env_file"] == []
+        assert site._env_files(resolved["services"][name]) == site._env_files(
+            original["services"][name]
+        )
+        restored = dict(resolved["services"][name])
+        if name in {"gateway", "dispatch-worker"}:
+            restored["env_file"] = service["env_file"]
+        assert restored == service
+    assert site.VALIDATION_ENV not in resolved
+    assert path.read_bytes() == original_bytes
+    assert not Path(deployment["signing_env_file"]).exists()
+    assert "synthetic-original-keep-private" not in json.dumps(result)
+    assert all(
+        Path(result[key]).parent == Path(prepared["manifest"]).parent
+        for key in ("reference_candidate", "validation_candidate")
+    )
+    assert site.prepare_compose_validation(deployment, state, prepared["plan_sha256"]) == result
+
+
+@pytest.mark.parametrize("changed", ["original", "reviewed-candidate", "validation-copy"])
+def test_private_compose_validation_cannot_replace_existing_evidence(
+    deployment, tmp_path, monkeypatch, changed
+):
+    mock_ingress(monkeypatch)
+    plan = site.plan_server(deployment)
+    state = tmp_path / "private-state"
+    prepared = site.prepare(plan, state)
+    result = site.prepare_compose_validation(deployment, state, prepared["plan_sha256"])
+    if changed == "original":
+        path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+        expected = "asset_changed_since_plan"
+    elif changed == "reviewed-candidate":
+        path = Path(prepared["manifest"]).parent / "1.after"
+        expected = "resume_backup_integrity_failed"
+    else:
+        path = Path(result["validation_candidate"])
+        expected = "compose_validation_candidate_conflict"
+    path.write_bytes(b"operator or interrupted write; preserve this evidence\n")
+    with pytest.raises(assets.EnablementError, match=expected):
+        site.prepare_compose_validation(deployment, state, prepared["plan_sha256"])
+    assert path.read_bytes() == b"operator or interrupted write; preserve this evidence\n"
+
+
+@pytest.mark.parametrize(
+    ("fault", "error"),
+    [
+        ("include", "compose_include_requires_review"),
+        ("extends", "compose_extends_requires_review"),
+        ("extension", "compose_validation_extension_conflict"),
+        ("required-string", "compose_env_shape_unsupported"),
+        ("unknown-env-key", "compose_env_shape_unsupported"),
+        ("format-list", "compose_env_shape_unsupported"),
+    ],
+)
+def test_unprovable_compose_validation_shapes_fail_specifically(deployment, fault, error):
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    config = yaml.safe_load(path.read_bytes())
+    if fault == "include":
+        config["include"] = ["uninspected-compose.yaml"]
+    elif fault == "extends":
+        config["services"]["gateway"]["extends"] = {"file": "other.yaml", "service": "api"}
+    elif fault == "extension":
+        config[site.VALIDATION_ENV] = {}
+    else:
+        entry = {"path": "./original.env"}
+        entry.update(
+            {
+                "required-string": {"required": "${REQUIRED}"},
+                "unknown-env-key": {"unknown": "unprovable"},
+                "format-list": {"format": ["raw"]},
+            }[fault]
+        )
+        config["services"]["gateway"]["env_file"] = [entry]
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(assets.EnablementError, match=error):
+        site.plan_compose(path, deployment)
+
+
+def test_compose_standard_merge_precedence_preserved_and_duplicate_merge_rejected(tmp_path):
+    path = tmp_path / "compose.yaml"
+    path.write_text(
+        "x-first: &first {env_file: first.env, image: first}\n"
+        "x-second: &second {env_file: second.env, image: second}\n"
+        "services:\n  test:\n    <<: [*first, *second]\n    image: explicit\n"
+    )
+    _, parsed = site._yaml(path)
+    assert parsed["services"]["test"] == {"env_file": "first.env", "image": "explicit"}
+    path.write_text(
+        "x-first: &first {env_file: first.env}\n"
+        "x-second: &second {env_file: second.env}\n"
+        "services:\n  test:\n    <<: *first\n    <<: *second\n"
+    )
+    with pytest.raises(assets.EnablementError, match="duplicate_compose_merge_key"):
+        site._yaml(path)

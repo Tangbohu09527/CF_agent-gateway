@@ -30,6 +30,7 @@ PEER_SCHEMA = "cf-artifact-return/site-peer/v1"
 APPS = ("gateway", "worker", "dispatch-worker", "delivery-worker")
 GATED = ("worker", "delivery-worker")
 SIGNING_ENV = "CF_GATEWAY_ARTIFACT_RETURN_KEY"
+ENV_PROBE = "x-cf-return-validation-env"
 STAGES = (
     "init-request",
     "plan",
@@ -510,7 +511,7 @@ class ServerEntry:
         sha = result.get("plan_sha256")
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
             fail("asset_plan_digest_missing")
-        self.validate_candidates(result)
+        result["compose_validation"] = self.validate_candidates(result)
         self.persist(
             "planned",
             request_sha256=self.request_hash,
@@ -851,38 +852,157 @@ class ServerEntry:
         nginx_candidate = candidates.get(str(self.nginx / "nginx.conf"))
         if compose_candidate is None or nginx_candidate is None:
             fail("required_candidate_missing")
-        value = json.loads(
-            self.docker(
-                [
-                    "compose",
-                    "--project-directory",
-                    str(self.root),
-                    "--env-file",
-                    str(self.root / ".env"),
-                    "--file",
-                    str(compose_candidate),
-                    "--profile",
-                    "worker",
-                    "config",
-                    "--no-env-resolution",
-                    "--format",
-                    "json",
-                ],
-                cwd=self.root,
-            )
-        )
+        # Select by capability, before running config. A config error never
+        # triggers a weaker fallback. Both paths also load every ORIGINAL env
+        # file below, including required-file and override semantics.
+        help_text = self.docker(["compose", "config", "--help"])
+        native = bool(re.search(r"(?m)^\s+--no-env-resolution(?:\s|$)", help_text))
+        version = self.docker(["compose", "version", "--short"])
+        if not re.fullmatch(r"[A-Za-z0-9.+_-]{1,80}", version):
+            fail("compose_version_result_invalid")
+        validation = self.assets("compose-validation", plan_sha=result["plan_sha256"])
+        paths = {}
+        for name in ("reference_candidate", "validation_candidate"):
+            path = safe_path(validation[name], file=True, private=True)
+            if self.asset_dir not in path.parents or path == compose_candidate:
+                fail("candidate_outside_private_journal")
+            paths[name] = path
+        if validation.get("plan_sha256") != result["plan_sha256"]:
+            fail("compose_validation_plan_mismatch")
+        # Even releases advertising --no-env-resolution may still load required
+        # env files. Both paths use the probe, never that flag as a scope proof.
+        value = self.candidate_config(paths["reference_candidate"], no_env_resolution=native)
+        self.validate_compose_references(value)
+        resolved = self.candidate_config(paths["validation_candidate"])
+        self.validate_candidate_images(resolved)
+        if any(
+            SIGNING_ENV in definition.get("environment", {})
+            for definition in resolved.get("services", {}).values()
+        ):
+            fail("signing_key_in_original_environment")
+        original = self.candidate_config(self.root / "docker-compose.prod.yml")
+
+        # PyYAML and Compose can interpret ambiguous scalars differently. Never
+        # accept a successful config if rewriting changed real values/overrides.
+        def environments(model):
+            return {
+                name: service.get("environment", {})
+                for name, service in model.get("services", {}).items()
+            }
+
+        if environments(original) != environments(resolved):
+            fail("candidate_compose_environment_changed")
+        self.nginx_test(candidate=nginx_candidate)
+        return {
+            "version": version,
+            "references": "interpolated_reference_probe",
+            "native_no_env_resolution_checked": native,
+            "original_env_files_resolved": True,
+            "original_environment_equal": True,
+            "all_profiles_checked": True,
+            "validation_copies_not_deployable": True,
+        }
+
+    def candidate_config(self, path, *, no_env_resolution=False):
+        arguments = [
+            "compose",
+            "--project-directory",
+            str(self.root),
+            "--env-file",
+            str(self.root / ".env"),
+            "--file",
+            str(path),
+            "--profile",
+            "*",
+            "config",
+            "--format",
+            "json",
+        ]
+        if no_env_resolution:
+            arguments.append("--no-env-resolution")
+        # Raw config may contain existing credentials. Keep it in memory only;
+        # Commands discards stderr and reports a stable error on any failure.
+        return json.loads(self.docker(arguments, cwd=self.root))
+
+    def validate_candidate_images(self, value):
         services = value.get("services", {})
         if any(
             services.get(name, {}).get("image") != self.request["candidate_image"] for name in APPS
         ):
             fail("candidate_compose_images_mismatch")
+
+    def compose_env_references(self, values):
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            fail("compose_env_shape_unsupported")
+        references = []
+        for item in values:
+            if isinstance(item, dict):
+                if (
+                    set(item) - {"path", "required", "format"}
+                    or type(item.get("required", True)) is not bool
+                ):
+                    fail("compose_env_shape_unsupported")
+                item = item.get("path")
+            if not isinstance(item, str) or not item or "$" in item:
+                # Compose config escapes literal dollars. Do not guess at a
+                # second interpolation or accept an unresolved/ambiguous path.
+                fail("compose_env_path_interpolation_ambiguous")
+            if item.startswith("~"):
+                fail("compose_env_home_expansion_requires_review")
+            path = Path(item)
+            if not path.is_absolute():
+                path = self.root / path
+            if ".." in path.parts:
+                fail("compose_env_path_not_normalized")
+            safe_path(path)
+            if self.root not in path.parents:
+                fail("compose_env_path_outside_gateway")
+            references.append(str(path))
+        if len(set(references)) != len(references):
+            fail("duplicate_compose_env_reference")
+        return references
+
+    def validate_compose_references(self, value):
+        self.validate_candidate_images(value)
+        services = value.get("services", {})
+        references = value.get(ENV_PROBE)
+        if not isinstance(references, dict) or set(references) != set(services):
+            fail("compose_reference_probe_mismatch")
+        signing = self.request["signing_env_file"]
+
+        def has_signing(environment):
+            if isinstance(environment, list):
+                return any(
+                    isinstance(item, str) and item.split("=", 1)[0] == SIGNING_ENV
+                    for item in environment
+                )
+            return isinstance(environment, dict) and SIGNING_ENV in environment
+
         for name, definition in services.items():
-            values = definition.get("env_file", [])
-            references = [item if isinstance(item, str) else item.get("path") for item in values]
+            paths = self.compose_env_references(references[name])
             required = name in {"gateway", "dispatch-worker"}
-            if (self.request["signing_env_file"] in references) != required:
+            if (signing in paths) != required or (required and paths[-1] != signing):
                 fail("candidate_signing_scope_violation")
-        self.nginx_test(candidate=nginx_candidate)
+            if has_signing(definition.get("environment", {})):
+                fail("signing_key_in_original_environment")
+
+        def check_extensions(node):
+            if isinstance(node, dict):
+                if "env_file" in node and signing in self.compose_env_references(node["env_file"]):
+                    fail("candidate_signing_scope_violation")
+                if has_signing(node.get("environment", {})):
+                    fail("signing_key_in_original_environment")
+                for child in node.values():
+                    check_extensions(child)
+            elif isinstance(node, list):
+                for child in node:
+                    check_extensions(child)
+
+        check_extensions({k: v for k, v in value.items() if k not in {"services", ENV_PROBE}})
+        for definition in services.values():
+            check_extensions({k: v for k, v in definition.items() if k.startswith("x-")})
 
     @contextlib.contextmanager
     def nginx_check_file(self, candidate):
@@ -975,7 +1095,11 @@ class ServerEntry:
         self.check_rendered(image)
         self.nginx_test()
         self.persist("old_starting" if old else "starting")
-        self.compose(["create", "--no-deps", "--no-build", "--pull", "never", *APPS], timeout=180)
+        # Compose 2.26.1 create has no --no-deps. up --no-start follows the
+        # Create path after excluding dependencies, without starting services.
+        self.compose(
+            ["up", "--no-start", "--no-deps", "--no-build", "--pull", "never", *APPS], timeout=180
+        )
         rows = self.containers()
         if any(row["image"] != image for row in rows.values()) or any(
             rows[s]["running"] for s in GATED
