@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.artifact import (
@@ -194,6 +195,145 @@ def test_create_with_content_computes_hash_and_size(
     assert artifact.status is ArtifactStatus.READY
     assert artifact.size == len(PAYLOAD)
     assert artifact.sha256 == hashlib.sha256(PAYLOAD).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "artifact_id",
+    [
+        "../artifact",
+        "C:\\artifact",
+        "a" * 32,
+        "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+        "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}",
+        "not-a-uuid",
+        123,
+    ],
+)
+def test_supplied_artifact_id_requires_canonical_uuid(
+    session: Session,
+    storage_root: Path,
+    artifact_id: object,
+) -> None:
+    repo = repository(session, storage_root)
+    with pytest.raises(ArtifactValidationError, match="canonical UUID"):
+        create_artifact(repo, artifact_id=artifact_id)
+    assert repo.list_for_response(RESPONSE_ID) == []
+
+
+def test_caller_owned_create_rollback_never_publishes_ready_row(
+    session: Session,
+    storage_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = repository(session, storage_root)
+    artifact_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    def forbidden_commit() -> None:
+        pytest.fail("repository committed the caller-owned transaction")
+
+    monkeypatch.setattr(session, "commit", forbidden_commit)
+    created = create_artifact(repo, artifact_id=artifact_id, content=PAYLOAD, commit=False)
+    private_path = stored_path(storage_root, created.storage_key)
+    assert created.status is ArtifactStatus.READY
+    assert repo.read(artifact_id) == PAYLOAD
+    session.rollback()
+
+    assert repo.get(artifact_id) is None
+    assert private_path.read_bytes() == PAYLOAD
+    # Orphan content is never addressed by the replacement row's private key.
+    recovered = create_artifact(repo, artifact_id=artifact_id, content=PAYLOAD, commit=False)
+    assert stored_path(storage_root, recovered.storage_key) != private_path
+    session.rollback()
+
+
+def test_caller_owned_mark_ready_rollback_can_resume_created_artifact(
+    session: Session,
+    storage_root: Path,
+) -> None:
+    repo = repository(session, storage_root)
+    created = create_artifact(repo)
+    artifact_id = created.artifact_id
+    initial_key = created.storage_key
+    ready = repo.mark_ready(artifact_id, PAYLOAD, commit=False)
+    orphan_path = stored_path(storage_root, ready.storage_key)
+    session.rollback()
+
+    persisted = repo.get(artifact_id)
+    assert persisted is not None
+    assert persisted.status is ArtifactStatus.CREATED
+    assert persisted.storage_key == initial_key
+    with pytest.raises(ArtifactStateError):
+        repo.read(artifact_id)
+
+    recovered = repo.mark_ready(artifact_id, PAYLOAD)
+    assert recovered.status is ArtifactStatus.READY
+    assert stored_path(storage_root, recovered.storage_key) != orphan_path
+    assert repo.read(artifact_id) == PAYLOAD
+
+
+def test_caller_owned_validation_failure_does_not_commit_failure_or_sibling(
+    session: Session,
+    storage_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = repository(session, storage_root)
+
+    def forbidden_commit() -> None:
+        pytest.fail("repository committed the caller-owned transaction")
+
+    monkeypatch.setattr(session, "commit", forbidden_commit)
+    sibling = create_artifact(repo, commit=False)
+    artifact = create_artifact(repo, commit=False)
+    sibling_id, artifact_id = sibling.artifact_id, artifact.artifact_id
+    with pytest.raises(ArtifactHashMismatchError):
+        repo.mark_ready(artifact_id, PAYLOAD, expected_sha256="0" * 64, commit=False)
+    assert repo.get(artifact_id).status is ArtifactStatus.FAILED
+    session.rollback()
+
+    assert repo.get(artifact_id) is None
+    assert repo.get(sibling_id) is None
+    assert not list(storage_root.rglob(".artifact-*"))
+
+
+def test_supplied_artifact_id_conflict_does_not_replace_ready_content(
+    session: Session,
+    storage_root: Path,
+) -> None:
+    repo = repository(session, storage_root)
+    artifact_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    original = create_artifact(repo, artifact_id=artifact_id, content=PAYLOAD)
+    original_key = original.storage_key
+    session.expunge(original)
+
+    with pytest.raises(IntegrityError):
+        create_artifact(repo, artifact_id=artifact_id, content=b"different content")
+
+    persisted = repo.get(artifact_id)
+    assert persisted is not None
+    assert persisted.status is ArtifactStatus.READY
+    assert persisted.storage_key == original_key
+    assert repo.read(artifact_id) == PAYLOAD
+
+
+def test_caller_owned_publish_failure_never_leaves_ready_metadata(
+    session: Session,
+    storage_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = repository(session, storage_root)
+    created = create_artifact(repo, commit=False)
+    artifact_id = created.artifact_id
+
+    def fail_replace(source: object, destination: object) -> None:
+        raise OSError("controlled publication failure")
+
+    monkeypatch.setattr("cf_agent_gateway.artifact.repository.os.replace", fail_replace)
+    with pytest.raises(ArtifactStorageError):
+        repo.mark_ready(artifact_id, PAYLOAD, commit=False)
+    assert repo.get(artifact_id).status is ArtifactStatus.FAILED
+    session.rollback()
+    assert repo.get(artifact_id) is None
+    assert not list(storage_root.rglob(".artifact-*"))
 
 
 def test_hash_is_computed_across_stream_chunks(
