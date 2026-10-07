@@ -65,6 +65,7 @@ class HermesClientFactory(Protocol):
         api_key: str,
         model: str,
         timeouts: HermesTimeoutSettings,
+        ca_file: str | None = None,
     ) -> ClosableHermesChatClient: ...
 
 
@@ -212,6 +213,7 @@ def run_dispatch_worker(
                 api_key=api_key,
                 model=settings.hermes.model,
                 timeouts=settings.hermes.timeouts,
+                **({"ca_file": settings.hermes.ca_file} if settings.hermes.ca_file else {}),
             )
         except Exception:
             client_initialization_failed = True

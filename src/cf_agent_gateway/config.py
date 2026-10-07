@@ -168,12 +168,21 @@ class HermesSettings:
     api_key_env: str = "HERMES_API_KEY"
     model: str = "hermes-agent"
     timeouts: HermesTimeoutSettings = HermesTimeoutSettings()
+    ca_file: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("hermes.enabled must be a boolean")
         if not isinstance(self.timeouts, HermesTimeoutSettings):
             raise ValueError("hermes.timeouts must be HermesTimeoutSettings")
+        if self.ca_file is not None:
+            if (
+                not isinstance(self.ca_file, str)
+                or not self.ca_file.strip()
+                or any(ord(character) < 0x20 for character in self.ca_file)
+            ):
+                raise ValueError("hermes.ca_file must reference a PEM CA bundle")
+            object.__setattr__(self, "ca_file", self.ca_file.strip())
 
         if not isinstance(self.base_url, str):
             raise ValueError("hermes.base_url must be an HTTP or HTTPS URL")
@@ -397,6 +406,7 @@ def load_settings(path: str | Path) -> Settings:
             api_key_env=hermes.get("api_key_env", "HERMES_API_KEY"),
             model=hermes.get("model", "hermes-agent"),
             timeouts=_hermes_timeouts(hermes),
+            ca_file=hermes.get("ca_file"),
         ),
         worker=WorkerSettings(
             enabled=worker.get("enabled", False),

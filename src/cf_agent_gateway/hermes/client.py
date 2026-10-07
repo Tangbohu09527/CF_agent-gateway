@@ -30,6 +30,7 @@ from cf_agent_gateway.hermes.models import (
     HermesUserMessage,
     ResponseEnvelope,
 )
+from cf_agent_gateway.hermes.tls import verified_ssl_context
 from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 
 DEFAULT_TIMEOUTS = HermesTimeoutSettings()
@@ -56,6 +57,7 @@ class HermesClient:
         *,
         timeout: httpx.Timeout | float | None = None,
         timeouts: HermesTimeoutSettings = DEFAULT_TIMEOUTS,
+        ca_file: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         normalized_base_url = _base_url(base_url)
@@ -79,6 +81,7 @@ class HermesClient:
             "Authorization": f"Bearer {normalized_api_key}",
         }
         self._timeouts = timeouts
+        self._ssl_context = verified_ssl_context(ca_file)
         self._transport = transport
         self._closed = False
 
@@ -375,6 +378,7 @@ class HermesClient:
             transport=self._transport,
             follow_redirects=False,
             trust_env=False,
+            verify=self._ssl_context,
         ) as client:
             # Includes connect/write and the entire body, even when bytes trickle
             # in often enough to reset the independent read inactivity timeout.
