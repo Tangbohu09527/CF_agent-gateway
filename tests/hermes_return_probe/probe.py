@@ -691,6 +691,45 @@ def _readonly_metadata_paths(platform_name: str, process_id: int) -> set[Path]:
     }
 
 
+def _pinned_task_open_path(raw_path, flags: int, caller, case: Path) -> Path | None:
+    """Account for the real POSIX reader's openat audit events (which omit dir_fd).
+
+    This exception is limited to that exact loaded function and read-only,
+    no-follow handles. It does not make an ancestor a readable directory tree.
+    """
+    module = sys.modules.get("cf_agent_gateway.hermes.return_bridge.files")
+    reader = getattr(module, "_posix_read", None)
+    if caller.f_code is not getattr(reader, "__code__", None):
+        return None
+    nofollow, directory = getattr(os, "O_NOFOLLOW", 0), getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        return None
+    flags &= ~getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | nofollow | directory
+    file_flags = os.O_RDONLY | nofollow | os.O_NONBLOCK
+    if flags not in {directory_flags, file_flags}:
+        return None
+    root = caller.f_locals.get("root")
+    if not isinstance(root, Path) or root.parent != case / "work":
+        return None
+    raw_path = os.fsdecode(raw_path)
+    if raw_path == root.anchor and flags == directory_flags:
+        target = Path(root.anchor)
+    else:
+        if not raw_path or Path(raw_path).name != raw_path or raw_path in {".", ".."}:
+            return None
+        descriptor = caller.f_locals.get("directory")
+        if type(descriptor) is not int or descriptor < 0:
+            return None
+        parent = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        target = parent / raw_path
+    if target.is_relative_to(root):
+        return target
+    if flags == directory_flags and target in root.parents:
+        return target
+    return None
+
+
 def _install_child_audit(source: Path, repository: Path, case: Path, model: dict):
     """Bound this probe's I/O; this Python audit is not a host OS sandbox."""
     allowed = [
@@ -732,17 +771,19 @@ def _install_child_audit(source: Path, repository: Path, case: Path, model: dict
         if event in {"subprocess.Popen", "os.system", "os.posix_spawn", "os.exec"}:
             reject("Probe does not authorize subprocess tools", event)
         if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
-            path = Path(os.fsdecode(args[0])).resolve()
+            flags = args[2] if len(args) > 2 else 0
+            pinned = _pinned_task_open_path(args[0], flags, sys._getframe(1), case)
+            path = pinned if pinned is not None else Path(os.fsdecode(args[0])).resolve()
             if path.name == ".env" and not path.is_relative_to(case):
                 reject("Probe does not read installed credentials", event, path)
             if (
                 not any(path.is_relative_to(root) for root in allowed)
                 and path not in metadata
+                and pinned is None
                 and os.path.normcase(str(path)) not in {"nul", os.path.normcase(os.devnull)}
             ):
                 reject("Probe rejected file outside isolated/read-only roots", event, path)
             mode = args[1] if len(args) > 1 else "r"
-            flags = args[2] if len(args) > 2 else 0
             writing = isinstance(mode, str) and any(v in mode for v in "wax+")
             writing = writing or bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT))
             if writing and not path.is_relative_to(case):

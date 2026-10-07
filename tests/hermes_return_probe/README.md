@@ -72,6 +72,12 @@ This does not grant reads of their parent directories or permit writes.
 SDK platform detection runs before the HTTP listener becomes ready, and audit
 denials retain their path only in the private `events.jsonl`, so a CI environment
 mismatch fails early instead of waiting through provider retries.
+The real POSIX return reader pins ancestor directories with read-only
+`O_DIRECTORY | O_NOFOLLOW` handles. Since Python's `open` audit event omits
+`dir_fd`, the probe recognizes that exact loaded reader function, its task root,
+and its flags, and resolves its pinned descriptor through `/proc/self/fd`.
+Only that task's ancestor handles and its own files qualify; arbitrary callers,
+ancestor file reads, sibling tasks, and writes remain refused.
 
 ## Separately approved model/sample invocation
 

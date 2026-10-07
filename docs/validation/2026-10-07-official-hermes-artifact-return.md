@@ -122,6 +122,13 @@ Gateway 正确保持 UNCERTAIN，零 PUT/投递；失败轨迹保留。随后仅
 写入/邻近敏感路径拒绝回归，不放宽目录、正式工具或配置权限。正式 PDF/PNG 使用
 上述 Windows 轨迹，不因 Linux 测试驱动修正而重跑；接入核心字节未改变。
 
+下一次 Linux 合成探针进入了真实返回工具，但审计误拦安全 `openat` 读取对祖先目录
+句柄的固定，工具安全返回 `file_unavailable`，没有 PUT。探针现仅允许本仓实际
+`_posix_read` code 对象、当前 case 的单个任务工作根、只读 `NOFOLLOW` 及真实
+directory fd 绑定的祖先目录/任务内文件；不把 `/` 或父目录内容加入白名单。
+写入、其他调用者、父目录文件、兄弟任务仍拒绝，三项审计回归通过。产品文件读取
+代码和两项正式 Windows 证据均未改变，Linux 最终结果由新 CI 给出。
+
 ## 现场最少待办
 
 统一入口调用 [启用／回退助手](../development/hermes-artifact-return-enablement.md)，
