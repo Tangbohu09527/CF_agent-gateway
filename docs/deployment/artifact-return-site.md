@@ -231,6 +231,7 @@ Dispatch。保留新建私有签名文件、日志和失败 journal，不清队�
 
 Windows 本机没有 Nginx/Docker；真实 Nginx 用 CI 的隔离 Linux runner 强制执行，缺少
 可执行文件会失败而不是跳过门禁。具体最终 SHA 与 CI 结果在 PR 当前进度记录。
-本机最终针对性回归为 **137 passed、1 skipped**；唯一跳过项是上述真实 Nginx 联合测试。
+本机部署回归为 **137 passed、1 skipped**，随后 Windows 换行兼容修正的整组回归
+**33 passed**（其中新增 1 项）；唯一跳过项是上述真实 Nginx 联合测试。
 服务器 Docker/Controller 调用由测试替身接收，不能据此称为 CFserver 已运行通过。
 现场 apply、证书签发、真实挂载/TLS/ACK 与微信实收仍未执行。

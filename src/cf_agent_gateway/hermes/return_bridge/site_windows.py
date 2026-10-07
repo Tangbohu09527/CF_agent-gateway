@@ -169,7 +169,17 @@ def release_proof(request):
         content = en._read(root / relative)
         committed = _run(["git", "-C", str(root), "show", f"{head}:{relative}"])
         if content != committed:
-            raise SiteError("gateway_release_asset_changed")
+            # Git may materialize tracked UTF-8 text with CRLF on Windows. Only
+            # this EOL conversion is equivalent; the proof below still records
+            # the actual bytes executed from the immutable, clean checkout.
+            try:
+                actual_text, committed_text = content.decode("utf-8"), committed.decode("utf-8")
+            except UnicodeError:
+                raise SiteError("gateway_release_asset_changed") from None
+            if "\0" in actual_text + committed_text or actual_text.replace(
+                "\r\n", "\n"
+            ) != committed_text.replace("\r\n", "\n"):
+                raise SiteError("gateway_release_asset_changed")
         proof[relative] = _sha(content)
     return {"root": str(root), "commit": head, "files": proof}
 

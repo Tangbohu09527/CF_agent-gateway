@@ -320,6 +320,37 @@ def test_release_proof_rejects_dirty_or_wrong_release(monkeypatch):
     assert all("show" not in command for command in commands)
 
 
+def test_release_proof_accepts_only_git_text_crlf_and_records_actual_bytes(monkeypatch):
+    relative = "src/cf_agent_gateway/hermes/__init__.py"
+    committed = b'"""Tracked text."""\nVALUE = 1\n'
+    actual = committed.replace(b"\n", b"\r\n")
+    monkeypatch.setattr(site, "RELEASE_FILES", (relative,))
+
+    def run(command):
+        if "rev-parse" in command:
+            return b"a" * 40
+        if "status" in command:
+            return b""
+        assert command[-1] == "a" * 40 + ":" + relative
+        return committed
+
+    monkeypatch.setattr(site, "_run", run)
+    monkeypatch.setattr(en, "_read", lambda _: actual)
+    proof = site.release_proof({"release_commit": "a" * 40})
+    assert proof["files"][relative] == site._sha(actual)
+    assert proof["files"][relative] != site._sha(committed)
+    for changed in (
+        actual.replace(b"VALUE = 1", b"VALUE = 2"),
+        actual.replace(b"\r\n", b"\r"),
+        actual + b" ",
+        actual + b"\x00",
+        actual + b"\xff",
+    ):
+        monkeypatch.setattr(en, "_read", lambda _, content=changed: content)
+        with pytest.raises(site.SiteError, match="gateway_release_asset_changed"):
+            site.release_proof({"release_commit": "a" * 40})
+
+
 def test_start_rechecks_management_binary_and_facts(fixture, monkeypatch):
     request = fixture[0]
     summary = stop(fixture)
