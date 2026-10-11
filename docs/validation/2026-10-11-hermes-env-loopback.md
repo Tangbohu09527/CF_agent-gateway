@@ -1,5 +1,14 @@
 # 2026-10-11 Hermes 环境监听覆盖修复
 
+本页保留原代码修复及隔离验证记录。后续现场结果见
+[2026-10-11 现场摘要：用户终端回传证据](2026-10-11-gateway-site-status.md)：旧 f9 回退、
+`complete-rollback`（`assets_rewritten=false`）、旧 Hermes 与服务器 `start-old` 已成功；
+固定 `d9bae61a043f1be4303e5c23661ec51904d5e708` 的新候选已构建、新双端 plan 通过，
+尚未 apply/start/verify。用户之后仅对 CFserver 执行 `sudo reboot`，重启完成及之后的
+容器/Gate/微信登录状态待核验，Windows 是否关机未确认。最后停点为
+**新计划通过、未切换、重启后待复核**；本页历史 PID 与测试结果不证明当前运行状态。
+本次文档更新不重跑下列验证，也不替换部署固定版本。
+
 任务从固定发布 `f9c601cba25cbc5459bb03519d1954ae55995ded` 接续。
 新工作树 `59ae/CF_agent-gateway` 初始 detached HEAD 与固定发布一致、无差异，随后建立
 `codex/fix-hermes-env-loopback`。原 `2d15` 工作树及其 `.task-artifacts` 未修改。
@@ -29,9 +38,9 @@ home 的 `.env` 加载该值。因此交接中的 YAML=127.0.0.1 与实际 LAN �
 - 插件使用局部原生 SSL context 兼容官方进程的 truststore 注入，并保持显式 CA 的
   信任边界；不解除全局注入，不关闭 TLS/主机名验证或降低 TLS 版本要求。插件 bundle
   纳入新计划安装，官方核心、服务器业务逻辑和业务协议未改动。
-- [操作者恢复手册](../deployment/hermes-env-loopback-recovery.md) 专门从“两端已应用、
-  Windows 已启动但验收失败”状态接续。旧入口停回/回退后使用全新 deployment/release，
-  不伪造新旧回执，不重签证书，不删除原 intents/journal。
+- [操作者恢复手册](../deployment/hermes-env-loopback-recovery.md) 保留从“两端已应用、
+  Windows 已启动但验收失败”恢复的历史过程，并已更新当前接管导航。旧停回/回退、
+  旧核心恢复与新计划准备均已完成；不伪造新旧回执，不重签证书，不删除原 intents/journal。
 
 ## 自动回归证据
 
@@ -87,10 +96,11 @@ python -m pytest -q
 
 Process/User/Machine 冲突的组合覆盖使用测试替身，不写用户或机器环境。
 
-未连接 CFserver，未改变真实配置/安装/凭据，未启停真实 Hermes，未调用业务模型、
+原代码修复验证阶段未连接 CFserver，未改变真实配置/安装/凭据，未启停真实 Hermes，未调用业务模型、
 上传业务附件、发微信或打开 Gate。服务器 Docker/Controller 外层仍为测试替身，
-后续真实新镜像尚未构建，现场双端恢复与正式附件功能尚未验收。
+这些隔离结果不证明现场部署。后续用户回传已确认真实新候选构建、旧双端恢复和新双端
+plan 完成；新 apply/start/verify 及正式附件功能仍未验收，详见现场摘要。
 
-PR #14 的安全接回方式与完整 PowerShell 5.1 / Linux 命令均在恢复手册；本轮不合并、
+PR #14 的未来安全接回方式与历史 PowerShell 5.1 / Linux 命令均在恢复手册；本轮不合并、
 不 force push、不发布 Tag，不推进旧工作树的本地分支。远端 CI 与最终提交状态以交付时
 对精确 SHA 的查询为准，历史 CI 不冒充本轮结果。

@@ -1,5 +1,15 @@
 # 2026-10-11 baseline 标签与中断回退接续
 
+本页保留原恢复修复的回归证据；最新现场以
+[2026-10-11 现场摘要：用户终端回传证据](2026-10-11-gateway-site-status.md) 为准。
+用户已确认 f9 两端旧配置回退完成，`complete-rollback` 成功且 `assets_rewritten=false`，
+旧 Hermes 及服务器 `start-old` 成功；外层 `rolling_back` 不再是当前停点。
+新 deployment `cf-return-env-loopback-20261011-r1` 固定 release 为
+`d9bae61a043f1be4303e5c23661ec51904d5e708`，候选已构建、新双端 plan 通过，
+尚未 apply/start/verify。用户随后仅对 CFserver 执行 `sudo reboot`，重启完成及之后的容器/Gate/微信
+登录状态仍待核验，Windows 是否关机未确认。当前停在**新计划通过、未切换、重启后待复核**。
+本次文档更新未重跑下面回归，也不以文档新提交替换固定 controller/release。
+
 在 `codex/fix-hermes-env-loopback` 的 `cfece2603d07f34eca305256d0365f5e74beca91`
 上继续修复；该提交的 Hermes HOST/TLS 实现保留。旧 `2d15` 工作树、旧 release、
 request 和 journal 未修改。本轮未连接 CFserver、未启停真实服务。
@@ -53,14 +63,17 @@ PowerShell 块通过 Windows PowerShell 5.1 语法解析，未执行其中的现
 
 ## 交付与未覆盖
 
-[可执行恢复手册](../deployment/server-rollback-resume.md) 从最新状态开始：新控制器
-收尾 → 原 Windows start-legacy → 新控制器 start-old。不重复 Windows 停回/回退，
-不再次覆盖已恢复的服务器资产，不调用有缺陷的旧服务器入口。新 checkout 与证据目录
-独立，旧 request 和 plan 原值直接使用，回执均由正式入口产生。
+[恢复手册](../deployment/server-rollback-resume.md) 保留已完成的历史顺序：新控制器
+收尾 → 原 Windows start-legacy → 新控制器 start-old。后续现场回传已确认这些阶段
+成功，当前不再从此恢复序列开始。新 checkout 与证据目录独立，旧 request 和 plan
+原值直接使用，回执均由正式入口产生；接管先核验重启后状态和现存新部署材料。
 
-真实 Docker daemon、真实 Nginx 镜像/挂载、实际现场队列和数据库、真实 Windows
-legacy 恢复及跨机交接未执行。HOST/TLS 的前轮隔离证据保留在
+原代码修复验证阶段未执行真实 Docker daemon、真实 Nginx 镜像/挂载、实际现场队列和
+数据库、真实 Windows legacy 恢复及跨机交接。之后由用户回传的现场完成结论另列摘要，
+不把测试替身结果当现场证明。HOST/TLS 的前轮隔离证据保留在
 [原验证记录](2026-10-11-hermes-env-loopback.md)，不能冒充本轮现场验收。
-PR #14 保持原状；当前分支是其 f9 的线性后继。后续经审阅可普通 fast-forward 推送到
-PR #14 来源分支，或先以该来源分支为 base 审阅修复；不得 force push、改旧工作树或
-合并到 main。本轮只提交并推送独立修复分支。
+2026-10-11 远端核对 PR #14 保持 Draft/Open、head=f9、base=main；独立修复分支
+`codex/fix-hermes-env-loopback` 的 d9 是其 f9 的线性后继，但没有因此进入 main 或改变
+PR #14。原修复只推独立修复分支；本次文档 PR 的 base 是该独立修复分支，不能把文档
+commit 当部署版本。未来功能集成另经审阅，不属于本次文档更新，不推进旧工作树、
+不 force push、不合并到 main。

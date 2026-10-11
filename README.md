@@ -16,32 +16,49 @@ Existing installations use the separate upgrade runbook.
 
 ## Current status
 
-Evidence updated: **2026-09-17**. The existing production chain is operating on the newly
-observed application image, with a scoped long-task persistence and WeChat delivery
-acceptance. Historical continuity warnings remain open; this is not an all-scenarios
-healthy or high-availability sign-off.
+Evidence updated: **2026-10-11**, from **user terminal reports (用户终端回传证据)**.
+The current stop point is **new plans passed; no switch applied; post-reboot checks pending**.
+See the [dated site summary](docs/validation/2026-10-11-gateway-site-status.md) first and
+[Production status](docs/production-status.md) for the evidence boundaries.
 
-- Repository branch authority: `main`; query its live tip instead of treating a dated
-  snapshot as permanently current.
-- Merged long-task fix: PR #11, `9a1caa237a9053678c80f68fdb15d351d5bfecf8`.
-- Observed application Docker Image ID:
-  `sha256:1cd7650543babe75d4fabe71e27e3cbc1d54585d34ffa853280606c2a3ddaa8b`.
-- Dispatch startup read/execution budgets: `600/600` seconds; Dispatch stop grace: `3660` seconds.
-- Repository schema head: `20260823_04`; site database/migration runtime checks reported `ok`.
-- Scoped acceptance: one long task persisted and reached WeChat, with database-recorded
-  dispatch duration **113.799 seconds**, one dispatch attempt and one receipted delivery attempt.
+- The f9 rollback on both hosts, `complete-rollback` (`assets_rewritten=false`), old
+  Hermes startup and server `start-old` succeeded. These stages are complete.
+- New deployment: `cf-return-env-loopback-20261011-r1`. Its release remains fixed at
+  `d9bae61a043f1be4303e5c23661ec51904d5e708`, independently of this documentation commit.
+- Built candidate Image ID:
+  `sha256:bcb3e42fef5ba5a91232ca04e49a959cbecab4b45eb3bec0a0b9b3aadf717185`.
+  Both Windows and server plans passed; new `apply/start/verify` have not run.
+  Both migration heads are `20260928_01`; this switch needs no migration.
+- Before reboot, old Hermes, Gateway API and Dispatch were running; Poll/Delivery were
+  stopped, Gate closed and database healthy. Pending/in-flight/uncertain were zero;
+  historical `dead=2` was preserved. These are **pre-reboot observations**.
+- The user subsequently executed `sudo reboot` on CFserver only. Reboot completion,
+  containers, Gate and WeChat login remain unverified; Windows shutdown is unconfirmed.
+  Old PIDs and pre-reboot health cannot prove current state.
 
-See [Production status](docs/production-status.md) for deployment authority and
-[2026-09-17 acceptance](docs/validation/2026-09-17-hermes-long-task-acceptance.md) for dated
-record IDs, timestamps, evidence provenance and remaining work. The Image ID is not a
-verified registry manifest digest. The merged source baseline and observed image are
-separate facts; complete build provenance, a new Release label/Tag and a new offline
-rollback archive have not been independently verified in this record.
+Remote GitHub state checked on 2026-10-11: `main` is
+`7963bc0db5a01e38099e021959feabf648db7ede`;
+[PR #14](https://github.com/Tangbohu09527/CF_agent-gateway/pull/14) is Draft/Open at
+`f9c601cba25cbc5459bb03519d1954ae55995ded`, base `main`; the independent
+`codex/fix-hermes-env-loopback` branch is at the fixed d9 release above. The d9 fix has
+not entered `main` or PR #14. This documentation PR targets the independent fix branch.
 
-The September 3 P1 Release authority `b488cf452584e73bc9b752564bf90ea153aa8d18`, source
-snapshot `f36c798294368263433f6132366ac9a864d9482b` and image `sha256:b9341ca7df6f952b4d81028c497574c1e22478e4408f98791a28bd9514b215f1`
-are historical, not the newly observed application image. PR #8/#9 documentation closeout
-remains historical evidence. This documentation change does not deploy production.
+Next, verify the post-reboot site and existing release/candidate/request/plan/receipt
+materials. Reuse them when their bindings and prerequisites still hold; do not restart
+the completed rollback, transfer, clone or build sequence. Follow the existing
+[deployment handoff](docs/deployment/hermes-env-loopback-recovery.md#4-新计划按原交错顺序应用)
+only after those checks and the applicable maintenance authorization.
+
+WeChat file sending and receiving is the current priority. Keep these outcomes separate:
+
+| Workflow | Evidence boundary |
+| --- | --- |
+| Text instruction → file API read → text reply | Two dated PDF/PNG reading tasks are closed in the [October 7 record](docs/validation/2026-10-07-wechat-file-api-text-closeout.md). |
+| WeChat inbound attachment → actual original bytes | Independent intake boundary; reading a file already in FileBrowser does not prove WeChat attachment retrieval. |
+| Actual PDF/PNG → original WeChat chat | [Official Hermes/isolated Gateway tests](docs/validation/2026-10-07-official-hermes-artifact-return.md) passed with a receiver substitute; live file/image receipt remains unverified. |
+
+LAN permissions and a chat-history Web interface are later considerations, with no
+development in this task. September production records remain dated historical evidence.
 
 ## Responsibility boundary
 
@@ -114,8 +131,8 @@ was exercised during the September 17 site acceptance.
   disconnect/reboot, and long-task concurrency/FIFO/lease observations remain separately unverified.
 - V2 supports explicit `private_sender`, `group_sender`, and `group_shared` Thread
   policies. The old Alpha whole-group Thread limitation is not a current V2 limitation.
-- Outbound response artifacts can be delivered as tested image/file parts, but that media
-  path was not part of the recorded CFserver production acceptance.
+- Outbound response artifacts have isolated image/file delivery evidence; actual PDF/PNG
+  receipt in the original WeChat chat is still pending the current site deployment and acceptance.
 - Inbound image/file interpretation, OCR, and archive processing are not implemented as a
   general Gateway workflow. Message API attachment rows are metadata, not content upload.
   Opt-in durable WeChat byte intake and scoped Hermes HTTP reads are implemented;
@@ -160,6 +177,9 @@ In PowerShell, use `curl.exe http://127.0.0.1:8080/health`.
 Start with the [documentation index](docs/README.md). The main operational entries are:
 
 - [Production status](docs/production-status.md)
+- [October 11 site summary — user terminal reports](docs/validation/2026-10-11-gateway-site-status.md)
+- [October 7 file API reading and text reply closeout](docs/validation/2026-10-07-wechat-file-api-text-closeout.md)
+- [Attachment return deployment handoff](docs/deployment/artifact-return-site.md)
 - [September 17 long-task acceptance](docs/validation/2026-09-17-hermes-long-task-acceptance.md)
 - [Long-task runtime and evidence boundaries](docs/hermes-long-task-runtime.md)
 - [Production deployment](docs/deployment/production.md)

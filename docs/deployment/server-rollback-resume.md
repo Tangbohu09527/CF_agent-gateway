@@ -1,9 +1,22 @@
 # 旧 f9 服务器回退收尾与旧核心恢复
 
-本说明从操作者最新提供的状态接续：Windows 已按原 start-intent 停回，旧 journal
+**2026-10-11 本页恢复阶段已完成，不是当前阻塞点。** 用户终端回传证据确认：f9 两端
+旧配置回退完成，`complete-rollback` 成功且 `assets_rewritten=false`，旧 Hermes 与
+服务器 `start-old` 也已成功。当前不再是 `rolling_back`，不要重跑本页的传包、克隆、
+收尾、`start-legacy` 或 `start-old` 来恢复会话。
+
+最新接管入口为[现场摘要：用户终端回传证据](../validation/2026-10-11-gateway-site-status.md)：
+固定 d9 的新候选已构建，新 deployment `cf-return-env-loopback-20261011-r1` 双端 plan
+已通过，尚未 apply/start/verify。用户随后只对 CFserver 执行 `sudo reboot`，重启完成
+及之后容器/Gate/微信登录状态尚未核验，Windows 是否关机未确认。最后停点是
+**新计划通过、未切换、重启后待复核**，不能用重启前 PID 或状态快照代替当前观察。
+核验现场及现存材料符合条件后，从[新计划交错应用](hermes-env-loopback-recovery.md#4-新计划按原交错顺序应用)
+接续，不从本页重新恢复旧基线。本次任务仅更新文档，没有执行下列命令。
+
+以下保留本页编写时的历史故障状态：Windows 已按原 start-intent 停回，旧 journal
 回退完成，Hermes 停止且 8642/18642 无监听；CFserver 四应用停止，资产 journal 已为
 `rolled_back`、三个原文件已恢复，但外层 `server.json` 仍为 `rolling_back`。
-这些是操作者提供的观察，不是本轮助手连接现场取得的结果。以下命令交给操作者执行。
+这些是当时操作者提供的观察，不是本轮助手连接现场取得的结果，也不代表当前状态。
 
 旧入口在恢复文件后将 Compose 的 image 字符串直接与 Image ID 比较，因而拒绝原来的
 `localhost/cf-agent-gateway:inbound-0ec54bf-build-few9m9fp` 标签。该标签的本地镜像及
@@ -11,7 +24,7 @@
 `sha256:1c78a61f8728bf629ec3cd7ea1037e6f604d7d6e1e4e06e46ade8d8a7e53f163`。
 新入口按本地 Image ID 核对；它不 pull、不改标签、不改已恢复的 Compose 文件。
 
-**当前不要再执行 Windows quiesce/rollback 或旧服务器 rollback。**也不要使用仍指向
+**不要再执行 Windows quiesce/rollback 或旧服务器 rollback。**也不要使用仍指向
 旧脚本的 `cfe`/`old_server` 等 shell 函数。服务器收尾和之后的 `start-old` 均显式调用
 新固定 checkout 中的脚本；Windows 的 `start-legacy` 继续使用原 f9 入口。
 
@@ -25,27 +38,31 @@
 | 原 server plan | `57587c2979c5bcbe8f7721c149a4b356ddb8da75acbdc4c7717e33af5be8337d` |
 | 原 Windows plan | `2241259cb9a853d909788c01f6351faee4b091759df532357a3267342dd9567a` |
 | 原 deployment | `cf-return-site-readonly-20261007-r2` |
-| 新 controller commit | 本次最终交付的完整修复 SHA；单独通过 `--controller-commit` 指定 |
+| 固定 controller commit | `d9bae61a043f1be4303e5c23661ec51904d5e708`；单独通过 `--controller-commit` 指定，文档 HEAD 不替代此值 |
 
 原 request、release_root、plan、candidate、CA 引用和备份全部保留。新 controller 的
 checkout HEAD、干净状态和脚本字节另外校验；不能把 request 的旧 release 改成新 SHA。
 原 candidate 的 revision/source 标签及包内资产 helper 仍与原 release 校验。
 baseline 本来就是更早的镜像，不能要求它的 revision 等于 f9 或新 controller SHA。
-本次只修复宿主恢复控制器，**不需构建服务器新镜像**；之后部署新附件功能仍须另建新计划
-并按对应修复 release 真正构建候选镜像。
+原恢复修复仅改宿主控制器，**该恢复阶段不需构建服务器新镜像**。后续新部署的独立计划
+和 d9 候选构建也已完成，候选为
+`sha256:bcb3e42fef5ba5a91232ca04e49a959cbecab4b45eb3bec0a0b9b3aadf717185`。
+旧 request 的 f9 release 与固定 d9 controller 各自保留，不以文档新提交重绑它们。
 
 ## 1. 在 Windows 准备新控制器公共材料
 
+已完成的历史材料准备；接管时核对并复用现存材料，不重传源码包。
+
 在 PowerShell 5.1 中执行。Git/跨机传输分别固定使用下面一个可执行路径；服务器命令
-在已存在的批准管理会话执行。`$ControllerCommit` 必须填写最终交付 SHA。
+在已存在的批准管理会话执行。`$ControllerCommit` 固定为 d9，不随文档提交更新。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $Git = 'C:\Users\Admin\AppData\Local\hermes\git\cmd\git.exe'
 $Scp = 'C:\Windows\System32\OpenSSH\scp.exe'
 $Fix = 'C:\Users\Admin\.codex\worktrees\59ae\CF_agent-gateway'
-$ControllerCommit = '<最终交付的40位修复SHA>'
-if ($ControllerCommit -notmatch '^[0-9a-f]{40}$') { throw '先填写最终修复 SHA' }
+$ControllerCommit = 'd9bae61a043f1be4303e5c23661ec51904d5e708'
+if ($ControllerCommit -notmatch '^[0-9a-f]{40}$') { throw '固定修复 SHA 格式无效' }
 if ((& $Git -C $Fix rev-parse HEAD).Trim() -ne $ControllerCommit) { throw '新控制器 HEAD 不符' }
 if ($LASTEXITCODE -ne 0) { throw 'Git 核对失败' }
 if (& $Git -C $Fix status --porcelain --untracked-files=normal) { throw '新控制器 checkout 不干净' }
@@ -68,6 +85,9 @@ if ($LASTEXITCODE -ne 0) { throw '公共源码包上传失败' }
 
 ## 2. 新服务器入口完成现有回退
 
+已完成：`complete-rollback` 成功，`assets_rewritten=false`。以下保留收尾步骤和门禁，
+不指示当前再次克隆、收尾或改写现存回执。
+
 以下全段在同一个已有服务器管理 shell 执行。填写与 Windows 一致的 controller SHA 和
 刚得到的 bundle 原字节 SHA-256。旧 checkout 只读保留。
 
@@ -77,7 +97,7 @@ umask 077
 export PYTHONDONTWRITEBYTECODE=1
 export GIT_OPTIONAL_LOCKS=0
 GIT=/usr/bin/git
-CONTROLLER_COMMIT='<最终交付的40位修复SHA>'
+CONTROLLER_COMMIT=d9bae61a043f1be4303e5c23661ec51904d5e708
 BUNDLE_SHA256='<Windows输出的64位bundle原字节SHA256>'
 printf '%s\n' "$CONTROLLER_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
 printf '%s\n' "$BUNDLE_SHA256" | grep -Eq '^[0-9a-fA-F]{64}$'
@@ -143,6 +163,9 @@ request/plan；同一恢复操作可复用已验证 checkout，但每次命令�
 文件。不要把上述初始化和上传覆盖步骤当作重试命令。
 
 ## 3. Windows 仅恢复旧 HTTP
+
+已完成：旧 Hermes 已成功恢复。以下是历史启动与回执流程；Windows 是否关机、当前
+进程身份和监听情况须另行核验，不能据此重放启动或使用历史 PID。
 
 继续使用第 1 节 PowerShell 会话和 `$Resume`。先下载第 2 节实际产生的服务器
 `rolled_back` 回执，填写服务器刚输出的 SHA-256，校验原字节后才能启动。
@@ -210,6 +233,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows 旧 HTTP 回执上传失败' }
 
 ## 4. 新兼容入口恢复旧 Gateway/Dispatch 核心
 
+已完成：服务器 `start-old` 成功。重启前 Gateway API、Dispatch 运行，Poll/Delivery
+停止、Gate 关闭、数据库正常；待处理/在途/uncertain 为 0，历史 dead=2 保留。
+用户之后已对 CFserver 执行 `sudo reboot`，是否完成尚未核验；以上是重启前结果，
+不证明重启后的容器、Gate 或微信状态。
+
 继续使用第 2 节原服务器管理 shell。上传副本先核对原字节摘要，再仅收紧这个文件到
 0600。输入真实 Windows `legacy-restored` 回执，不能把普通 `rolled_back` 回执补上字段。
 
@@ -242,7 +270,8 @@ HTTP 的真实回执及原计划；检查保存的停机队列证明，按原 Co
 若只是成功后的回执丢失，同一新兼容入口可在 `old_started` 状态只读验证并重发回执，
 不会再次启动应用或重建前端。
 
-完成本说明只代表旧基线恢复到 Gate 关闭的可规划状态。新的 `.env`/TLS 修复尚未应用，
-正式附件功能仍未验收。后续新 release、新 deployment、新 image 和双端新计划从
-[独立修复 release 和全新双端计划](hermes-env-loopback-recovery.md#3-独立修复-release-和全新双端计划)
-接续；不要重新执行该旧文档前面的停回和回退步骤，也不要复用其中的旧服务器脚本函数。
+本说明已完成旧基线恢复；新的 `.env`/TLS 修复仍未应用，正式附件功能仍未验收。
+新 release、新 deployment、新 image 和双端新计划已经准备完毕。当前先从现场摘要
+复核重启后现场及现存材料，再符合条件地接入
+[新计划交错应用](hermes-env-loopback-recovery.md#4-新计划按原交错顺序应用)；不要重新执行
+已完成的停回、回退、恢复或新计划初始化，也不要复用旧服务器脚本函数。

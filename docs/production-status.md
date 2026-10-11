@@ -2,17 +2,78 @@
 
 ## Authority
 
-Status: **production operating; scoped long-task acceptance passed; residual degradation remains**.
+Status as of **2026-10-11**: **new plans passed; no switch applied; post-reboot checks pending**.
 
-This is the authoritative summary of the latest supplied CF_agent-gateway site evidence,
-not a generic deployment runbook or continuous remote inspection. Evidence was updated on
+The latest site evidence is the user's terminal report, recorded in the
+[October 11 site summary — 用户终端回传证据](validation/2026-10-11-gateway-site-status.md).
+Codex has not connected to CFserver or inspected live services for this documentation update.
+The last stop point is neither an ongoing f9 rollback nor a deployed d9 fix.
+
+| Field | Current evidence and boundary |
+| --- | --- |
+| Completed f9 recovery | Both hosts' old configuration rollback, server `complete-rollback` (`assets_rewritten=false`), old Hermes startup and server `start-old` succeeded; do not restart those completed steps |
+| New deployment | `cf-return-env-loopback-20261011-r1` |
+| Fixed release | `d9bae61a043f1be4303e5c23661ec51904d5e708`; this documentation commit cannot replace it |
+| Built candidate Image ID | `sha256:bcb3e42fef5ba5a91232ca04e49a959cbecab4b45eb3bec0a0b9b3aadf717185`; candidate only, not proof of a running image or registry digest |
+| Windows plan | Passed; 13 items including the `.env` `API_SERVER_HOST` single-field change; original 17 toolsets preserved |
+| Server plan | Passed; original `env_file` parsing and environment equivalence passed |
+| Migration heads | Old and new both `20260928_01`; no migration needed for this switch |
+| New activation | `apply/start/verify` not executed |
+| Pre-reboot runtime | Old Hermes, Gateway API and Dispatch running; Poll/Delivery stopped, Gate closed, database healthy; pending/in-flight/uncertain zero, historical `dead=2` preserved |
+| Subsequent host action | User executed `sudo reboot` on CFserver only; completion and post-reboot containers/Gate/WeChat login unverified; Windows shutdown unconfirmed |
+
+The runtime row is a **pre-reboot snapshot**. Do not use old PIDs, old health or queue
+counts to assert current state. Preserve historical dead records and all existing plans,
+receipts, requests and journals.
+
+GitHub was checked separately on 2026-10-11:
+
+| Repository object | Remote state |
+| --- | --- |
+| `main` | `7963bc0db5a01e38099e021959feabf648db7ede` |
+| [PR #14](https://github.com/Tangbohu09527/CF_agent-gateway/pull/14) | Draft/Open, head `f9c601cba25cbc5459bb03519d1954ae55995ded`, source `feat/wechat-inbound-media`, base `main`, not merged |
+| Independent fix branch | `codex/fix-hermes-env-loopback` at `d9bae61a043f1be4303e5c23661ec51904d5e708` |
+| Documentation branch / PR base | `codex/docs-gateway-status-20261011` / `codex/fix-hermes-env-loopback`, not `main` |
+
+The d9 fix is not in `main` or PR #14. Branch/PR state, candidate construction, plan
+success and site activation are separate facts. No existing functional PR or deployment
+identity is changed by this documentation update.
+
+## Next handoff and business scope
+
+Start with the [dated summary's handoff navigation](validation/2026-10-11-gateway-site-status.md#下次接管导航):
+verify the post-reboot site and existing materials, then reuse the fixed candidate and
+plans if their bindings and prerequisites still hold. Do not repeat the completed
+transfer, clone, build or f9 recovery. The
+[existing two-host switch order](deployment/hermes-env-loopback-recovery.md#4-新计划按原交错顺序应用)
+remains the later maintenance entry, after verification and applicable authorization.
+The [server rollback resume](deployment/server-rollback-resume.md) is completed history.
+
+| Business workflow | Evidence boundary |
+| --- | --- |
+| File API read followed by text reply | [October 7 closeout](validation/2026-10-07-wechat-file-api-text-closeout.md) covers two specific PDF/PNG reading tasks and original-chat text receipt, with the recorded Skill side effect preserved |
+| Actual WeChat inbound attachment bytes | Independent intake boundary; FileBrowser reads and message attachment metadata do not prove original attachment acquisition |
+| Actual PDF/PNG returned to the original chat | [Official Hermes/isolated Gateway evidence](validation/2026-10-07-official-hermes-artifact-return.md) uses a receiver substitute; real file/image messages and recipient receipt remain unverified |
+
+WeChat file sending and receiving is the current priority. LAN permissions and a
+chat-history Web interface remain later considerations, with no development in this task.
+The October 7 and October 11 code/isolated evidence remains valid within its recorded
+scope; no business acceptance is rerun for this Markdown-only update.
+
+## Historical September 17 authority
+
+The following records the **September 17 observation**, not current post-reboot runtime.
+At that time production was operating, scoped long-task acceptance passed, and residual
+degradation remained.
+
+This historical evidence was recorded on
 **2026-09-17** from user-provided terminal output and WeChat screenshots.
 
 | Field | Authority or status value |
 | --- | --- |
 | Repository branch authority | `main`; live tip must be queried |
 | Merged long-task fix baseline | PR #11 merge `9a1caa237a9053678c80f68fdb15d351d5bfecf8` |
-| Latest site evidence dates | Application upgrade September 16; controlled recovery and long-task acceptance September 17, 2026 |
+| Historical site evidence dates | Application upgrade September 16; controlled recovery and long-task acceptance September 17, 2026 |
 | Observed application Docker Image ID | `sha256:1cd7650543babe75d4fabe71e27e3cbc1d54585d34ffa853280606c2a3ddaa8b` |
 | Startup read/execution budgets | `600/600` seconds in Dispatch startup logs |
 | Dispatch stop grace | `3660` seconds in rendered Compose |
@@ -29,15 +90,15 @@ Image ID above. It is a Docker Image ID, **not** a proven registry manifest dige
 being merged and the site using the observed image do not alone establish reproducible
 source-to-image provenance. No new source/image mapping, Release label or Tag is invented here.
 
-Current operational evidence is in
+The September operational evidence is in
 [2026-09-17 long-task acceptance](validation/2026-09-17-hermes-long-task-acceptance.md).
 This document change does not rebuild, migrate, deploy, restart or change any live service.
 Historical GitHub CI runs remain tied to their original commits and are not evidence of
 this documentation commit's checks.
 
-## Accepted production state
+## Historical September 17 accepted production state
 
-The latest record confirms a database-recorded long dispatch beyond the old approximately
+The September 17 record confirms a database-recorded long dispatch beyond the old approximately
 30-second boundary, a persisted response, a single receipted delivery attempt and a
 matching WeChat screenshot. It also records audited termination of an old uncertain
 Dispatch and delivery of the existing queued read-only test. These are bounded observations,
@@ -149,12 +210,15 @@ evidence variables rather than blindly reuse these timestamped historical paths.
 
 ## Operational limitations
 
+These limitations describe the September 17 acceptance's scope. Use the October 11 business-scope
+table above for the later file workflows; none of the dated evidence proves post-reboot health.
+
 - General AI Provider routing and automatic enterprise Skill execution are not connected.
 - ERP logic, enterprise knowledge retrieval, RAG, OCR and general archive processing remain outside the Gateway.
 - Hermes raw tool execution evidence and installed Desktop build are not independently reviewed.
 - Three historical chat continuity issues remain open; the scoped test chat is separate.
 - Near-600-second waits, in-flight disconnect/reboot, long-task concurrency/FIFO/lease
-  observation and full restart/recovery acceptance were not performed in the new site record.
+  observation and full restart/recovery acceptance were not performed in the September site record.
 - `agent-wechat` login and Hermes execution remain external responsibilities.
 - Outbound image/file delivery is implemented/tested but not part of this site acceptance;
   general inbound image/file understanding is not implemented by the active polling path.
@@ -174,6 +238,11 @@ mandatory fresh QR and controlled gate reopen. For Gateway-only deployment leavi
 `agent-wechat` untouched, verify Session preservation. For an AI-host-only reboot without
 CFserver/WeChat restart, restore Hermes and verify health without requiring a fresh QR
 solely because of that reboot.
+
+For the user-reported October 11 CFserver reboot, completion, Gate and login have not
+yet been checked. Apply the [existing reboot procedure](runtime-recovery.md#agent-wechat-offline-after-host-reboot)
+within the pending deployment window; this text does not confirm fresh QR or gate reopen
+has occurred, and the generic reopen step is not the current handoff starting point.
 
 Use [Production deployment](deployment/production.md),
 [Production validation](production-validation.md) and [Runtime recovery](runtime-recovery.md)

@@ -1,11 +1,21 @@
 # 附件返回的两端现场准备与受控切换
 
-2026-10-11 最新接续：Windows 已回退并停止，服务器原文件已恢复、资产 journal 为
-rolled_back，但外层仍为 rolling_back。直接使用
-[原文件已恢复后的服务器收尾入口](server-rollback-resume.md)，不要重跑初始 stop/apply
-或上一版手册的停回/回退步骤。下文保留此前准备阶段的证据和通用入口说明。
+2026-10-11 最新停点为 **新计划通过、未切换、重启后待复核**。以
+[现场摘要：用户终端回传证据](../validation/2026-10-11-gateway-site-status.md) 为接管入口：
+f9 两端旧配置回退、服务器 `complete-rollback`（`assets_rewritten=false`）、旧 Hermes
+和服务器 `start-old` 均已成功；这些已完成阶段不是当前阻塞点，不再从头回退。
+新 deployment `cf-return-env-loopback-20261011-r1` 固定 release 为
+`d9bae61a043f1be4303e5c23661ec51904d5e708`，候选已构建、双端 plan 已通过，
+尚未 apply/start/verify。用户随后明确仅对 CFserver 执行 `sudo reboot`；重启完成情况、
+之后的容器/Gate/微信登录状态尚未核验，Windows 是否关机也未确认。重启前 PID 和
+服务快照不能证明当前状态。
 
-承接 `88f62cfefaf54a7d2c05ca1f916c2196f55491e7`，契约仍为
+先按摘要核验重启后现场及现存 request、plan、回执、checkout、候选，再符合条件地从
+[新计划交错应用](hermes-env-loopback-recovery.md#4-新计划按原交错顺序应用) 接续。
+不要重复传包、克隆、构建或初始化计划；下文准备、构建和回退步骤保留为历史与通用说明。
+本次只更新文档，不执行其中命令，也不改变已有部署绑定。
+
+以下原部署说明承接 `88f62cfefaf54a7d2c05ca1f916c2196f55491e7`，契约仍为
 `cf-artifact-return/v1`。本次只交付部署衔接，不改返回协议、不重跑获批模型样本。
 下面的生产操作是**后续维护窗口入口**；本轮没有执行 apply、启停、签发、生成现场
 签名秘密、调用模型或微信。本仓功能默认关闭。
@@ -65,10 +75,15 @@ skills、terminal、todo、vision、web。保留这个实际选择后仅追加 `
 Windows 已实际验证 Gateway 18444 的链、IP 和 `/health=200`。操作者提供的 Hermes
 服务端证书已在本机核对签名、SAN `192.168.1.232`、用途及 CSR/私钥公钥配对；
 候选 origin 为 `https://192.168.1.232:18642`。这些材料不表示 HTTPS 已监听或模块已安装。
-本次兼容修复后必须重新运行 Windows `plan/export-public`，旧 `f76245a8` 回执原位保留，
-不能修改旧回执里的发布 SHA 来冒充新规划。
+后续兼容修复已另做 Windows `plan/export-public`，本次新双端 plan 也已通过，详见现场摘要。
+旧 `f76245a8` 回执原位保留，不能修改旧回执里的发布 SHA 来冒充新规划。
 
 ## 入口及固定发布获取
+
+本节初始化、传输及构建步骤已在本次新部署准备中完成，接管时只核对并复用现存材料。
+本次固定发布为 `d9bae61a043f1be4303e5c23661ec51904d5e708`，固定候选为
+`sha256:bcb3e42fef5ba5a91232ca04e49a959cbecab4b45eb3bec0a0b9b3aadf717185`。
+文档分支的新 commit/HEAD 不替代上述 release、controller、request 或 plan 绑定。
 
 服务器入口：[prepare-return-server.py](../../deploy/prepare-return-server.py)，只需现有
 Python 标准库、Git、Docker/Compose。它在**固定候选镜像的短命离线容器**中调用本仓
@@ -123,9 +138,9 @@ python3 "$RELEASE/deploy/prepare-return-server.py" plan \
 服务端 root 私有 0600 文件。入口校验 deployment/release/plan、origin/Profile 及两向
 公共 CA 摘要；这不替代原服务认证。
 
-`release_commit` 必须填**本轮最终通过 CI 的完整提交 SHA**，不是旧的 `88f62cfe`。
-不要移动现用 Gateway checkout 来准备候选；在独立 release checkout 核验该 SHA 与干净
-工作树，再按现有 Dockerfile 构建，保留输出的不可变 image ID：
+本次 `release_commit` 已固定为 **`d9bae61a043f1be4303e5c23661ec51904d5e708`**。
+不以文档更新后的 HEAD 或“最新提交”替换它。以下保留已完成的独立 release 构建流程；
+不移动现用 Gateway checkout，也不因本次文档更新重建候选：
 
 ```sh
 # 在后续批准的准备阶段，RELEASE 指向独立 checkout，COMMIT 是已审核完整 SHA。
@@ -140,7 +155,7 @@ docker image inspect --format '{{.Id}} {{index .Config.Labels "org.opencontainer
 ```
 
 入口还会核对镜像来源标签、包内实际代码与该 release 的文件摘要；不会只相信镜像标签。
-新镜像 ID 在实际构建前未知，本记录不伪造可拉取的 registry digest。保留旧镜像 ID
+本次新镜像 ID 已由用户回传，见本节固定候选；它是 Image ID，不冒充 registry digest。保留旧镜像 ID
 作为回退基线，不清理旧镜像、不重装现用环境、不运行 `install-clean-device.sh`。
 操作者本轮取得的固定基础镜像为
 `python@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254`，
@@ -212,7 +227,10 @@ YAML helper、私有 journal、入口及 Compose config 均真实执行。CI 在
 另取固定官方 Linux 二进制并核对 SHA，强制运行相同两版回归，保存脱敏证据；缺少二进制
 不能跳过。实际 Linux CI 结果以新发布提交对应检查为准，不代表 CFserver 已运行 plan。
 
-### 从 27d5592b 的被拒候选接续
+### 从 27d5592b 的被拒候选接续（历史准备过程）
+
+本节所述重新传包、检出、构建和规划已被后续固定 d9 候选及双端新计划完成记录覆盖，
+不能作为当前接管的起始命令。先读现场摘要核对现有材料。
 
 操作者提供：`27d5592b8c88701ce325213533d151090926fc89` 已构建候选
 `sha256:aa388aae2aa5fc74c6d634667a727d620fbafa75248f607be3f337463395be21`，
@@ -303,6 +321,9 @@ Poll degraded、dead=2 与既有 Skill/半升级偏差不在本轮修复范围�
 
 ## 回退和部分失败
 
+以下是未来维护阶段失败时的协议说明。2026-10-11 的旧 f9 回退及旧核心恢复已经完成，
+不因本节存在而重跑；重启后的未知状态先核验，不直接判定为 `rolling_back`。
+
 先保持/关闭 Gate，撤销或排空当前任务并保存 uncertain；Windows 通过原入口停止，
 双方使用本次私有 journal 恢复原始字节。任何后来的未知修改或备份摘要不匹配都拒绝覆盖。
 按两端回退回执协调恢复旧 HTTP 与旧四应用镜像，不能先启动一个指向尚未恢复入口的
@@ -332,4 +353,8 @@ Windows 本机没有 Nginx/Docker；真实 Nginx 用 CI 的隔离 Linux runner �
 本机部署回归为 **137 passed、1 skipped**，随后 Windows 换行兼容修正的整组回归
 **33 passed**（其中新增 1 项）；唯一跳过项是上述真实 Nginx 联合测试。
 服务器 Docker/Controller 调用由测试替身接收，不能据此称为 CFserver 已运行通过。
-现场 apply、证书签发、真实挂载/TLS/ACK 与微信实收仍未执行。
+上述数字属于原开发验证记录，不是本次文档更新重跑的结果。后续旧 f9 现场操作、新 d9
+候选构建及新双端 plan 的进度以现场摘要为准；新 d9 尚未 apply/start/verify，正式附件
+返回与微信实收仍未验收。文件 API 读取后回复文字、微信入站取得实际附件、实际 PDF/PNG
+发回原聊天是三项独立能力，不能互相替代；当前优先微信文件收发，局域网权限和聊天记录
+Web 仅作后续考虑。
