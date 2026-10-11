@@ -152,8 +152,9 @@ linux/amd64；现场对应 Image ID 为
 入口读取实际 `config --help` 选择校验路径，不根据版本号猜测，也不在 `config` 失败后
 降级重试。原完整部署候选及备份保持不变：
 
-1. 镜像内已有 YAML helper 生成私有 `*validation-only.yaml`：把各服务 env_file
-   原样存入受管 extension，仅在这个引用探针中清空服务 env_file。实际 Compose 负责
+1. 镜像内已有 YAML helper 从正式原件、受保护 `.before` 和已审候选生成私有
+   `*validation-only.yaml`：原件与候选分别把各服务 env_file 原样存入受管 extension，
+   仅在引用探针中清空服务 env_file。实际 Compose 负责
    插值，入口核对所有 Profile、共享扩展及路径；`--no-interpolate` 不参与替代。
    按帮助中实际能力决定是否给探针传 `--no-env-resolution`。即使新版声明支持此参数，
    也可能仍加载 required 文件，不能直接用于尚缺签名文件的完整候选；两版都不依赖
@@ -165,12 +166,32 @@ linux/amd64；现场对应 Image ID 为
    布尔值导致语义变化时拒绝。没有假秘密文件或生产目录占位；真实配置错误直接失败。
 3. 四应用 image 必须等于固定候选 ID；签名引用只可出现在 API/Dispatch 最后一个位置。
    其他 Profile、共享 `x-runtime`、其他服务及原有环境出现签名引用/变量均拒绝。
-   重复键/merge、重复引用、链接、父目录跳转、Gateway 根目录外的 env 路径，以及
+   重复键/merge、重复引用、链接、父目录跳转、候选新增的外部 env 路径，以及
    include/extends 等不能证明等价的结构给出具体错误，保留原件待审，不自动放行。
    标准 YAML 锚点/单一 merge（含 merge 序列）、显式覆盖和短/长 env_file 均保留。
 4. 验证副本只属于私有 journal，不可部署；原始 Compose 展开结果及已有环境值只在进程
    内存流转，不写公共输出。2.26.1 不支持的 env_file `format` 保留给真实 schema 校验
    拒绝，不能剥掉字段来通过。
+
+原件已有外部引用不再要求搬进 Gateway 目录。入口先比较原件和候选的所有服务、扩展、
+引用顺序以及 `required/format`；除 API/Dispatch 的末尾签名引用之外必须完全一致。
+例如 `/etc/cf-gateway-host-binding/runtime.env` 只有正式原件与私有备份实际证明已有，
+且候选未扩大归属时才允许保留；本记录不代替该现场原件对照，也不放行整个 `/etc`。
+
+服务器入口在宿主读取实际使用的原有 env 文件，校验普通文件、单链接、各级路径无链接
+或可写绕过；外部文件即使 `required:false` 也必须存在。在正式 root 入口下要求
+root:root，权限只能为 0400/0600/0440/0640，文件不超过 4 MiB；不自动改权限或属主。
+引用、内容 SHA-256、设备/inode、属主/组、模式、大小和修改/变更时间写入本次私有
+`compose-environment-proof.json`，不保存环境值。该文件排他创建，相同证明复用，冲突
+停止且保留旧 journal；证明摘要进入服务器状态。原件/候选完整 Compose 环境校验前后
+复核文件，重复 plan 和所有维护阶段在任何变更前再次核对；变化必须停止审查。
+helper 不读取外部 env 内容，因此无需新增 `/etc` 或单文件 Docker 挂载，更不会把环境
+内容注入 helper 进程。部署原件、`.env` 和外部凭据文件均原位保留。
+
+真实 Compose 2.26.1 的探针保留 `[]`，2.39.4 会将其序列化为 `null`。只有受保护源文件
+证明字段缺省或明确 `[]` 才归一化；源文件直接 `env_file: null`、错误类型和无依据空值
+继续拒绝。诊断包含固定 `error`、`location`（如 `services.heartbeat-init.env_file`）
+和 JSON `type`，不输出字段值。完整 `config` 失败仍直接拒绝，无较弱检查兜底。
 
 另一个实测参数阻塞是 `create --no-deps`。入口改用官方支持的
 `up --no-start --no-deps --no-build --pull never`，仅创建指定四应用，后续仍按原顺序
@@ -179,12 +200,29 @@ linux/amd64；现场对应 Image ID 为
 [固定版本 config](https://github.com/docker/compose/blob/v2.26.1/cmd/compose/config.go)、
 [固定版本 up](https://github.com/docker/compose/blob/v2.26.1/cmd/compose/up.go)。
 
-本次已用校验过官方 SHA-256 的 Windows 独立二进制实际执行 Compose **2.26.1 / 2.39.4**，
-32/32 回归通过，包含原命令失败复现和修复后的完整校验；服务器入口/资产/真实 Compose
-合计 91 项通过。测试不连接 Docker daemon；仅镜像执行边界和 Nginx 调用由测试替身承接，
+回归使用校验过官方 SHA-256 的 Windows/Linux 独立二进制实际执行 Compose
+**2.26.1 / 2.39.4**，包含原失败复现、原外部引用、真实环境覆盖、空值版本差异及
+权限/链接/规划后变化的拒绝。测试不连接 Docker daemon；仅镜像执行边界和 Nginx 调用由测试替身承接，
 YAML helper、私有 journal、入口及 Compose config 均真实执行。CI 在现有完整测试作业中
 另取固定官方 Linux 二进制并核对 SHA，强制运行相同两版回归，保存脱敏证据；缺少二进制
 不能跳过。实际 Linux CI 结果以新发布提交对应检查为准，不代表 CFserver 已运行 plan。
+
+### 从 27d5592b 的被拒候选接续
+
+操作者提供：`27d5592b8c88701ce325213533d151090926fc89` 已构建候选
+`sha256:aa388aae2aa5fc74c6d634667a727d620fbafa75248f607be3f337463395be21`，
+其 plan 被拒；正式运行仍为上文旧镜像。这些不是本轮直接查询的现场结果。
+保留 `/root/cf-return-27d5592b-prep`、原 request、失败 journal 和两个镜像。
+本修复修改镜像内 `site_server.py`，因此必须用新固定提交重新构建候选；不能给原候选
+改标签、仅换宿主脚本或绕过入口的 release/image/source 字节核验。
+
+沿既有局域网方式传入最终提交的 Git bundle 和新 Windows 公共回执，先核对 bundle
+SHA-256、`git bundle verify` 以及目标提交。在新的独立准备目录检出该提交，使用上文
+已批准的固定基础镜像构建一次，保留新 Image ID。复制原 request 到新私有文件，保留
+deployment_id、证书和其他现场引用，仅更换发布 SHA、候选 Image ID、release_root、
+新 state_directory 和新 Windows peer_state_file；不改旧 request 或旧回执。
+使用新 checkout 的 `prepare-return-server.py plan`，显式传同一新 SHA 和新 Image ID。
+plan 成功仍不是 apply 授权；后续维护窗口与两端启用顺序保持不变。
 
 ## 受管差异与校验
 

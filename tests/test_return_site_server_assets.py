@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -208,6 +209,7 @@ def test_private_compose_validation_preserves_original_references_and_overrides(
     assert result["production_changed"] is False
     assert result["plan_sha256"] == prepared["plan_sha256"]
     probe = yaml.safe_load(Path(result["reference_candidate"]).read_bytes())
+    original_probe = yaml.safe_load(Path(result["original_reference_candidate"]).read_bytes())
     resolved = yaml.safe_load(Path(result["validation_candidate"]).read_bytes())
     candidate = yaml.safe_load(plan.changes[1].after)
     assert probe["x-runtime"] == candidate["x-runtime"]
@@ -216,6 +218,10 @@ def test_private_compose_validation_preserves_original_references_and_overrides(
         deployment["signing_env_file"],
     ]
     assert probe[site.VALIDATION_ENV]["isolated-extra"] == ["${EXTRA_ENV:-extra.env}"]
+    assert original_probe[site.VALIDATION_ENV]["gateway"] == sequence
+    assert original_probe["x-runtime"] == original["x-runtime"]
+    assert result["original_sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert result["candidate_sha256"] == hashlib.sha256(plan.changes[1].after).hexdigest()
     for name, service in candidate["services"].items():
         assert probe["services"][name]["env_file"] == []
         assert site._env_files(resolved["services"][name]) == site._env_files(
@@ -231,12 +237,18 @@ def test_private_compose_validation_preserves_original_references_and_overrides(
     assert "synthetic-original-keep-private" not in json.dumps(result)
     assert all(
         Path(result[key]).parent == Path(prepared["manifest"]).parent
-        for key in ("reference_candidate", "validation_candidate")
+        for key in (
+            "original_reference_candidate",
+            "reference_candidate",
+            "validation_candidate",
+        )
     )
     assert site.prepare_compose_validation(deployment, state, prepared["plan_sha256"]) == result
 
 
-@pytest.mark.parametrize("changed", ["original", "reviewed-candidate", "validation-copy"])
+@pytest.mark.parametrize(
+    "changed", ["original", "reviewed-candidate", "validation-copy", "original-reference-copy"]
+)
 def test_private_compose_validation_cannot_replace_existing_evidence(
     deployment, tmp_path, monkeypatch, changed
 ):
@@ -252,7 +264,12 @@ def test_private_compose_validation_cannot_replace_existing_evidence(
         path = Path(prepared["manifest"]).parent / "1.after"
         expected = "resume_backup_integrity_failed"
     else:
-        path = Path(result["validation_candidate"])
+        label = (
+            "original_reference_candidate"
+            if changed == "original-reference-copy"
+            else "validation_candidate"
+        )
+        path = Path(result[label])
         expected = "compose_validation_candidate_conflict"
     path.write_bytes(b"operator or interrupted write; preserve this evidence\n")
     with pytest.raises(assets.EnablementError, match=expected):
@@ -311,3 +328,99 @@ def test_compose_standard_merge_precedence_preserved_and_duplicate_merge_rejecte
     )
     with pytest.raises(assets.EnablementError, match="duplicate_compose_merge_key"):
         site._yaml(path)
+
+
+def test_external_reference_probes_preserve_scope_sequence_and_do_not_read_files(
+    deployment, tmp_path, monkeypatch
+):
+    mock_ingress(monkeypatch)
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    external = tmp_path / "etc/cf-gateway-host-binding/runtime.env"
+    # The helper has no mount for this path, and must not read or create it. The
+    # host validates and snapshots it before real Compose resolves env values.
+    references = [".env", {"path": str(external), "required": True}]
+    for name in ("gateway", "dispatch-worker"):
+        original["services"][name]["env_file"] = references
+    original["x-external-notes"] = {"env_file": []}
+    original["services"]["gateway"]["x-notes"] = {"env_file": []}
+    original["services"]["without-env"] = {"image": "unmodified"}
+    path.write_text(yaml.safe_dump(original, sort_keys=False))
+    original_bytes = path.read_bytes()
+    plan = site.plan_server(deployment)
+    state = tmp_path / "private-state"
+    prepared = site.prepare(plan, state)
+    result = site.prepare_compose_validation(deployment, state, prepared["plan_sha256"])
+    for label, key in (
+        ("original", "original_reference_candidate"),
+        ("candidate", "reference_candidate"),
+    ):
+        probe = yaml.safe_load(Path(result[key]).read_bytes())
+        assert probe["x-external-notes"] == {"env_file": []}
+        for name in ("gateway", "dispatch-worker"):
+            expected = references + (
+                [deployment["signing_env_file"]] if label == "candidate" else []
+            )
+            assert probe[site.VALIDATION_ENV][name] == expected
+            assert probe["services"][name]["env_file"] == []
+        assert str(external) not in json.dumps(probe[site.VALIDATION_ENV]["worker"])
+        assert set(result["empty_locations"][label]) == {
+            "services.heartbeat-init.env_file",
+            "services.without-env.env_file",
+            "services.gateway.x-notes.env_file",
+            "x-external-notes.env_file",
+        }
+    assert path.read_bytes() == original_bytes
+    assert not external.exists()
+    assert not Path(deployment["signing_env_file"]).exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "kind", "suffix"),
+    [
+        (None, "null", ""),
+        (False, "boolean", ""),
+        (7, "number", ""),
+        ({"path": "secret-value"}, "object", ""),
+        ([None], "null", "[0]"),
+        ([{"required": True}], "missing", "[0].path"),
+        ([{"path": "secret-value", "required": "secret-value"}], "string", "[0].required"),
+        ([{"path": "secret-value", "format": []}], "array", "[0].format"),
+        ([{"path": "secret-value", "unexpected": "secret-value"}], "object", "[0]"),
+    ],
+)
+@pytest.mark.parametrize("location", ["services.heartbeat-init", "x-notes"])
+def test_env_shape_errors_locate_type_without_values(deployment, value, kind, suffix, location):
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    if location.startswith("services."):
+        original["services"]["heartbeat-init"]["env_file"] = value
+    else:
+        original["x-notes"] = {"env_file": value}
+    path.write_text(yaml.safe_dump(original, sort_keys=False))
+    with pytest.raises(site.ComposeShapeError) as raised:
+        site.plan_compose(path, deployment)
+    assert str(raised.value) == "compose_env_shape_unsupported"
+    assert raised.value.details == {"location": f"{location}.env_file{suffix}", "type": kind}
+    assert "secret-value" not in json.dumps(raised.value.details)
+
+
+def test_cli_env_shape_error_is_locatable_and_never_echoes_value(
+    deployment, tmp_path, monkeypatch, capsys
+):
+    mock_ingress(monkeypatch)
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    original["services"]["heartbeat-init"]["env_file"] = {"do-not-echo": "secret"}
+    path.write_text(yaml.safe_dump(original))
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(deployment))
+    code = site.main(
+        ["plan", "--request", str(request), "--state-directory", str(tmp_path / "state")]
+    )
+    assert code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "compose_env_shape_unsupported",
+        "location": "services.heartbeat-init.env_file",
+        "type": "object",
+    }

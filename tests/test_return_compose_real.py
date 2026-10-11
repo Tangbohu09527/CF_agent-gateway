@@ -7,6 +7,7 @@ generation, protected journals, host validation and Compose itself execute.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -293,7 +294,6 @@ def test_pinned_compose_original_failure_and_preserved_candidate_semantics(exerc
         "missing-required-env",
         "invalid-compose",
         "variable-signing",
-        "outside-path",
         "duplicate-path",
         "duplicate-yaml",
         "signing-poll",
@@ -333,9 +333,6 @@ def test_real_compose_rejects_unsafe_or_unequivalent_inputs(exercise, fault):
         value = yaml.safe_load(compose_path.read_bytes())
         if fault == "invalid-compose":
             value["services"]["maintenance"]["unrecognized_property"] = True
-        elif fault == "outside-path":
-            value["services"]["worker"]["env_file"] = [str(root.parent / "outside.env")]
-            private_file(root.parent / "outside.env", b"SYNTHETIC=value\n")
         elif fault == "duplicate-path":
             value["services"]["worker"]["env_file"] = ["base.env", "./base.env"]
         elif fault == "tilde-env-path":
@@ -372,3 +369,318 @@ def test_real_compose_rejects_unsafe_or_unequivalent_inputs(exercise, fault):
         # --no-interpolate, a different binary, or a weaker validation path.
         assert not any("--no-interpolate" in call for call in exercise["calls"])
         assert sum("--help" in call for call in exercise["calls"]) == 1
+
+
+def existing_external_reference(exercise):
+    """An existing restricted host-binding file, outside the Gateway tree."""
+    root = exercise["root"]
+    external = private_file(
+        root.parent / "etc/cf-gateway-host-binding/runtime.env",
+        b"ORDERED_OVERRIDE=host-binding-last\nEXTERNAL_SYNTHETIC=existing-value\n",
+    )
+    with (root / ".env").open("a", encoding="utf-8") as stream:
+        stream.write(f"HOST_BINDING_ENV={external.as_posix()}\n")
+    value = yaml.safe_load(exercise["compose_path"].read_bytes())
+    for name in ("gateway", "dispatch-worker"):
+        value["services"][name]["env_file"] = [
+            *value["services"][name]["env_file"],
+            {"path": "${HOST_BINDING_ENV:?host binding required}", "required": True},
+        ]
+    # This reproduces the deployed heartbeat-init override and also exercises
+    # the different empty-extension JSON representations in the real versions.
+    value["services"]["heartbeat-init"] = {
+        "image": exercise["request"]["baseline_image"],
+        "env_file": [],
+        "environment": {},
+    }
+    exercise["compose_path"].write_text(yaml.safe_dump(value, sort_keys=False))
+    return external
+
+
+def test_existing_restricted_external_reference_is_preserved_and_frozen(exercise, tmp_path):
+    external = existing_external_reference(exercise)
+    protected = {
+        path: path.read_bytes()
+        for path in (exercise["compose_path"], exercise["root"] / ".env", external)
+    }
+    result = exercise["prepare"]()
+    report = exercise["entry"].validate_candidates(result)
+    assert report["original_environment_equal"] is True
+    assert report["original_env_files_resolved"] is True
+    assert len(report["proof_sha256"]) == 64
+    proof_path = Path(report["proof_file"])
+    assert proof_path.is_relative_to(exercise["entry"].asset_dir)
+    proof_before = proof_path.read_bytes()
+    assert b"existing-value" not in proof_before
+    assert b"host-binding-last" not in proof_before
+    resolved_models = 0
+    for model in exercise["outputs"]:
+        services = model.get("services", {})
+        if "EXTERNAL_SYNTHETIC" not in services.get("gateway", {}).get("environment", {}):
+            continue
+        resolved_models += 1
+        for name in ("gateway", "dispatch-worker"):
+            assert services[name]["environment"]["ORDERED_OVERRIDE"] == "host-binding-last"
+            assert services[name]["environment"]["EXPLICIT_OVERRIDE"] == "explicit-selection"
+        for name in ("worker", "delivery-worker", "maintenance", "heartbeat-init"):
+            assert "EXTERNAL_SYNTHETIC" not in services[name].get("environment", {})
+    assert resolved_models >= 2  # Actual original and candidate config both loaded the file.
+    assert all(path.read_bytes() == before for path, before in protected.items())
+    assert not Path(exercise["request"]["signing_env_file"]).exists()
+    exercise["entry"].state = {"plan_sha256": result["plan_sha256"], "compose_validation": report}
+    exercise["entry"].verify_compose_proof()
+    repeated = exercise["entry"].validate_candidates(result)
+    assert repeated["proof_sha256"] == report["proof_sha256"]
+    assert proof_path.read_bytes() == proof_before
+    (tmp_path / "compose-compatibility-evidence.json").write_text(
+        json.dumps(
+            {
+                "scope": "synthetic existing external env_file; actual Compose; no site access",
+                "version": exercise["version"],
+                "external_reference_scope": ["gateway", "dispatch-worker"],
+                "external_reference_was_in_live_and_protected_original": True,
+                "validation": report,
+                "production_files_unchanged": True,
+                "original_values_not_in_proof": True,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "missing",
+        "optional-missing",
+        "world-readable",
+        "symlink",
+        "parent-symlink",
+        "hardlink",
+        "parent-traversal",
+    ),
+)
+def test_real_compose_rejects_unsafe_original_external_file(exercise, fault):
+    if os.name == "nt" and fault in {"world-readable", "symlink", "parent-symlink"}:
+        pytest.skip("POSIX ownership/mode and symlink checks execute in required Linux CI")
+    external = existing_external_reference(exercise)
+    if fault in {"missing", "optional-missing"}:
+        external.unlink()
+        if fault == "optional-missing":
+            value = yaml.safe_load(exercise["compose_path"].read_bytes())
+            for name in ("gateway", "dispatch-worker"):
+                value["services"][name]["env_file"][-1]["required"] = False
+            exercise["compose_path"].write_text(yaml.safe_dump(value, sort_keys=False))
+    elif fault == "world-readable":
+        external.chmod(0o644)
+    elif fault == "symlink":
+        target = external.with_name("synthetic-target.env")
+        external.rename(target)
+        external.symlink_to(target)
+    elif fault == "parent-symlink":
+        directory = external.parent
+        destination = directory.with_name("existing-target")
+        directory.rename(destination)
+        directory.symlink_to(destination, target_is_directory=True)
+    elif fault == "hardlink":
+        os.link(external, external.with_name("synthetic-alias.env"))
+    elif fault == "parent-traversal":
+        with (exercise["root"] / ".env").open("a", encoding="utf-8") as stream:
+            stream.write(f"HOST_BINDING_ENV={external.parent.as_posix()}/../runtime.env\n")
+    expected_error = {
+        "missing": "compose_environment_file_missing",
+        "optional-missing": "compose_environment_file_missing",
+        "world-readable": "external_env_file_permissions_invalid",
+        "symlink": "linked_path",
+        "parent-symlink": "linked_path",
+        "hardlink": "not_private_regular_file",
+        "parent-traversal": "compose_env_path_not_normalized",
+    }[fault]
+    with pytest.raises(
+        (assets.EnablementError, exercise["module"].EntryError), match=expected_error
+    ):
+        exercise["entry"].validate_candidates(exercise["prepare"]())
+    assert not exercise["nginx_checks"]
+    assert not Path(exercise["request"]["signing_env_file"]).exists()
+
+
+@pytest.mark.parametrize("fault", ("content", "inode", "mode", "original-compose"))
+def test_real_compose_external_proof_rejects_change_without_overwriting_journal(exercise, fault):
+    if fault == "mode" and os.name == "nt":
+        pytest.skip("POSIX mode checks execute in required Linux CI")
+    external = existing_external_reference(exercise)
+    result = exercise["prepare"]()
+    report = exercise["entry"].validate_candidates(result)
+    exercise["entry"].state = {"plan_sha256": result["plan_sha256"], "compose_validation": report}
+    preserved = {
+        path: path.read_bytes()
+        for path in Path(result["manifest"]).parent.rglob("*")
+        if path.is_file()
+    }
+    if fault == "content":
+        external.write_bytes(b"CHANGED_SYNTHETIC=changed\n")
+    elif fault == "inode":
+        replacement = private_file(external.with_name("replacement.env"), external.read_bytes())
+        os.replace(replacement, external)
+    elif fault == "mode":
+        external.chmod(0o640)
+    else:
+        exercise["compose_path"].write_bytes(exercise["compose_path"].read_bytes() + b"\n")
+    with pytest.raises(
+        exercise["module"].EntryError,
+        match="asset_changed_since_plan"
+        if fault == "original-compose"
+        else "compose_environment_file_changed",
+    ):
+        exercise["entry"].verify_compose_proof()
+    with pytest.raises((assets.EnablementError, exercise["module"].EntryError)):
+        exercise["entry"].validate_candidates(result)
+    assert all(path.read_bytes() == before for path, before in preserved.items())
+
+
+@pytest.mark.parametrize(
+    "fault", ("unknown-path", "poll", "delivery", "hidden-profile", "order", "required", "format")
+)
+def test_real_compose_candidate_cannot_expand_original_external_scope(exercise, fault):
+    external = existing_external_reference(exercise)
+    result = exercise["prepare"]()
+    candidate = Path(result["candidates"][0]["candidate_file"])
+    protected_original = candidate.with_suffix(".before").read_bytes()
+    value = yaml.safe_load(candidate.read_bytes())
+    if fault == "unknown-path":
+        unknown = private_file(external.parent / "unknown.env", b"UNKNOWN_SYNTHETIC=value\n")
+        value["services"]["gateway"]["env_file"].insert(0, str(unknown))
+    elif fault == "order":
+        files = value["services"]["gateway"]["env_file"]
+        files[0], files[-2] = files[-2], files[0]
+    elif fault in {"required", "format"}:
+        reference = value["services"]["gateway"]["env_file"][-2]
+        reference[fault] = False if fault == "required" else "raw"
+    else:
+        name = {"poll": "worker", "delivery": "delivery-worker", "hidden-profile": "maintenance"}[
+            fault
+        ]
+        value["services"][name]["env_file"] = [
+            *value["services"][name]["env_file"],
+            str(external),
+        ]
+    candidate.write_text(yaml.safe_dump(value, sort_keys=False))
+    failed_candidate = candidate.read_bytes()
+    with pytest.raises((assets.EnablementError, exercise["module"].EntryError)):
+        exercise["entry"].validate_candidates(result)
+    assert candidate.with_suffix(".before").read_bytes() == protected_original
+    assert candidate.read_bytes() == failed_candidate
+    assert not exercise["nginx_checks"]
+
+
+@pytest.mark.parametrize("shape", ("empty", "absent", "short", "long", "extension-empty"))
+def test_real_compose_empty_and_supported_env_shapes_keep_original_semantics(exercise, shape):
+    path = exercise["compose_path"]
+    value = yaml.safe_load(path.read_bytes())
+    service = {"image": exercise["request"]["baseline_image"]}
+    if shape in {"empty", "extension-empty"}:
+        service["env_file"] = []
+    elif shape == "short":
+        service["env_file"] = "./base.env"
+    elif shape == "long":
+        service["env_file"] = [{"path": "./base.env", "required": True}]
+    value["services"]["heartbeat-init"] = service
+    if shape == "extension-empty":
+        value["x-offline-notes"] = {"env_file": []}
+        service["x-offline-notes"] = {"env_file": []}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    result = exercise["prepare"]()
+    report = exercise["entry"].validate_candidates(result)
+    assert report["original_environment_equal"] is True
+    probe = next(
+        model[site.VALIDATION_ENV]["heartbeat-init"]
+        for model in exercise["outputs"]
+        if site.VALIDATION_ENV in model
+    )
+    if shape in {"empty", "absent", "extension-empty"}:
+        assert probe == (None if exercise["version"] == "2.39.4" else [])
+    elif shape == "short":
+        # The source helper deliberately turns the one short reference into a
+        # list before constructing the probe, preserving the same meaning.
+        assert probe == ["./base.env"]
+    else:
+        assert probe == [{"path": "./base.env", "required": True}]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        None,
+        False,
+        7,
+        {"path": "./base.env"},
+        [{"path": "./base.env", "x-extra": 1}],
+        [{"path": "./base.env", "required": "yes"}],
+        [{"path": "./base.env", "format": False}],
+    ),
+)
+def test_real_compose_invalid_env_shape_is_rejected_with_safe_location(exercise, invalid):
+    path = exercise["compose_path"]
+    value = yaml.safe_load(path.read_bytes())
+    value["services"]["heartbeat-init"] = {
+        "image": exercise["request"]["baseline_image"],
+        "env_file": copy.deepcopy(invalid),
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    actual = exercise["execute"](
+        [
+            "--file",
+            str(path),
+            "--env-file",
+            str(exercise["root"] / ".env"),
+            "config",
+            "--format",
+            "json",
+        ]
+    )
+    if exercise["version"] == "2.39.4" and invalid == [{"path": "./base.env", "required": "yes"}]:
+        # This release coerces the YAML 1.1-looking string with a warning. The
+        # source validator still rejects ambiguity instead of treating it as
+        # a proven boolean option (or an empty reference).
+        assert actual.returncode == 0 and "YAML 1.2" in actual.stderr
+    else:
+        assert actual.returncode != 0
+    with pytest.raises((assets.EnablementError, exercise["module"].EntryError)) as caught:
+        exercise["entry"].validate_candidates(exercise["prepare"]())
+    assert "heartbeat-init" in str(caught.value) or "heartbeat-init" in str(
+        getattr(caught.value, "details", {})
+    )
+    assert "env_file" in str(caught.value) or "env_file" in str(
+        getattr(caught.value, "details", {})
+    )
+    assert getattr(caught.value, "details", {}).get("type")
+    assert not exercise["nginx_checks"]
+
+
+def test_real_compose_raw_format_is_preserved_or_rejected_by_actual_capability(exercise):
+    external = existing_external_reference(exercise)
+    external.write_bytes(b"QUOTED_SYNTHETIC='keep these quotes'\nDOLLAR_SYNTHETIC=$UNSET_LITERAL\n")
+    path = exercise["compose_path"]
+    value = yaml.safe_load(path.read_bytes())
+    for name in ("gateway", "dispatch-worker"):
+        value["services"][name]["env_file"][-1]["format"] = "raw"
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    result = exercise["prepare"]()
+    if exercise["version"] == "2.26.1":
+        with pytest.raises(exercise["module"].EntryError, match="command_failed"):
+            exercise["entry"].validate_candidates(result)
+        assert not exercise["nginx_checks"]
+        assert not any("--no-interpolate" in call for call in exercise["calls"])
+    else:
+        report = exercise["entry"].validate_candidates(result)
+        assert report["original_environment_equal"] is True
+        observed = [
+            model["services"]["gateway"]["environment"]
+            for model in exercise["outputs"]
+            if "QUOTED_SYNTHETIC"
+            in model.get("services", {}).get("gateway", {}).get("environment", {})
+        ]
+        assert len(observed) >= 2
+        assert all(env["QUOTED_SYNTHETIC"] == "'keep these quotes'" for env in observed)
+        assert all(env["DOLLAR_SYNTHETIC"] == "$$UNSET_LITERAL" for env in observed)

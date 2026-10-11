@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -98,11 +99,37 @@ def health():
 
 
 def initialize(entry, phase="planned"):
+    helpers = entry.__class__.__init__.__globals__
+    directory = entry.asset_dir / ("e" * 64)
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    compose = protected(entry.root / "docker-compose.prod.yml", b"original-compose\n")
+    before = protected(directory / "0.before", compose.read_bytes())
+    candidate = protected(directory / "0.after", b"candidate-compose\n")
+    external = protected(entry.root.parent / "external-runtime.env", b"SYNTHETIC_KEY=fixture\n")
+    proof = {
+        "schema": "cf-return-compose-proof/v1",
+        "request_sha256": entry.request_hash,
+        "plan_sha256": "e" * 64,
+        "before_file": str(before),
+        "before_sha256": helpers["digest"](before.read_bytes()),
+        "candidate_file": str(candidate),
+        "candidate_sha256": helpers["digest"](candidate.read_bytes()),
+        "references": {
+            "services.gateway.env_file": [{"path": str(external), "required": True}],
+            "services.dispatch-worker.env_file": [{"path": str(external), "required": True}],
+        },
+        "files": [entry.snapshot_env_file(external)],
+    }
+    proof_file = protected(directory / "compose-environment-proof.json", helpers["encoded"](proof))
     entry.persist(
         phase,
         request_sha256=entry.request_hash,
         plan_sha256="e" * 64,
         queues_quiesced=entry.validate_health(health()),
+        compose_validation={
+            "proof_file": str(proof_file),
+            "proof_sha256": helpers["digest"](proof_file.read_bytes()),
+        },
     )
 
 
@@ -146,6 +173,123 @@ def test_asset_process_has_no_network_socket_or_writable_roots_until_apply(entry
     entry.assets("apply", writable=True, plan_sha="e" * 64)
     assert f"type=bind,src={entry.root},dst={entry.root}" in calls[-1]
     assert "--expected-plan-sha256" in calls[-1]
+
+
+def failed_process(monkeypatch, module, output):
+    process = SimpleNamespace(
+        returncode=1,
+        communicate=lambda **kwargs: (output, "DO_NOT_EXPOSE_STDERR_SECRET"),
+    )
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **kw: process)
+
+
+def test_helper_shape_failure_preserves_safe_location_and_type(module, monkeypatch):
+    failed_process(
+        monkeypatch,
+        module,
+        json.dumps(
+            {
+                "error": "compose_env_shape_unsupported",
+                "location": "services.heartbeat-init.env_file",
+                "type": "object",
+            }
+        ),
+    )
+    with pytest.raises(module.EntryError, match="^compose_env_shape_unsupported$") as raised:
+        module.Commands().run(["isolated-helper"], structured_errors=True)
+    assert raised.value.details == {
+        "location": "services.heartbeat-init.env_file",
+        "type": "object",
+    }
+    assert "SECRET" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json DO_NOT_EXPOSE_SECRET",
+        {"error": "compose_env_shape_unsupported", "value": "DO_NOT_EXPOSE_SECRET"},
+        {"error": "DO_NOT_EXPOSE_SECRET"},
+        {"error": "shape_invalid", "location": "/private/DO_NOT_EXPOSE_SECRET", "type": "object"},
+        {"error": "shape_invalid", "location": "services.gateway.env_file", "type": "dict"},
+        {"error": "shape_invalid", "location": "services.gateway.env_file"},
+    ],
+)
+def test_untrusted_helper_failure_output_is_discarded(module, monkeypatch, payload):
+    failed_process(
+        monkeypatch, module, payload if isinstance(payload, str) else json.dumps(payload)
+    )
+    with pytest.raises(module.EntryError, match="^command_failed$") as raised:
+        module.Commands().run(["isolated-helper"], structured_errors=True)
+    assert not raised.value.details
+
+
+def test_compose_config_failure_does_not_opt_into_helper_error_protocol(module, monkeypatch):
+    failed_process(monkeypatch, module, '{"error":"synthetic_config_error"}')
+    with pytest.raises(module.EntryError, match="^command_failed$"):
+        module.Commands().run(["docker", "compose", "config"])
+
+
+def test_only_asset_helper_enables_structured_error_protocol(entry, monkeypatch):
+    calls = []
+    monkeypatch.setattr(entry, "docker", lambda args, **kw: calls.append((args, kw)) or "{}")
+    entry.assets("plan")
+    assert calls[-1][1]["structured_errors"] is True
+    entry.candidate_config(entry.root / "docker-compose.prod.yml")
+    assert "structured_errors" not in calls[-1][1]
+
+
+def test_entry_cli_reports_safe_helper_diagnostics_without_values(
+    module, site_request, monkeypatch, capsys
+):
+    request, request_path = site_request
+    failed_process(
+        monkeypatch,
+        module,
+        json.dumps(
+            {
+                "error": "compose_env_shape_unsupported",
+                "location": "services.gateway.env_file[0].path",
+                "type": "object",
+            }
+        ),
+    )
+    fake_entry = SimpleNamespace(
+        state_dir=request_path.parent,
+        preflight=lambda: None,
+        plan=lambda: module.Commands().run(["isolated-helper"], structured_errors=True),
+    )
+    monkeypatch.setattr(
+        module, "os", SimpleNamespace(name="posix", geteuid=lambda: 0, umask=lambda _: 0)
+    )
+    monkeypatch.setattr(module, "safe_path", lambda value, **kw: value)
+    monkeypatch.setattr(module, "read_json", lambda *a, **kw: request)
+    monkeypatch.setattr(module, "ServerEntry", lambda *a, **kw: fake_entry)
+    monkeypatch.setattr(module, "operation_lock", lambda _: contextlib.nullcontext())
+    assert (
+        module.main(
+            [
+                "plan",
+                "--request",
+                str(request_path),
+                "--release-commit",
+                request["release_commit"],
+                "--candidate-image",
+                request["candidate_image"],
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert not captured.out
+    report = json.loads(captured.err)
+    assert report == {
+        "error": "compose_env_shape_unsupported",
+        "location": "services.gateway.env_file[0].path",
+        "type": "object",
+        "activation_allowed": False,
+    }
+    assert "SECRET" not in captured.err
 
 
 def test_plan_refuses_mixed_baseline_before_asset_changes(entry, monkeypatch):
@@ -327,6 +471,122 @@ def test_request_and_plan_identity_survive_restart_and_refuse_changes(module, en
         )
 
 
+@pytest.mark.parametrize(
+    ("stage", "phase"),
+    [
+        ("plan", "planned"),
+        ("quiesce", "planned"),
+        ("apply", "quiesced"),
+        ("start", "applied"),
+        ("verify", "started"),
+        ("rollback", "applied"),
+        ("start-old", "rolled_back"),
+    ],
+)
+@pytest.mark.parametrize("damage", ["missing_proof", "changed_environment"])
+def test_plan_and_every_stage_refuse_missing_or_changed_proof_before_effects(
+    entry, monkeypatch, stage, phase, damage
+):
+    initialize(entry, phase)
+    proof_path = Path(entry.state["compose_validation"]["proof_file"])
+    proof = json.loads(proof_path.read_bytes())
+    state_before = entry.state_path.read_bytes()
+    before_file = Path(proof["before_file"])
+    candidate_file = Path(proof["candidate_file"])
+    assets_before = {path: path.read_bytes() for path in (before_file, candidate_file)}
+    if damage == "missing_proof":
+        proof_path.unlink()
+    else:
+        Path(proof["files"][0]["path"]).write_bytes(b"SYNTHETIC_KEY=changed-after-plan\n")
+
+    def unexpected_effect(*args, **kwargs):
+        pytest.fail("no command, state mutation, secret generation or service action is allowed")
+
+    for name in (
+        "containers",
+        "controller",
+        "persist",
+        "prepare_artifact_root",
+        "signing_file",
+        "assets",
+        "compose",
+        "docker",
+        "term_wait",
+    ):
+        monkeypatch.setattr(entry, name, unexpected_effect)
+    expected = (
+        "compose_proof_missing" if damage == "missing_proof" else "compose_environment_file_changed"
+    )
+    with pytest.raises(RuntimeError, match=f"^{expected}$"):
+        if stage == "start-old":
+            entry.start(old=True)
+        else:
+            getattr(entry, stage)()
+    assert entry.state_path.read_bytes() == state_before
+    assert all(path.read_bytes() == data for path, data in assets_before.items())
+    assert not Path(entry.request["signing_env_file"]).exists()
+
+
+def test_environment_proof_is_reloaded_and_verified_after_process_restart(module, entry):
+    initialize(entry)
+    restored = module.ServerEntry(
+        entry.request_path,
+        release_commit=entry.request["release_commit"],
+        candidate_image=entry.request["candidate_image"],
+    )
+    restored.verify_compose_proof()
+    proof_file = Path(entry.state["compose_validation"]["proof_file"])
+    proof = json.loads(proof_file.read_bytes())
+    Path(proof["files"][0]["path"]).write_bytes(b"SYNTHETIC_KEY=changed-after-restart\n")
+    with pytest.raises(RuntimeError, match="^compose_environment_file_changed$"):
+        restored.verify_compose_proof()
+
+
+@pytest.mark.parametrize("changed_asset", ["before_file", "candidate_file", "proof_file"])
+def test_private_proof_or_journal_tampering_is_rejected_without_rewriting(entry, changed_asset):
+    initialize(entry)
+    proof_file = Path(entry.state["compose_validation"]["proof_file"])
+    proof = json.loads(proof_file.read_bytes())
+    target = proof_file if changed_asset == "proof_file" else Path(proof[changed_asset])
+    target.write_bytes(target.read_bytes() + b"\n")
+    changed = target.read_bytes()
+    expected = (
+        "compose_proof_changed" if changed_asset == "proof_file" else "compose_proof_asset_mismatch"
+    )
+    with pytest.raises(RuntimeError, match=f"^{expected}$"):
+        entry.verify_compose_proof()
+    assert target.read_bytes() == changed
+
+
+@pytest.mark.parametrize("collision", ["service_extension", "nested_extension"])
+def test_ambiguous_reference_locations_do_not_hide_service_or_extension_scope(entry, collision):
+    value = {
+        "services": {"gateway": {}},
+        "x-cf-return-validation-env": {"gateway": []},
+    }
+    if collision == "service_extension":
+        value["services"]["gateway.x-meta"] = {}
+        value["x-cf-return-validation-env"]["gateway.x-meta"] = []
+        value["services"]["gateway"]["x-meta"] = {"env_file": []}
+    else:
+        value["x-original.nested"] = {"env_file": []}
+        value["x-original"] = {"nested": {"env_file": []}}
+    with pytest.raises(RuntimeError, match="^compose_env_location_ambiguous$"):
+        entry.collect_compose_references(value, [])
+
+
+def test_dotted_service_name_keeps_its_own_reference_location(entry):
+    location = "services.maintenance.ops.env_file"
+    path = str(entry.root.parent / "external-maintenance.env")
+    value = {
+        "services": {"maintenance.ops": {"profiles": ["hidden"]}},
+        "x-cf-return-validation-env": {"maintenance.ops": [{"path": path, "required": True}]},
+    }
+    assert entry.collect_compose_references(value, []) == {
+        location: [{"path": path, "required": True}]
+    }
+
+
 def test_missing_ca_is_pending_not_invented_and_does_not_issue_certificate(entry):
     Path(entry.request["gateway_ca_file"]).unlink()
     result = entry.certificate_status()
@@ -367,14 +627,24 @@ def test_request_rejects_credentials_and_nonlocal_health(module, site_request):
 
 @pytest.mark.parametrize("native", [False, True])
 def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatch, native):
-    initialize(entry)
+    helpers = entry.__class__.__init__.__globals__
     directory = entry.asset_dir / ("e" * 64)
+    original = protected(entry.root / "docker-compose.prod.yml", b"original-compose")
+    protected(entry.root / ".env", b"SYNTHETIC=fixture\n")
+    protected(directory / "0.before", original.read_bytes())
     compose = protected(directory / "0.after", b"candidate-compose")
     nginx = protected(directory / "1.after", b"candidate-nginx")
     probe = protected(directory / "references.validation.yaml", b"private-reference-probe")
+    original_probe = protected(directory / "original.validation.yaml", b"private-original-probe")
     resolved = protected(directory / "resolved.validation.yaml", b"private-resolved-probe")
     services = {
         name: {"image": entry.request["candidate_image"], "env_file": []} for name in rows(entry)
+    }
+    external = protected(entry.root.parent / "external-dotted.env", b"SYNTHETIC=hidden-profile\n")
+    services["maintenance.ops"] = {
+        "image": entry.request["baseline_image"],
+        "profiles": ["hidden"],
+        "env_file": [{"path": str(external), "required": True}],
     }
     for name in ("gateway", "dispatch-worker"):
         services[name]["env_file"] = [{"path": entry.request["signing_env_file"]}]
@@ -386,9 +656,20 @@ def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatc
             return "  --no-env-resolution  Skip env files" if native else "  --format string"
         if args == ["compose", "version", "--short"]:
             return "2.39.4" if native else "2.26.1"
+        original_services = {name: {"image": entry.request["baseline_image"]} for name in services}
         result = {"services": services}
         if str(resolved) in args:
             result = {"services": {k: {"image": v["image"]} for k, v in services.items()}}
+        elif str(original) in args:
+            result = {"services": original_services}
+        elif str(original_probe) in args:
+            result = {
+                "services": original_services,
+                "x-cf-return-validation-env": {
+                    name: services[name]["env_file"] if name == "maintenance.ops" else []
+                    for name in services
+                },
+            }
         else:
             result["x-cf-return-validation-env"] = {
                 name: service["env_file"] for name, service in services.items()
@@ -403,6 +684,19 @@ def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatc
             "plan_sha256": "e" * 64,
             "reference_candidate": str(probe),
             "validation_candidate": str(resolved),
+            "original_reference_candidate": str(original_probe),
+            "original_sha256": helpers["digest"](original.read_bytes()),
+            "candidate_sha256": helpers["digest"](compose.read_bytes()),
+            "empty_locations": {
+                "original": [
+                    f"services.{name}.env_file" for name in services if name != "maintenance.ops"
+                ],
+                "candidate": [
+                    f"services.{name}.env_file"
+                    for name in services
+                    if name not in {"gateway", "dispatch-worker", "maintenance.ops"}
+                ],
+            },
         },
     )
     monkeypatch.setattr(entry, "nginx_test", lambda **kw: nginx_tests.append(kw))
@@ -414,14 +708,17 @@ def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatc
         ],
     }
     report = entry.validate_candidates(result)
+    proof = json.loads(Path(report["proof_file"]).read_bytes())
+    assert any(item["path"] == str(external) for item in proof["files"])
     assert report["original_env_files_resolved"] is True
     assert ("--no-env-resolution" in commands[2]) is native
-    assert "--no-env-resolution" not in commands[3]
+    assert ("--no-env-resolution" in commands[3]) is native
+    assert "--no-env-resolution" not in commands[4]
     assert commands[2][commands[2].index("--profile") + 1] == "*"
-    assert str(resolved) in commands[3]
+    assert str(resolved) in commands[4]
     assert nginx_tests == [{"candidate": nginx}]
     services["delivery-worker"]["env_file"] = [{"path": entry.request["signing_env_file"]}]
-    with pytest.raises(RuntimeError, match="candidate_signing_scope_violation"):
+    with pytest.raises(RuntimeError, match="candidate_compose_reference_changed"):
         entry.validate_candidates(result)
 
     services["delivery-worker"]["env_file"] = []

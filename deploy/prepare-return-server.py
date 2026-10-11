@@ -50,9 +50,36 @@ CONTAINER = re.compile(r"[0-9a-f]{64}\Z")
 class EntryError(RuntimeError):
     """Stable error codes only; command output and configuration stay private."""
 
+    def __init__(self, code, *, details=None):
+        super().__init__(code)
+        self.details = details or {}
+
 
 def fail(code: str):
     raise EntryError(code)
+
+
+MISSING = object()
+
+
+def shape_error(location, value):
+    if not re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,240}", location):
+        location = "compose.env_file"
+    kind = (
+        "missing"
+        if value is MISSING
+        else "null"
+        if value is None
+        else {
+            list: "array",
+            dict: "object",
+            str: "string",
+            bool: "boolean",
+            int: "number",
+            float: "number",
+        }.get(type(value), "other")
+    )
+    raise EntryError("compose_env_shape_unsupported", details={"location": location, "type": kind})
 
 
 def digest(value: bytes) -> str:
@@ -138,7 +165,7 @@ def save_json(path: Path, value):
 
 
 class Commands:
-    def run(self, arguments, *, timeout=60, cwd=None):
+    def run(self, arguments, *, timeout=60, cwd=None, structured_errors=False):
         environment = {
             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
             "HOME": "/root",
@@ -168,6 +195,36 @@ class Commands:
                 process.communicate()
             fail("command_result_unknown")
         if process.returncode:
+            if structured_errors:
+                try:
+                    value = json.loads(output)
+                    if (
+                        isinstance(value, dict)
+                        and set(value) in ({"error"}, {"error", "location", "type"})
+                        and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", value.get("error", ""))
+                        and (
+                            set(value) == {"error"}
+                            or (
+                                re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,240}", value["location"])
+                                and value["type"]
+                                in {
+                                    "missing",
+                                    "null",
+                                    "array",
+                                    "object",
+                                    "string",
+                                    "boolean",
+                                    "number",
+                                    "other",
+                                }
+                            )
+                        )
+                    ):
+                        raise EntryError(
+                            value["error"], details={k: v for k, v in value.items() if k != "error"}
+                        )
+                except (ValueError, TypeError):
+                    pass
             fail("command_failed")
         return output.strip()
 
@@ -468,7 +525,7 @@ class ServerEntry:
         ]
         if plan_sha:
             arguments += ["--expected-plan-sha256", plan_sha]
-        result = json.loads(self.docker(arguments, timeout=120))
+        result = json.loads(self.docker(arguments, timeout=120, structured_errors=True))
         if not isinstance(result, dict):
             fail("asset_result_invalid")
         return result
@@ -480,10 +537,12 @@ class ServerEntry:
     def require_state(self, phases):
         if self.state is None or self.state.get("phase") not in phases:
             fail("stage_order_invalid")
+        self.verify_compose_proof()
 
     def plan(self):
         self.preflight()
         if self.state:
+            self.verify_compose_proof()
             return {
                 "phase": self.state["phase"],
                 "plan_sha256": self.state["plan_sha256"],
@@ -521,6 +580,7 @@ class ServerEntry:
             schema_compatibility=migration,
             deployment_id=self.request["deployment_id"],
             release_commit=self.request["release_commit"],
+            compose_validation=result["compose_validation"],
         )
         return {
             "phase": "planned",
@@ -862,7 +922,7 @@ class ServerEntry:
             fail("compose_version_result_invalid")
         validation = self.assets("compose-validation", plan_sha=result["plan_sha256"])
         paths = {}
-        for name in ("reference_candidate", "validation_candidate"):
+        for name in ("reference_candidate", "validation_candidate", "original_reference_candidate"):
             path = safe_path(validation[name], file=True, private=True)
             if self.asset_dir not in path.parents or path == compose_candidate:
                 fail("candidate_outside_private_journal")
@@ -871,8 +931,43 @@ class ServerEntry:
             fail("compose_validation_plan_mismatch")
         # Even releases advertising --no-env-resolution may still load required
         # env files. Both paths use the probe, never that flag as a scope proof.
+        project_env = self.snapshot_env_file(self.root / ".env")
+        original_value = self.candidate_config(
+            paths["original_reference_candidate"], no_env_resolution=native
+        )
         value = self.candidate_config(paths["reference_candidate"], no_env_resolution=native)
-        self.validate_compose_references(value)
+        originals = self.collect_compose_references(
+            original_value, validation["empty_locations"]["original"]
+        )
+        candidate_refs = self.collect_compose_references(
+            value, validation["empty_locations"]["candidate"]
+        )
+        self.validate_candidate_images(value)
+        signing = {"path": self.request["signing_env_file"], "required": True}
+        expected = {key: list(items) for key, items in originals.items()}
+        for items in originals.values():
+            if any(item["path"] == signing["path"] for item in items):
+                fail("candidate_signing_scope_violation")
+        for name in ("gateway", "dispatch-worker"):
+            expected[f"services.{name}.env_file"].append(signing)
+        if candidate_refs != expected:
+            fail("candidate_compose_reference_changed")
+        # Read only paths authorized by the live original / protected before,
+        # after proving candidate service ownership, ordering and options equal.
+        file_options = {str(self.root / ".env"): True}
+        service_locations = {f"services.{name}.env_file" for name in original_value["services"]}
+        for location, items in originals.items():
+            if location in service_locations:
+                for item in items:
+                    file_options[item["path"]] = (
+                        file_options.get(item["path"], False) or item["required"]
+                    )
+        files = [
+            self.snapshot_env_file(Path(path), required=required)
+            for path, required in sorted(file_options.items())
+        ]
+        if project_env != next(item for item in files if item["path"] == str(self.root / ".env")):
+            fail("compose_environment_file_changed")
         resolved = self.candidate_config(paths["validation_candidate"])
         self.validate_candidate_images(resolved)
         if any(
@@ -892,7 +987,48 @@ class ServerEntry:
 
         if environments(original) != environments(resolved):
             fail("candidate_compose_environment_changed")
+        for snapshot in files:
+            self.check_env_snapshot(snapshot)
+        before_file = compose_candidate.with_suffix(".before")
+        safe_path(before_file, file=True, private=True)
+        if (
+            digest(before_file.read_bytes()) != validation["original_sha256"]
+            or digest(compose_candidate.read_bytes()) != validation["candidate_sha256"]
+        ):
+            fail("compose_proof_asset_mismatch")
+        if (
+            digest((self.root / "docker-compose.prod.yml").read_bytes())
+            != validation["original_sha256"]
+        ):
+            fail("asset_changed_since_plan")
         self.nginx_test(candidate=nginx_candidate)
+        proof = {
+            "schema": "cf-return-compose-proof/v1",
+            "request_sha256": self.request_hash,
+            "plan_sha256": result["plan_sha256"],
+            "before_file": str(before_file),
+            "before_sha256": validation["original_sha256"],
+            "candidate_file": str(compose_candidate),
+            "candidate_sha256": validation["candidate_sha256"],
+            "references": originals,
+            "files": files,
+        }
+        proof_file = compose_candidate.parent / "compose-environment-proof.json"
+        data = encoded(proof)
+        safe_path(proof_file)
+        try:
+            descriptor = os.open(proof_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            safe_path(proof_file, file=True, private=True)
+            if proof_file.read_bytes() != data:
+                fail("compose_proof_conflict")
+        else:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        for snapshot in files:
+            self.check_env_snapshot(snapshot)
         return {
             "version": version,
             "references": "interpolated_reference_probe",
@@ -901,6 +1037,8 @@ class ServerEntry:
             "original_environment_equal": True,
             "all_profiles_checked": True,
             "validation_copies_not_deployable": True,
+            "proof_file": str(proof_file),
+            "proof_sha256": digest(data),
         }
 
     def candidate_config(self, path, *, no_env_resolution=False):
@@ -931,21 +1069,32 @@ class ServerEntry:
         ):
             fail("candidate_compose_images_mismatch")
 
-    def compose_env_references(self, values):
+    def compose_env_references(self, values, *, location, empty_locations):
+        if values is None and location in empty_locations:
+            # Compose 2.39 serializes an empty extension list as null. Only the
+            # protected raw source's [] / absent proof permits normalization.
+            values = []
         if isinstance(values, str):
             values = [values]
         if not isinstance(values, list):
-            fail("compose_env_shape_unsupported")
+            shape_error(location, values)
         references = []
-        for item in values:
+        for index, item in enumerate(values):
+            position = f"{location}[{index}]"
+            options = {"required": True}
             if isinstance(item, dict):
-                if (
-                    set(item) - {"path", "required", "format"}
-                    or type(item.get("required", True)) is not bool
-                ):
-                    fail("compose_env_shape_unsupported")
-                item = item.get("path")
-            if not isinstance(item, str) or not item or "$" in item:
+                if set(item) - {"path", "required", "format"}:
+                    shape_error(position, item)
+                if type(item.get("required", True)) is not bool:
+                    shape_error(position + ".required", item["required"])
+                if "format" in item and not isinstance(item["format"], str):
+                    shape_error(position + ".format", item["format"])
+                options.update({key: item[key] for key in ("required", "format") if key in item})
+                item = item.get("path", MISSING)
+                position += ".path"
+            if not isinstance(item, str) or not item:
+                shape_error(position, item)
+            if "$" in item:
                 # Compose config escapes literal dollars. Do not guess at a
                 # second interpolation or accept an unresolved/ambiguous path.
                 fail("compose_env_path_interpolation_ambiguous")
@@ -956,21 +1105,26 @@ class ServerEntry:
                 path = self.root / path
             if ".." in path.parts:
                 fail("compose_env_path_not_normalized")
-            safe_path(path)
-            if self.root not in path.parents:
-                fail("compose_env_path_outside_gateway")
-            references.append(str(path))
-        if len(set(references)) != len(references):
+            # Do not read candidate paths here. Only a reference matching the
+            # protected original is eligible for the file proof below.
+            references.append({"path": str(path), **options})
+        if len({item["path"] for item in references}) != len(references):
             fail("duplicate_compose_env_reference")
         return references
 
-    def validate_compose_references(self, value):
-        self.validate_candidate_images(value)
+    def collect_compose_references(self, value, empty_locations):
         services = value.get("services", {})
         references = value.get(ENV_PROBE)
         if not isinstance(references, dict) or set(references) != set(services):
             fail("compose_reference_probe_mismatch")
-        signing = self.request["signing_env_file"]
+        collected = {}
+
+        def record(location, raw):
+            if location in collected:
+                fail("compose_env_location_ambiguous")
+            collected[location] = self.compose_env_references(
+                raw, location=location, empty_locations=empty_locations
+            )
 
         def has_signing(environment):
             if isinstance(environment, list):
@@ -981,28 +1135,131 @@ class ServerEntry:
             return isinstance(environment, dict) and SIGNING_ENV in environment
 
         for name, definition in services.items():
-            paths = self.compose_env_references(references[name])
-            required = name in {"gateway", "dispatch-worker"}
-            if (signing in paths) != required or (required and paths[-1] != signing):
-                fail("candidate_signing_scope_violation")
+            location = f"services.{name}.env_file"
+            record(location, references[name])
             if has_signing(definition.get("environment", {})):
                 fail("signing_key_in_original_environment")
 
-        def check_extensions(node):
+        def check_extensions(node, prefix):
             if isinstance(node, dict):
-                if "env_file" in node and signing in self.compose_env_references(node["env_file"]):
-                    fail("candidate_signing_scope_violation")
+                if "env_file" in node:
+                    location = prefix + ".env_file"
+                    record(location, node["env_file"])
                 if has_signing(node.get("environment", {})):
                     fail("signing_key_in_original_environment")
-                for child in node.values():
-                    check_extensions(child)
+                for key, child in node.items():
+                    check_extensions(child, f"{prefix}.{key}")
             elif isinstance(node, list):
-                for child in node:
-                    check_extensions(child)
+                for index, child in enumerate(node):
+                    check_extensions(child, f"{prefix}[{index}]")
 
-        check_extensions({k: v for k, v in value.items() if k not in {"services", ENV_PROBE}})
-        for definition in services.values():
-            check_extensions({k: v for k, v in definition.items() if k.startswith("x-")})
+        for key, node in value.items():
+            if key != ENV_PROBE and key.startswith("x-"):
+                check_extensions(node, key)
+        for name, definition in services.items():
+            for key, node in definition.items():
+                if key.startswith("x-"):
+                    check_extensions(node, f"services.{name}.{key}")
+        return collected
+
+    def snapshot_env_file(self, path, *, required=True):
+        path = safe_path(path)
+        external = self.root not in path.parents
+        base = {"path": str(path), "required": required, "external": external}
+        if not path.exists():
+            if required or external:
+                fail("compose_environment_file_missing")
+            return {**base, "exists": False}
+        safe_path(path, file=True)
+
+        def identity(item):
+            return {
+                key: getattr(item, "st_" + key)
+                for key in (
+                    "dev",
+                    "ino",
+                    "uid",
+                    "gid",
+                    "mode",
+                    "nlink",
+                    "size",
+                    "mtime_ns",
+                    # Windows 3.14 lstat/fstat disagree on the deprecated ctime
+                    # alias. Use explicit creation time there; POSIX keeps the
+                    # change time that detects mode/owner changes as well.
+                    "ctime_ns" if os.name == "posix" else "birthtime_ns",
+                )
+            }
+
+        before = path.lstat()
+        if (
+            external
+            and os.name == "posix"
+            and (
+                before.st_uid != os.geteuid()
+                or before.st_gid != os.getegid()
+                or stat.S_IMODE(before.st_mode) not in {0o400, 0o600, 0o440, 0o640}
+            )
+        ):
+            fail("external_env_file_permissions_invalid")
+        if before.st_size > 4_194_304:
+            fail("compose_environment_file_limit")
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            if identity(os.fstat(stream.fileno())) != identity(before):
+                fail("compose_environment_file_changed")
+            sha, size = hashlib.sha256(), 0
+            while chunk := stream.read(65_536):
+                sha.update(chunk)
+                size += len(chunk)
+                if size > 4_194_304:
+                    fail("compose_environment_file_limit")
+            safe_path(path, file=True)
+            if identity(os.fstat(stream.fileno())) != identity(before) or identity(
+                path.lstat()
+            ) != identity(before):
+                fail("compose_environment_file_changed")
+        return {**base, "exists": True, "sha256": sha.hexdigest(), **identity(before)}
+
+    def check_env_snapshot(self, snapshot):
+        if (
+            self.snapshot_env_file(Path(snapshot["path"]), required=snapshot["required"])
+            != snapshot
+        ):
+            fail("compose_environment_file_changed")
+
+    def verify_compose_proof(self):
+        if not self.state or not isinstance(self.state.get("compose_validation"), dict):
+            fail("compose_proof_missing")
+        report = self.state["compose_validation"]
+        directory = self.asset_dir / self.state["plan_sha256"]
+        proof_file = directory / "compose-environment-proof.json"
+        if report.get("proof_file") != str(proof_file) or not proof_file.exists():
+            fail("compose_proof_missing")
+        proof = read_json(proof_file, private=True)
+        if digest(proof_file.read_bytes()) != report.get("proof_sha256") or any(
+            proof.get(key) != value
+            for key, value in {
+                "schema": "cf-return-compose-proof/v1",
+                "request_sha256": self.request_hash,
+                "plan_sha256": self.state["plan_sha256"],
+            }.items()
+        ):
+            fail("compose_proof_changed")
+        for role in ("before", "candidate"):
+            path = Path(proof[role + "_file"])
+            if path.parent != directory or not path.exists():
+                fail("compose_proof_asset_mismatch")
+            safe_path(path, file=True, private=True)
+            if digest(path.read_bytes()) != proof[role + "_sha256"]:
+                fail("compose_proof_asset_mismatch")
+        live = safe_path(self.root / "docker-compose.prod.yml", file=True)
+        if digest(live.read_bytes()) not in {proof["before_sha256"], proof["candidate_sha256"]}:
+            fail("asset_changed_since_plan")
+        for snapshot in proof["files"]:
+            self.check_env_snapshot(snapshot)
 
     @contextlib.contextmanager
     def nginx_check_file(self, candidate):
@@ -1727,7 +1984,8 @@ def main(argv=None):
             if isinstance(error, EntryError)
             else "operation_failed_details_retained_privately"
         )
-        print(json.dumps({"error": code, "activation_allowed": False}), file=sys.stderr)
+        details = error.details if isinstance(error, EntryError) else {}
+        print(json.dumps({"error": code, **details, "activation_allowed": False}), file=sys.stderr)
         return 1
 
 
