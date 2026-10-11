@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16,<2.0",
+  "cryptography>=46,<47",
   "fastapi>=0.115,<1.0",
   "httpx>=0.28,<1.0",
   "psycopg[binary]>=3.2,<4.0",
@@ -29,6 +30,7 @@ cf-agent-delivery-worker = "cf_agent_gateway.runtime.delivery_worker:main"
 
 [project.optional-dependencies]
 dev = [
+  "aiohttp==3.14.3",
   "pytest>=8.3,<9.0",
   "pytest-cov>=6.0,<7.0",
   "ruff>=0.11,<1.0",

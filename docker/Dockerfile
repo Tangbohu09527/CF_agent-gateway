@@ -26,6 +26,7 @@ COPY alembic.ini ./
 COPY config ./config
 RUN install -d -o gateway -g gateway -m 0750 \
         /app/data /var/lib/cf-agent-gateway /run/cf-agent-gateway \
+    && install -d -o gateway -g gateway -m 0700 /var/lib/cf-agent-gateway/inbound-media \
     && chown -R gateway:gateway /app
 
 USER 10001:10001

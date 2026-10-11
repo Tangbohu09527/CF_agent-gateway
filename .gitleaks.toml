@@ -2,11 +2,25 @@
 useDefault = true
 
 [allowlist]
-description = "Synthetic opaque credentials used by recovery redaction tests"
+description = "Synthetic recovery test credentials and verified public pinned Git blob IDs"
 stopwords = [
   "A9m4N7q2R5s8",
   "B8n3P6r1S4t7",
   "C7p2Q5s8T3u6",
   "D6q1R4t7U2v5",
   "E5r8V3x6Y1z4",
+  # Public NousResearch/hermes-agent Git blob IDs at 4d55ca91656ac5f83e1506679b7f81e0238e5e16.
+  # These integrity assertions are not credentials; retain all secret detection rules.
+  "5c4a2bf4ae7ac21191cdac72631aaf08509c2d88",
+  "3976ff02de219fa0c0de6bb7919fbb51e8cffecc",
 ]
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Exact public Hermes 0f4a98f blob assertions in the official return probe"
+  condition = "AND"
+  paths = ['''^tests/hermes_return_probe/probe\.py$''']
+  regexTarget = "secret"
+  regexes = ['''^(5bd5e91fa2296f3c150a87845c047a6a69933c71|8b662cacbdf4a541c7b7b0c0eb8c953d0180001e)$''']

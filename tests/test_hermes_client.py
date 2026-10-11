@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 
@@ -25,6 +26,98 @@ API_KEY = "test-hermes-api-key"
 MODEL = "hermes-agent"
 USER_CONTENT = "Hello, Hermes"
 HERMES_THREAD_ID = "hermes-thread-001"
+
+
+def test_artifact_return_capability_is_backend_header_only():
+    context = {
+        "url": "https://gateway.test/internal/hermes/returns/42",
+        "authorization": "Bearer synthetic-task-only-capability",
+    }
+
+    def handler(request):
+        assert request.headers["X-CF-Artifact-Return-URL"] == context["url"]
+        assert request.headers["X-CF-Artifact-Return-Authorization"] == context["authorization"]
+        assert request.headers["Authorization"] == f"Bearer {API_KEY}"
+        assert json.loads(request.content) == {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": USER_CONTENT}],
+        }
+        assert all(value.encode() not in request.content for value in context.values())
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "completed",
+                        }
+                    }
+                ]
+            },
+            headers={
+                HERMES_SESSION_HEADER: HERMES_THREAD_ID,
+                "X-CF-Artifact-Return-Accepted": hashlib.sha256(
+                    context["authorization"].encode()
+                ).hexdigest(),
+            },
+        )
+
+    with hermes_client(handler) as client:
+        assert client.chat(USER_CONTENT, artifact_return_context=context).assistant_content == (
+            "completed"
+        )
+
+
+def test_artifact_return_cannot_send_capability_to_plain_lan_http():
+    calls = []
+    with (
+        HermesClient(
+            "http://192.0.2.10:8642",
+            API_KEY,
+            MODEL,
+            transport=httpx.MockTransport(lambda request: calls.append(request)),
+        ) as client,
+        pytest.raises(ValueError, match="verified TLS"),
+    ):
+        client.chat(
+            USER_CONTENT,
+            artifact_return_context={
+                "url": "https://gateway.test/internal/hermes/returns/1",
+                "authorization": "Bearer synthetic-task-capability",
+            },
+        )
+    assert not calls
+
+
+@pytest.mark.parametrize("ack", [None, "unrelated-request-ack"])
+def test_artifact_return_requires_request_bound_host_ack(ack):
+    context = {
+        "url": "https://gateway.test/internal/hermes/returns/42",
+        "authorization": "Bearer synthetic-task-only-capability",
+    }
+
+    def handler(request):
+        headers = {HERMES_SESSION_HEADER: HERMES_THREAD_ID}
+        if ack is not None:
+            headers["X-CF-Artifact-Return-Accepted"] = ack
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "claimed sent but unsupported host",
+                        }
+                    }
+                ]
+            },
+            headers=headers,
+        )
+
+    with hermes_client(handler) as client, pytest.raises(HermesResponseError):
+        client.chat(USER_CONTENT, artifact_return_context=context)
 
 
 def hermes_client(handler: Callable[[httpx.Request], httpx.Response]) -> HermesClient:

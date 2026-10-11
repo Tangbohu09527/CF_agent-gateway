@@ -18,6 +18,7 @@ from cf_agent_gateway.adapters.wechat import (
 from cf_agent_gateway.config import (
     DatabaseSettings,
     HermesSettings,
+    InboundMediaSettings,
     RuntimeSettings,
     Settings,
     WechatSettings,
@@ -264,9 +265,12 @@ def test_runtime_assembly_and_cleanup_order(
         events.append("checkpoint_store")
         return checkpoint_store_marker
 
-    def sink_factory(factory: object, *, v2_routing_enabled: bool) -> object:
+    def sink_factory(
+        factory: object, *, v2_routing_enabled: bool, inbound_media: InboundMediaSettings
+    ) -> object:
         assert callable(factory)
         assert v2_routing_enabled is expected_routing_flag
+        assert inbound_media is settings.inbound_media
         events.append("sink")
         return sink_marker
 

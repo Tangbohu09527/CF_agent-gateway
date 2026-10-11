@@ -7,7 +7,7 @@ from contextlib import suppress
 from io import BytesIO
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -62,7 +62,25 @@ class ArtifactRepository:
         content: ArtifactContent | None = None,
         expected_size: int | None = None,
         expected_sha256: str | None = None,
+        artifact_id: str | None = None,
+        commit: bool = True,
     ) -> Artifact:
+        """Create an artifact, optionally inside a caller-owned transaction.
+
+        A supplied ID is an internal idempotency anchor, not a storage path. With
+        ``commit=False`` the caller owns commit/rollback and any enclosing claim
+        fence. A rollback can leave private orphan content, but no READY row.
+        """
+        if not isinstance(commit, bool):
+            raise ArtifactValidationError("commit must be a boolean")
+        if artifact_id is None:
+            artifact_id = str(uuid4())
+        else:
+            try:
+                if not isinstance(artifact_id, str) or str(UUID(artifact_id)) != artifact_id:
+                    raise ValueError()
+            except ValueError:
+                raise ArtifactValidationError("artifact_id must be a canonical UUID") from None
         response_id = _required_string(response_id, "response_id", max_length=255)
         artifact_kind = _artifact_kind(kind)
         filename = _safe_filename(filename)
@@ -74,7 +92,6 @@ class ArtifactRepository:
         if content is None and (expected_size is not None or expected_sha256 is not None):
             raise ArtifactValidationError("expected size and SHA-256 require artifact content")
 
-        artifact_id = str(uuid4())
         artifact = Artifact(
             artifact_id=artifact_id,
             response_id=response_id,
@@ -88,9 +105,13 @@ class ArtifactRepository:
         )
         self._session.add(artifact)
         try:
-            self._session.commit()
+            if commit:
+                self._session.commit()
+            else:
+                self._session.flush()
         except Exception:
-            self._session.rollback()
+            if commit:
+                self._session.rollback()
             raise
 
         if content is None:
@@ -100,6 +121,7 @@ class ArtifactRepository:
             content,
             expected_size=expected_size,
             expected_sha256=expected_sha256,
+            commit=commit,
         )
 
     def get(self, artifact_id: str) -> Artifact | None:
@@ -127,7 +149,31 @@ class ArtifactRepository:
         *,
         expected_size: int | None = None,
         expected_sha256: str | None = None,
+        commit: bool = True,
     ) -> Artifact:
+        if not isinstance(commit, bool):
+            raise ArtifactValidationError("commit must be a boolean")
+
+        def mark_failed(*, published_storage_key: str | None = None) -> None:
+            if commit:
+                self._mark_failed_if_created(artifact_id)
+            else:
+                failed_status = Artifact.status == ArtifactStatus.CREATED
+                if published_storage_key is not None:
+                    failed_status |= (Artifact.status == ArtifactStatus.READY) & (
+                        Artifact.storage_key == published_storage_key
+                    )
+                self._session.execute(
+                    update(Artifact)
+                    .where(
+                        Artifact.artifact_id == artifact_id,
+                        failed_status,
+                    )
+                    .values(status=ArtifactStatus.FAILED)
+                    .execution_options(synchronize_session=False)
+                )
+                self._session.flush()
+
         artifact = self._required_artifact(artifact_id)
         self._require_status(artifact, ArtifactStatus.CREATED, operation="mark_ready")
         if expected_size is not None:
@@ -137,7 +183,7 @@ class ArtifactRepository:
 
         immediate_size = _bytes_like_size(content)
         if immediate_size is not None and immediate_size > self._max_artifact_bytes:
-            self._mark_failed_if_created(artifact.artifact_id)
+            mark_failed()
             raise ArtifactSizeLimitError(self._max_artifact_bytes)
 
         ready_storage_key = _ready_storage_key(artifact.artifact_id)
@@ -154,12 +200,12 @@ class ArtifactRepository:
         except ArtifactError:
             if "staged" in locals():
                 _best_effort_unlink(staged)
-            self._mark_failed_if_created(artifact.artifact_id)
+            mark_failed()
             raise
         except Exception:
             if "staged" in locals():
                 _best_effort_unlink(staged)
-            self._mark_failed_if_created(artifact.artifact_id)
+            mark_failed()
             raise ArtifactStorageError("artifact content could not be stored") from None
 
         statement = (
@@ -179,7 +225,8 @@ class ArtifactRepository:
         try:
             result = self._session.execute(statement)
             if result.rowcount != 1:
-                self._session.rollback()
+                if commit:
+                    self._session.rollback()
                 _best_effort_unlink(staged)
                 current = self._required_artifact(artifact.artifact_id)
                 raise ArtifactStateError(
@@ -190,23 +237,31 @@ class ArtifactRepository:
                 os.replace(staged, destination)
                 _fsync_directory(destination.parent)
             except (ArtifactStorageError, OSError):
-                self._session.rollback()
+                if commit:
+                    self._session.rollback()
                 _best_effort_unlink(staged)
                 _best_effort_unlink(destination)
-                self._mark_failed_if_created(artifact.artifact_id)
+                mark_failed(published_storage_key=ready_storage_key)
                 raise ArtifactStorageError("artifact content could not be stored") from None
             try:
-                self._session.commit()
+                if commit:
+                    self._session.commit()
+                else:
+                    self._session.flush()
             except Exception:
-                self._session.rollback()
-                self._cleanup_uncommitted_publish(
-                    artifact.artifact_id,
-                    ready_storage_key,
-                    destination,
-                )
+                if commit:
+                    self._session.rollback()
+                    self._cleanup_uncommitted_publish(
+                        artifact.artifact_id,
+                        ready_storage_key,
+                        destination,
+                    )
+                else:
+                    _best_effort_unlink(destination)
                 raise
         except Exception:
-            self._session.rollback()
+            if commit:
+                self._session.rollback()
             _best_effort_unlink(staged)
             raise
         return self._required_artifact(artifact.artifact_id)

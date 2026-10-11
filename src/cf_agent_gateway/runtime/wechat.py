@@ -116,6 +116,7 @@ def run_wechat_poll_once(
         sink = SessionFactoryMessageStoreAdmissionSink(
             session_factory,
             v2_routing_enabled=settings.runtime.v2_routing_enabled,
+            inbound_media=settings.inbound_media,
         )
         client_initialization_failed = False
         try:

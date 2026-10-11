@@ -1,0 +1,152 @@
+{
+  "fixture_schema": "cf-inbound-host-binding-fixture/v1",
+  "protocol_schema": "cf-inbound-host-binding/v1",
+  "synthetic_only": true,
+  "notes": [
+    "All identifiers, credentials, URLs and timestamps below are public synthetic examples, never production values.",
+    "The fixed timeline is 2026-09-28T00:00:00Z. It does not extend any real lease and must be replaced by real Gateway response values.",
+    "The model receives attachment IDs only. Resolve responses and Authorization values belong only in authenticated host memory.",
+    "The host must establish events and observe a running snapshot before using the existing FileBridge downloader.",
+    "The descriptor expires later than the fixed 30-second host lease. The earlier host lease and active Dispatch always bound permission."
+  ],
+  "resolve": {
+    "request": {
+      "method": "POST",
+      "path": "/internal/hermes/inbound-bindings/resolve",
+      "headers": {
+        "Authorization": "Bearer synthetic-only-host-service-token-not-a-credential",
+        "Content-Type": "application/json"
+      },
+      "json": {
+        "schema": "cf-inbound-host-binding/v1",
+        "session_id": "cfgw-00000000000040008000000000000001",
+        "task_id": "cfgw-00000000000040008000000000000001",
+        "host_instance_id": "synthetic-instance-1",
+        "host_nonce": "synthetic-owner-nonce-not-a-secret-00000001"
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {"Cache-Control": "no-store"},
+      "json": {
+        "schema": "cf-inbound-host-binding/v1",
+        "binding_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "cfgw-00000000000040008000000000000001",
+        "task_id": "cfgw-00000000000040008000000000000001",
+        "host_instance_id": "synthetic-instance-1",
+        "host_nonce": "synthetic-owner-nonce-not-a-secret-00000001",
+        "dispatch_id": 1,
+        "claim_epoch": "00000000-0000-4000-8000-000000000002",
+        "message_id": 1,
+        "thread_id": "00000000-0000-4000-8000-000000000003",
+        "enterprise_identity_id": "00000000-0000-4000-8000-000000000004",
+        "profile_reference": "fixture-profile",
+        "profile_revision": 1,
+        "lease_valid_until": "2026-09-28T00:00:30+00:00",
+        "state": "running",
+        "budget_scope": "message:1:attachment:1",
+        "attachments": [
+          {
+            "schema": "cf-inbound-read/v1",
+            "message_id": 1,
+            "attachment_id": 1,
+            "thread_id": "00000000-0000-4000-8000-000000000003",
+            "enterprise_identity_id": "00000000-0000-4000-8000-000000000004",
+            "url": "https://gateway.example.invalid/inbound-media/1/content",
+            "authorization": "Bearer synthetic-only-read-grant-not-a-credential",
+            "expires_at": "2026-09-28T01:01:00+00:00",
+            "download_policy": {
+              "max_attempts": 4,
+              "total_timeout_seconds": 30,
+              "retryable_status_codes": [503],
+              "retry_after_seconds": 1
+            },
+            "size": 17,
+            "sha256": "04686698f859c14a6169cf654934af57729f46f2cb54f1f5ccb815725fd63d6f",
+            "mime_type": "image/jpeg",
+            "filename": "fixture.jpg",
+            "declared_quality": null,
+            "original_comparison": "not_checked",
+            "formal_archive": false
+          }
+        ],
+        "event_sequence": 1
+      }
+    }
+  },
+  "events": {
+    "request": {
+      "method": "GET",
+      "path": "/internal/hermes/inbound-bindings/00000000-0000-4000-8000-000000000001/events",
+      "headers": {
+        "Authorization": "Bearer synthetic-only-host-service-token-not-a-credential",
+        "X-CF-Session-Id": "cfgw-00000000000040008000000000000001",
+        "X-CF-Task-Id": "cfgw-00000000000040008000000000000001",
+        "X-CF-Host-Instance-Id": "synthetic-instance-1",
+        "X-CF-Host-Nonce": "synthetic-owner-nonce-not-a-secret-00000001",
+        "X-CF-Claim-Epoch": "00000000-0000-4000-8000-000000000002",
+        "Last-Event-ID": "1"
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store"},
+      "snapshots": [
+        {
+          "id": "1",
+          "event": "binding",
+          "data": {
+            "schema": "cf-inbound-host-binding/v1",
+            "binding_id": "00000000-0000-4000-8000-000000000001",
+            "claim_epoch": "00000000-0000-4000-8000-000000000002",
+            "host_instance_id": "synthetic-instance-1",
+            "host_nonce": "synthetic-owner-nonce-not-a-secret-00000001",
+            "sequence": 1,
+            "state": "running",
+            "lease_valid_until": "2026-09-28T00:00:30+00:00",
+            "reason": null
+          }
+        },
+        {
+          "id": "2",
+          "event": "binding",
+          "data": {
+            "schema": "cf-inbound-host-binding/v1",
+            "binding_id": "00000000-0000-4000-8000-000000000001",
+            "claim_epoch": "00000000-0000-4000-8000-000000000002",
+            "host_instance_id": "synthetic-instance-1",
+            "host_nonce": "synthetic-owner-nonce-not-a-secret-00000001",
+            "sequence": 2,
+            "state": "revoked",
+            "lease_valid_until": "2026-09-28T00:00:30+00:00",
+            "reason": "model_failed"
+          }
+        }
+      ]
+    }
+  },
+  "closed": {
+    "request": {
+      "method": "POST",
+      "path": "/internal/hermes/inbound-bindings/00000000-0000-4000-8000-000000000001/closed",
+      "headers": {"Authorization": "Bearer synthetic-only-host-service-token-not-a-credential", "Content-Type": "application/json"},
+      "json": {
+        "schema": "cf-inbound-host-binding/v1",
+        "session_id": "cfgw-00000000000040008000000000000001",
+        "task_id": "cfgw-00000000000040008000000000000001",
+        "host_instance_id": "synthetic-instance-1",
+        "host_nonce": "synthetic-owner-nonce-not-a-secret-00000001",
+        "claim_epoch": "00000000-0000-4000-8000-000000000002"
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {"Cache-Control": "no-store"},
+      "json": {
+        "schema": "cf-inbound-host-binding/v1",
+        "binding_id": "00000000-0000-4000-8000-000000000001",
+        "state": "closed"
+      }
+    }
+  }
+}

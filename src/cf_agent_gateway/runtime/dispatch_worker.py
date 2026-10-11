@@ -65,6 +65,7 @@ class HermesClientFactory(Protocol):
         api_key: str,
         model: str,
         timeouts: HermesTimeoutSettings,
+        ca_file: str | None = None,
     ) -> ClosableHermesChatClient: ...
 
 
@@ -87,7 +88,22 @@ class _OperationObservedHermesClient:
         thread_id: str | None = None,
         session_metadata: dict[str, object] | None = None,
         idempotency_key: str | None = None,
+        runtime_model: str | None = None,
+        runtime_provider: str | None = None,
+        runtime_model_options: dict[str, object] | None = None,
+        artifact_return_context: dict[str, str] | None = None,
     ) -> HermesChatResult:
+        runtime = {}
+        if artifact_return_context is not None:
+            runtime["artifact_return_context"] = artifact_return_context
+        if runtime_model is not None:
+            runtime.update(
+                {
+                    "runtime_model": runtime_model,
+                    "runtime_provider": runtime_provider,
+                    "runtime_model_options": runtime_model_options,
+                }
+            )
         try:
             result = self._client.chat(
                 content,
@@ -97,12 +113,27 @@ class _OperationObservedHermesClient:
                 thread_id=thread_id,
                 session_metadata=session_metadata,
                 idempotency_key=idempotency_key,
+                **runtime,
             )
         except Exception:
             self._notify(False)
             raise
         self._notify(True)
         return result
+
+    def prepare_inbound_session(self, session_id: str, **kwargs) -> None:
+        try:
+            return self._client.prepare_inbound_session(session_id, **kwargs)
+        except Exception:
+            self._notify(False)
+            raise
+
+    def verify_inbound_session_tip(self, session_id: str) -> None:
+        try:
+            return self._client.verify_inbound_session_tip(session_id)
+        except Exception:
+            self._notify(False)
+            raise
 
     def _notify(self, succeeded: bool) -> None:
         with suppress(Exception):
@@ -132,11 +163,16 @@ def build_dispatch_worker(
             observed_client,
             context_access_policy=EnabledContextAccessPolicy(),
             available_tools=HERMES_CONTEXT_TOOL_NAMES,
+            inbound_media=settings.inbound_media,
+            host_binding=settings.host_binding,
+            artifact_return=settings.artifact_return,
         ),
         lease_seconds=settings.worker.lease_seconds,
         retry_limit=settings.worker.retry_limit,
         response_processor_factory=ResponsePersistenceProcessor,
         reconcile_persisted_responses=True,
+        artifact_return=settings.artifact_return,
+        artifact_storage_root=settings.artifact.storage_root,
     )
 
 
@@ -177,6 +213,7 @@ def run_dispatch_worker(
                 api_key=api_key,
                 model=settings.hermes.model,
                 timeouts=settings.hermes.timeouts,
+                **({"ca_file": settings.hermes.ca_file} if settings.hermes.ca_file else {}),
             )
         except Exception:
             client_initialization_failed = True

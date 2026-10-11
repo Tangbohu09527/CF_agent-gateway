@@ -11,6 +11,7 @@ import json
 import math
 import os
 import socket
+import ssl
 from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ import yaml
 from cf_agent_gateway.config import HermesSettings, load_settings
 from cf_agent_gateway.hermes.client import HermesClient
 from cf_agent_gateway.hermes.errors import HermesAPIError, HermesError
+from cf_agent_gateway.hermes.tls import verified_ssl_context
 from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 
 
@@ -72,13 +74,21 @@ def diagnose(
     parsed = urlsplit(settings.base_url)
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        with socket.create_connection((parsed.hostname, port), timeout=timeout):
-            pass
+        tls_context = verified_ssl_context(settings.ca_file) if parsed.scheme == "https" else None
+    except ValueError:
+        return _failed(result, "configuration", "hermes_ca_bundle_invalid")
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout) as connection:
+            if tls_context is not None:
+                with tls_context.wrap_socket(connection, server_hostname=parsed.hostname):
+                    pass
+    except ssl.SSLError:
+        return _failed(result, "network", "tls_verification_failed")
     except TimeoutError:
         return _failed(result, "network", "connect_timeout")
     except OSError:
         return _failed(result, "network", "connect_failed")
-    result["network"] = "tcp_connected"
+    result["network"] = "tls_verified" if tls_context is not None else "tcp_connected"
     if not (check_auth or allow_model_call):
         result["ok"] = True
         return result
@@ -95,7 +105,12 @@ def diagnose(
     # Reuse the production client's validation before creating any HTTP request.
     try:
         client = HermesClient(
-            settings.base_url, api_key, settings.model, timeouts=probe_timeouts, transport=transport
+            settings.base_url,
+            api_key,
+            settings.model,
+            timeouts=probe_timeouts,
+            ca_file=settings.ca_file,
+            transport=transport,
         )
     except (HermesError, ValueError):
         return _failed(result, "configuration", "hermes_api_key_or_client_invalid")
@@ -146,6 +161,7 @@ def diagnose(
                 "rejected-probe-" + uuid4().hex,
                 settings.model,
                 timeouts=probe_timeouts,
+                ca_file=settings.ca_file,
                 transport=transport,
             ) as invalid_client:
                 invalid_client.chat(content, **invocation)
@@ -206,6 +222,7 @@ def _check_auth(
             transport=transport,
             trust_env=False,
             follow_redirects=False,
+            verify=verified_ssl_context(settings.ca_file),
         ) as client:
             invalid = client.get(
                 "v1/models",

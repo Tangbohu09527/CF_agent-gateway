@@ -6,6 +6,7 @@ from contextlib import suppress
 from sqlalchemy.orm import Session, sessionmaker
 
 from cf_agent_gateway.adapters.wechat import MessageSinkDisposition, NormalizedWechatMessage
+from cf_agent_gateway.config import InboundMediaSettings
 from cf_agent_gateway.hermes import HermesDispatcher
 from cf_agent_gateway.ingestion.models import MessageIngestionOutcome
 from cf_agent_gateway.ingestion.service import AdmissionRequestResolver, MessageAdmissionService
@@ -45,8 +46,10 @@ class SessionFactoryMessageStoreAdmissionSink:
         *,
         v2_routing_enabled: bool = False,
         hermes_dispatcher_factory: Callable[[Session], HermesDispatcher] | None = None,
+        inbound_media: InboundMediaSettings | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._inbound_media = inbound_media
         self._request_resolver = request_resolver
         self._hermes_dispatcher_factory = hermes_dispatcher_factory
         self._v2_routing_enabled = v2_routing_enabled
@@ -78,6 +81,7 @@ class SessionFactoryMessageStoreAdmissionSink:
                 request_resolver=self._request_resolver,
                 v2_routing_enabled=self._v2_routing_enabled,
                 hermes_dispatcher=hermes_dispatcher,
+                inbound_media=self._inbound_media,
             ).process(message)
         except Exception:
             # Preserve the processing error even if cleanup also encounters a failure.

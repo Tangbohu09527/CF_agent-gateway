@@ -35,11 +35,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Ruff format check
+        run: ruff format --diff .
+
       - name: Ruff lint
         run: ruff check .
-
-      - name: Ruff format check
-        run: ruff format --check .
 
       - name: Validate UTF-8 and local Markdown links
         shell: python
@@ -166,8 +166,60 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Run host handoff HTTP regression
+        run: >-
+          python -m pytest -q
+          tests/test_inbound_media_integration.py
+          tests/test_host_binding_http.py
+          tests/test_host_binding_runtime.py
+          tests/test_host_binding_fixture.py
+          --basetemp="${RUNNER_TEMP}/pytest-host-handoff"
+
+      - name: Prepare isolated Nginx deployment regression
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends nginx-light
+
+      - name: Prepare checksum-pinned standalone Compose compatibility binaries
+        run: |
+          directory="${RUNNER_TEMP}/return-compose-official"
+          install -d -m 0700 "${directory}"
+          for version in 2.26.1 2.39.4; do
+            case "${version}" in
+              2.26.1) expected=2f61856d1b8c9de29ffdaedaa1c6d0a5fc5c79da45068f1f4310feed8d3a3f61 ;;
+              2.39.4) expected=7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4 ;;
+            esac
+            binary="${directory}/docker-compose-v${version}"
+            curl --fail --location --retry 3 \
+              "https://github.com/docker/compose/releases/download/v${version}/docker-compose-linux-x86_64" \
+              --output "${binary}"
+            printf '%s  %s\n' "${expected}" "${binary}" | sha256sum --check --strict
+            chmod 0700 "${binary}"
+            test "$("${binary}" version --short)" = "${version}"
+          done
+          echo "CF_RETURN_COMPOSE_DIRECTORY=${directory}" >> "${GITHUB_ENV}"
+
       - name: Run full test suite
+        env:
+          CF_RETURN_REQUIRE_NGINX: "1"
+          CF_RETURN_REQUIRE_COMPOSE: "1"
         run: python -m pytest -q --basetemp="${RUNNER_TEMP}/pytest-full"
+
+      - name: Preserve real pinned Compose compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: return-compose-compatibility
+          path: ${{ runner.temp }}/pytest-full/**/compose-compatibility-evidence.json
+          if-no-files-found: warn
+
+      - name: Preserve isolated Nginx return evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-return-nginx
+          path: ${{ runner.temp }}/pytest-full/**/nginx-isolated-evidence.json
+          if-no-files-found: warn
 
       - name: Run migration fixtures explicitly
         run: >-

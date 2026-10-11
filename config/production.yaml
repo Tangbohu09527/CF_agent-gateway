@@ -18,6 +18,14 @@ api:
 artifact:
   storage_root: /var/lib/cf-agent-gateway/artifacts
 
+# Enable only after provisioning the private 0700 staging directory and an origin
+# reachable from the AI host. This cache is not the FileBrowser formal archive.
+inbound_media:
+  enabled: false
+  staging_root: /var/lib/cf-agent-gateway/inbound-media
+  public_base_url: ""
+  wait_seconds: 900
+
 runtime:
   polling_interval_seconds: 3
   v2_routing_enabled: true
