@@ -1,5 +1,10 @@
 # Hermes `.env` 监听覆盖：从启动失败现场接续
 
+**本页第 0–2 节已不适用于最新现场，只保留历史过程。** 操作者已完成 Windows 回退，
+服务器原文件也已恢复，但外层停在 rolling_back。当前直接使用
+[服务器回退收尾与旧核心恢复](server-rollback-resume.md)，不要再从 applied 状态开始。
+恢复后新的功能部署才从本页第 3 节继续。
+
 适用起点为 `f9c601cba25cbc5459bb03519d1954ae55995ded` / PR #14，
 deployment `cf-return-site-readonly-20261007-r2`。本说明交给操作者，**没有执行现场操作**。
 以操作者提供的 2026-10-11 快照为准：两端已 applied，服务器四应用最后确认停止，
@@ -139,7 +144,7 @@ print(json.dumps(entry.stopped()))
 PY
 docker --context default compose --project-directory /opt/cf-agent-gateway \
   --env-file /opt/cf-agent-gateway/.env --profile worker \
-  -f /opt/cf-agent-gateway/docker-compose.prod.yml run --rm --no-deps --pull never -T \
+  -f /opt/cf-agent-gateway/docker-compose.prod.yml run --rm --no-deps -T \
   -e 'PGOPTIONS=-c default_transaction_read_only=on' --entrypoint python gateway -c '
 import json
 from cf_agent_gateway.config import load_settings
@@ -162,7 +167,7 @@ try:
     print(json.dumps({k:r[k] for k in ("checked_at","dispatch","delivery")}))
 finally:
     e.dispose()
-' > "$RECOVERY/current-queues.json"
+' < /dev/null > "$RECOVERY/current-queues.json"
 old_server quiesce > "$RECOVERY/old-server-quiesce-output.json"
 cp --no-clobber "$OLD_STATE/peer-receipt.json" "$RECOVERY/server-quiesced-f9c601cb.json"
 sha256sum "$RECOVERY/server-quiesced-f9c601cb.json"

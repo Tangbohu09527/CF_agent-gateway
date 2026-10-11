@@ -40,8 +40,10 @@ STAGES = (
     "start",
     "verify",
     "rollback",
+    "complete-rollback",
     "start-old",
 )
+RECOVERY_RELEASE = "f9c601cba25cbc5459bb03519d1954ae55995ded"
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 CONTAINER = re.compile(r"[0-9a-f]{64}\Z")
@@ -172,6 +174,7 @@ class Commands:
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
         }
         process = subprocess.Popen(
             [str(value) for value in arguments],
@@ -338,6 +341,10 @@ class ServerEntry:
         return self.commands.run(arguments, **kwargs)
 
     def docker(self, arguments, **kwargs):
+        if arguments and arguments[0] == "run":
+            # This is Docker run, not Compose run (2.26.1 has no run --pull).
+            # All referenced images must already be locally inspected.
+            arguments = ["run", "--pull=never", *arguments[1:]]
         return self.run(["docker", "--context", "default", *arguments], **kwargs)
 
     def compose(self, arguments, *, nginx=False, timeout=60):
@@ -878,10 +885,38 @@ class ServerEntry:
         self.persist("applied")
         return self.receipt("applied")
 
-    def check_rendered(self, image):
+    def check_rendered(self, image, *, baseline=False):
         value = json.loads(self.compose(["config", "--format", "json"]))
         services = value.get("services", {})
-        if any(services.get(service, {}).get("image") != image for service in APPS):
+        if baseline:
+            proof = self.verify_compose_proof()
+            recorded = self.state.get("baseline", {})
+            if (
+                image != self.request["baseline_image"]
+                or set(recorded) != set(APPS)
+                or any(row.get("image") != image for row in recorded.values())
+            ):
+                fail("baseline_record_mismatch")
+            # The private before file and its interpolation environment are
+            # already bound to the original plan. Never reconstruct that
+            # record from today's tag, container, or unbound validation copy.
+            original = self.candidate_config(Path(proof["before_file"]))
+            references = {
+                name: original.get("services", {}).get(name, {}).get("image") for name in APPS
+            }
+            if any(
+                not isinstance(reference, str)
+                or not reference
+                or services.get(name, {}).get("image") != reference
+                for name, reference in references.items()
+            ):
+                fail("baseline_image_reference_changed")
+            for reference in set(references.values()):
+                # image inspect is strictly local; missing images fail, never pull.
+                if self.image(reference).get("Id") != image:
+                    fail("baseline_image_identity_mismatch")
+            self.verify_compose_proof()
+        elif any(services.get(service, {}).get("image") != image for service in APPS):
             fail("rendered_four_images_mismatch")
         for service, definition in services.items():
             environment = definition.get("environment", {})
@@ -1260,6 +1295,7 @@ class ServerEntry:
             fail("asset_changed_since_plan")
         for snapshot in proof["files"]:
             self.check_env_snapshot(snapshot)
+        return proof
 
     @contextlib.contextmanager
     def nginx_check_file(self, candidate):
@@ -1327,11 +1363,13 @@ class ServerEntry:
             if old
             else {"applied", "starting", "started"}
         )
+        if old:
+            self.verify_restored_assets()
         self.peer("rolled_back" if old else "tls_ready")
         completed_phase = "old_started" if old else "started"
         if self.state["phase"] == completed_phase:
             expected_image = self.request["baseline_image" if old else "candidate_image"]
-            self.check_rendered(expected_image)
+            self.check_rendered(expected_image, baseline=old)
             rows = self.containers()
             if (
                 any(row["image"] != expected_image for row in rows.values())
@@ -1349,7 +1387,7 @@ class ServerEntry:
         if not self.dispatch_start_safe(queues):
             fail("queued_work_blocks_dispatch_start")
         image = self.request["baseline_image" if old else "candidate_image"]
-        self.check_rendered(image)
+        self.check_rendered(image, baseline=old)
         self.nginx_test()
         self.persist("old_starting" if old else "starting")
         # Compose 2.26.1 create has no --no-deps. up --no-start follows the
@@ -1362,6 +1400,9 @@ class ServerEntry:
             rows[s]["running"] for s in GATED
         ):
             fail("prepared_container_boundary_invalid")
+        if old:
+            self.verify_restored_assets()
+            self.check_rendered(image, baseline=True)
         self.docker(["start", rows["gateway"]["id"]])
         deadline = time.monotonic() + 90
         while True:
@@ -1691,6 +1732,196 @@ print(json.dumps({'path':str(p),'exists':meta is not None,
             "activation_allowed": False,
         }
 
+    def recovery_preflight(self, controller_commit, plan_sha, stage):
+        """Bind a new controller to the unchanged, explicitly supported old release."""
+        if stage not in {"complete-rollback", "start-old"}:
+            fail("recovery_stage_not_supported")
+        if (
+            self.request["release_commit"] != RECOVERY_RELEASE
+            or not COMMIT.fullmatch(controller_commit or "")
+            or controller_commit == RECOVERY_RELEASE
+            or not re.fullmatch(r"[0-9a-f]{64}", plan_sha or "")
+        ):
+            fail("recovery_binding_required")
+        if (
+            self.state is None
+            or self.state.get("plan_sha256") != plan_sha
+            or self.state.get("release_commit") != RECOVERY_RELEASE
+            or self.state.get("deployment_id") != self.request["deployment_id"]
+        ):
+            fail("recovery_binding_mismatch")
+        script = safe_path(Path(__file__).resolve(), file=True)
+        controller = script.parent.parent
+        if controller == self.release or self.release in controller.parents:
+            fail("separate_recovery_checkout_required")
+        if (
+            self.run(["git", "-C", str(controller), "rev-parse", "HEAD"]) != controller_commit
+            or self.run(
+                ["git", "-C", str(controller), "status", "--porcelain", "--untracked-files=normal"]
+            )
+            or self.run(
+                [
+                    "git",
+                    "-C",
+                    str(controller),
+                    "show",
+                    controller_commit + ":deploy/prepare-return-server.py",
+                ]
+            )
+            != script.read_text(encoding="utf-8").strip()
+        ):
+            fail("recovery_controller_not_fixed")
+        self.run(
+            [
+                "git",
+                "-C",
+                str(controller),
+                "merge-base",
+                "--is-ancestor",
+                RECOVERY_RELEASE,
+                controller_commit,
+            ]
+        )
+        self.recovery_controller = {
+            "commit": controller_commit,
+            "script_sha256": digest(script.read_bytes()),
+        }
+        # These checks still use the OLD request.release_root and OLD immutable
+        # candidate image, including its revision label and packaged asset code.
+        self.preflight()
+        self.verify_restored_assets()
+        if (
+            stage == "start-old"
+            and self.state.get("rollback_completion", {}).get("controller")
+            != self.recovery_controller
+        ):
+            fail("recovery_completion_required")
+
+    def verify_restored_assets(self):
+        """Read the original v1 journal without invoking its no-op rollback fast path."""
+        proof = self.verify_compose_proof()
+        plan_sha = self.state["plan_sha256"]
+        directory = self.asset_dir / plan_sha
+        manifest = read_json(directory / "manifest.json", private=True)
+        if manifest.get("state") != "rolled_back":
+            fail("rollback_journal_not_restored")
+        plan = dict(manifest["plan"])
+        saved_sha = plan.pop("plan_sha256")
+        # Asset v1 deliberately uses ordinary sorted JSON, unlike the compact
+        # outer server request hash. Preserve both existing wire algorithms.
+        if (
+            saved_sha != plan_sha
+            or digest(json.dumps(plan, sort_keys=True).encode()) != plan_sha
+            or plan.get("schema") != "cf-artifact-return/v1"
+            or plan.get("official_commit") != "0f4a98f87c17007b81500239d0bd5b9574027b73"
+            or plan.get("side") != "return-site-server"
+            or plan.get("request_sha256")
+            != digest(json.dumps(self.request, sort_keys=True).encode())
+        ):
+            fail("rollback_plan_mismatch")
+        paths = {
+            str(self.root / "config/production.yaml"),
+            str(self.root / "docker-compose.prod.yml"),
+            str(self.nginx / "nginx.conf"),
+        }
+        changes = plan["changes"]
+        if len(changes) != 3 or {change["path"] for change in changes} != paths:
+            fail("rollback_plan_mismatch")
+        for index, change in enumerate(changes):
+            for suffix in ("before", "after"):
+                backup = safe_path(directory / f"{index}.{suffix}", file=True, private=True)
+                if digest(backup.read_bytes()) != change[suffix + "_sha256"]:
+                    fail("rollback_asset_mismatch")
+            # Rollback preserves the original owner. Accept only the service
+            # identity for its own live configuration, as the runtime does;
+            # journal backups and Compose remain private/controller-owned.
+            service_uids = {
+                str(self.root / "config/production.yaml"): 10001,
+                str(self.nginx / "nginx.conf"): 101,
+            }
+            current = safe_path(
+                change["path"], file=True, service_uid=service_uids.get(change["path"])
+            )
+            if digest(current.read_bytes()) != change["before_sha256"]:
+                fail("rollback_asset_mismatch")
+            if current == self.root / "docker-compose.prod.yml" and (
+                proof["before_file"] != str(directory / f"{index}.before")
+                or proof["before_sha256"] != change["before_sha256"]
+                or proof["candidate_file"] != str(directory / f"{index}.after")
+                or proof["candidate_sha256"] != change["after_sha256"]
+            ):
+                fail("rollback_plan_mismatch")
+        fixed = [item for item in plan["requirements"] if item.get("kind") == "fixed_release"]
+        if fixed != [
+            {
+                "kind": "fixed_release",
+                "commit": self.request["release_commit"],
+                "image": self.request["candidate_image"],
+                "rollback_image": self.request["baseline_image"],
+            }
+        ]:
+            fail("rollback_plan_mismatch")
+        references = [
+            item for item in plan["requirements"] if item.get("kind") == "unchanged_reference"
+        ]
+        expected_references = {
+            self.request["hermes_ca_file"],
+            str(self.root / ".env"),
+            str(self.nginx / "compose.yaml"),
+        }
+        if len(references) != 3 or {item["path"] for item in references} != expected_references:
+            fail("rollback_plan_mismatch")
+        for item in references:
+            if digest(safe_path(item["path"], file=True).read_bytes()) != item["sha256"]:
+                fail("rollback_reference_changed")
+        return {"plan_sha256": plan_sha, "files_match_original": True, "journal": "rolled_back"}
+
+    def complete_rollback(self):
+        """Finish only an already-restored rollback; never restore or stop anything."""
+        self.require_state({"rolling_back", "rolled_back"})
+        assets = self.verify_restored_assets()
+        before = self.stopped()
+        if any(row["image"] != self.request["baseline_image"] for row in before.values()):
+            fail("baseline_four_images_mismatch")
+        self.check_rendered(self.request["baseline_image"], baseline=True)
+        self.nginx_test()
+        self.verify_restored_assets()
+        self.check_rendered(self.request["baseline_image"], baseline=True)
+        if self.stopped() != before:
+            fail("container_identity_changed")
+        # Preserve original state/peer bytes as append-only evidence before the
+        # normal state-machine transition and normal v1 receipt emission.
+        for source in (self.state_path, self.state_dir / "peer-receipt.json"):
+            if not source.exists():
+                continue
+            raw = safe_path(source, file=True, private=True).read_bytes()
+            archive = self.state_dir / (
+                "rollback-before-" + source.stem + "-" + digest(raw) + ".json"
+            )
+            if archive.exists():
+                if safe_path(archive, file=True, private=True).read_bytes() != raw:
+                    fail("recovery_archive_conflict")
+            else:
+                descriptor = os.open(archive, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        self.persist(
+            "rolled_back",
+            rollback_completion={
+                **assets,
+                "containers": before,
+                "nginx_syntax_valid": True,
+                "controller": getattr(self, "recovery_controller", None),
+            },
+        )
+        return {
+            **self.receipt("rolled_back"),
+            "restart": "await_hermes_rolled_back_peer",
+            "assets_rewritten": False,
+        }
+
     def rollback(self):
         self.require_state(
             {
@@ -1709,7 +1940,8 @@ print(json.dumps({'path':str(p),'exists':meta is not None,
         self.stopped()
         self.persist("rolling_back")
         self.assets("rollback", writable=True, plan_sha=self.state["plan_sha256"])
-        self.check_rendered(self.request["baseline_image"])
+        self.verify_restored_assets()
+        self.check_rendered(self.request["baseline_image"], baseline=True)
         self.nginx_test()
         self.persist("rolled_back")
         return {
@@ -1918,6 +2150,12 @@ def main(argv=None):
     parser.add_argument("--release-commit", required=True)
     parser.add_argument("--candidate-image", required=True)
     parser.add_argument("--apply-authorized", action="store_true")
+    parser.add_argument(
+        "--controller-commit", help="Fixed new controller SHA for f9 rollback recovery only"
+    )
+    parser.add_argument(
+        "--expected-plan-sha256", help="Original reviewed server plan SHA for recovery"
+    )
     parser.add_argument("--release-root")
     parser.add_argument("--gateway-root", default="/opt/cf-agent-gateway")
     parser.add_argument("--nginx-root", default="/opt/cf-agent-gateway-https")
@@ -1968,7 +2206,14 @@ def main(argv=None):
             candidate_image=options.candidate_image,
         )
         with operation_lock(entry.state_dir):
-            entry.preflight()
+            if options.controller_commit:
+                entry.recovery_preflight(
+                    options.controller_commit, options.expected_plan_sha256, options.stage
+                )
+            elif options.stage == "complete-rollback" or options.expected_plan_sha256:
+                fail("recovery_binding_required")
+            else:
+                entry.preflight()
             if options.stage == "start-old":
                 result = entry.start(old=True)
             else:

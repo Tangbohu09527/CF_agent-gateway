@@ -388,7 +388,7 @@ def test_apply_secret_is_once_private_scoped_and_not_in_output(entry, monkeypatc
     monkeypatch.setattr(entry, "containers", lambda: rows(entry, running=False))
     calls = []
     monkeypatch.setattr(entry, "assets", lambda *a, **k: calls.append((a, k)) or {})
-    monkeypatch.setattr(entry, "check_rendered", lambda _: None)
+    monkeypatch.setattr(entry, "check_rendered", lambda _, **kwargs: None)
     monkeypatch.setattr(entry, "nginx_test", lambda: None)
     monkeypatch.setattr(entry, "prepare_artifact_root", lambda: None)
     result = entry.apply()
@@ -446,10 +446,11 @@ def test_rendered_secret_must_never_reach_workers_or_migration(entry, monkeypatc
 
 def test_rollback_keeps_gate_closed_and_requires_windows_rollback_before_start(entry, monkeypatch):
     initialize(entry, "applied")
+    monkeypatch.setattr(entry, "verify_restored_assets", lambda: None)
     monkeypatch.setattr(entry, "containers", lambda: rows(entry, running=False))
     calls = []
     monkeypatch.setattr(entry, "assets", lambda *a, **k: calls.append(a[0]) or {})
-    monkeypatch.setattr(entry, "check_rendered", lambda _: None)
+    monkeypatch.setattr(entry, "check_rendered", lambda _, **kwargs: None)
     monkeypatch.setattr(entry, "nginx_test", lambda: None)
     result = entry.rollback()
     assert calls == ["rollback"]
@@ -746,7 +747,7 @@ def test_start_creates_all_four_but_starts_only_core_then_recreates_https(entry,
     current = rows(entry, running=False, image=entry.request["candidate_image"])
     effects = []
     monkeypatch.setattr(entry, "containers", lambda: current)
-    monkeypatch.setattr(entry, "check_rendered", lambda _: None)
+    monkeypatch.setattr(entry, "check_rendered", lambda _, **kwargs: None)
     monkeypatch.setattr(entry, "nginx_test", lambda: None)
     monkeypatch.setattr(entry, "healthy_queues", lambda: entry.validate_health(health()))
     monkeypatch.setattr(entry, "nginx_definition", lambda: ("https", {}))
@@ -975,12 +976,13 @@ def test_completed_start_reemits_lost_receipt_readonly_and_refuses_changed_state
     entry, monkeypatch, old
 ):
     initialize(entry, "old_started" if old else "started")
+    monkeypatch.setattr(entry, "verify_restored_assets", lambda: None)
     peer(entry, "rolled_back" if old else "tls_ready")
     current = rows(entry, image=entry.request["baseline_image" if old else "candidate_image"])
     for service in ("worker", "delivery-worker"):
         current[service]["running"] = False
     monkeypatch.setattr(entry, "containers", lambda: current)
-    monkeypatch.setattr(entry, "check_rendered", lambda _: None)
+    monkeypatch.setattr(entry, "check_rendered", lambda _, **kwargs: None)
     monkeypatch.setattr(entry, "config_mounts", lambda *a, **k: None)
     monkeypatch.setattr(entry, "healthy_queues", lambda: entry.validate_health(health()))
     monkeypatch.setattr(entry, "compose", lambda *a, **k: pytest.fail("must not recreate services"))
@@ -1002,7 +1004,7 @@ def test_fresh_failed_queue_blocks_dispatch_after_api_start(entry, monkeypatch):
     fresh = entry.validate_health(health())
     fresh["dispatch"]["failed"] = 1
     monkeypatch.setattr(entry, "containers", lambda: current)
-    monkeypatch.setattr(entry, "check_rendered", lambda _: None)
+    monkeypatch.setattr(entry, "check_rendered", lambda _, **kwargs: None)
     monkeypatch.setattr(entry, "nginx_test", lambda: None)
     monkeypatch.setattr(entry, "compose", lambda *a, **k: "")
     monkeypatch.setattr(entry, "healthy_queues", lambda: fresh)

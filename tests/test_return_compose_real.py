@@ -288,6 +288,68 @@ def test_pinned_compose_original_failure_and_preserved_candidate_semantics(exerc
     )
 
 
+def test_real_compose_restored_local_tag_requires_original_reference_and_baseline_id(
+    exercise, monkeypatch, tmp_path
+):
+    entry, request = exercise["entry"], exercise["request"]
+    tag = "localhost/cf-agent-gateway:inbound-0ec54bf-build-few9m9fp"
+    project_env = exercise["root"] / ".env"
+    project_env.write_bytes(
+        project_env.read_bytes().replace(request["baseline_image"].encode(), tag.encode())
+    )
+    # Freeze the tag's original interpolation environment before making the
+    # candidate; both the original and restored models use actual Compose.
+    result = exercise["prepare"]()
+    report = entry.validate_candidates(result)
+    entry.state = {
+        "plan_sha256": result["plan_sha256"],
+        "compose_validation": report,
+        "baseline": {name: {"image": request["baseline_image"]} for name in site.APPS},
+    }
+    protected = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for root in (exercise["root"], entry.asset_dir)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    resolved_id = request["baseline_image"]
+    inspected = []
+
+    def image(reference):
+        inspected.append(reference)
+        assert reference == tag
+        return {"Id": resolved_id}
+
+    monkeypatch.setattr(entry, "image", image)
+    rendered = entry.check_rendered(request["baseline_image"], baseline=True)
+    assert all(rendered["services"][name]["image"] == tag for name in site.APPS)
+    assert inspected == [tag]
+    resolved_id = request["candidate_image"]
+    with pytest.raises(exercise["module"].EntryError, match="^baseline_image_identity_mismatch$"):
+        entry.check_rendered(request["baseline_image"], baseline=True)
+    assert inspected == [tag, tag]
+    assert all(
+        (path.read_bytes(), path.stat().st_mtime_ns) == before for path, before in protected.items()
+    )
+    assert not Path(request["signing_env_file"]).exists()
+    (tmp_path / "compose-compatibility-evidence.json").write_text(
+        json.dumps(
+            {
+                "scope": "actual Compose config; mocked local image inspect; no daemon/site access",
+                "version": exercise["version"],
+                "binary_sha256": hashlib.sha256(exercise["binary"].read_bytes()).hexdigest(),
+                "original_and_restored_local_tag": tag,
+                "baseline_id_accepted": True,
+                "wrong_id_rejected": True,
+                "protected_files_unchanged": True,
+                "validation": report,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
 @pytest.mark.parametrize(
     "fault",
     (

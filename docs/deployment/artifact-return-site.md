@@ -1,9 +1,9 @@
 # 附件返回的两端现场准备与受控切换
 
-2026-10-11 接续：操作者已确认两端 applied、Windows 启动后验收失败，
-服务器四应用最后确认停止。该状态应使用
-[`.env` 监听覆盖恢复步骤](hermes-env-loopback-recovery.md)，不能从下面的初始
-stop/apply 顺序重新开始。下文保留此前准备阶段的证据和通用入口说明。
+2026-10-11 最新接续：Windows 已回退并停止，服务器原文件已恢复、资产 journal 为
+rolled_back，但外层仍为 rolling_back。直接使用
+[原文件已恢复后的服务器收尾入口](server-rollback-resume.md)，不要重跑初始 stop/apply
+或上一版手册的停回/回退步骤。下文保留此前准备阶段的证据和通用入口说明。
 
 承接 `88f62cfefaf54a7d2c05ca1f916c2196f55491e7`，契约仍为
 `cf-artifact-return/v1`。本次只交付部署衔接，不改返回协议、不重跑获批模型样本。
