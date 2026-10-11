@@ -4,6 +4,10 @@
 `cf_artifact_return`。Gateway 和宿主插件均默认关闭。此文与
 [字节交接契约](artifact-return-contract.md)共同使用；不是现场部署完成记录。
 
+最新现场状态见 [2026-10-11 用户终端回传摘要](../validation/2026-10-11-gateway-site-status.md)：
+固定 d9 候选与双端新计划已准备，未切换，CFserver 重启后待复核。下文为实现与既有
+验证说明，不替代当前状态或微信附件实收证据。
+
 ## 固定官方入口与最小适配
 
 兼容目标为官方 Hermes `0f4a98f87c17007b81500239d0bd5b9574027b73`。

@@ -11,6 +11,9 @@ Markdown 图片链接或图片分析文字解释为附件，也不改变普通�
 [官方宿主接入](hermes-artifact-return.md)和
 [统一入口启用／回退](hermes-artifact-return-enablement.md)。
 这些代码与隔离验证不表示现用 Hermes 或 Gateway 已部署。
+最新停点与接管导航见 [2026-10-11 用户终端回传摘要](../validation/2026-10-11-gateway-site-status.md)：
+新计划通过、未切换、CFserver 重启后待复核；文件 API 文字回复、微信入站原件和
+原聊天附件实收分别取证。
 
 ## 已有能力和补齐的边界
 

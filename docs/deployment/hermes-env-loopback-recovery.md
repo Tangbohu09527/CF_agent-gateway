@@ -1,13 +1,25 @@
 # Hermes `.env` 监听覆盖：从启动失败现场接续
 
-**本页第 0–2 节已不适用于最新现场，只保留历史过程。** 操作者已完成 Windows 回退，
-服务器原文件也已恢复，但外层停在 rolling_back。当前直接使用
-[服务器回退收尾与旧核心恢复](server-rollback-resume.md)，不要再从 applied 状态开始。
-恢复后新的功能部署才从本页第 3 节继续。
+**2026-10-11 最新停点：新计划通过、未切换、重启后待复核。** 先读
+[现场摘要：用户终端回传证据](../validation/2026-10-11-gateway-site-status.md)。
+旧 f9 双端回退、`complete-rollback`（`assets_rewritten=false`）、旧 Hermes 恢复和
+服务器 `start-old` 均已成功；[回退收尾说明](server-rollback-resume.md) 及本页第 0–2 节
+只保留已完成的历史过程，不再指示从头停回/回退。
 
-适用起点为 `f9c601cba25cbc5459bb03519d1954ae55995ded` / PR #14，
-deployment `cf-return-site-readonly-20261007-r2`。本说明交给操作者，**没有执行现场操作**。
-以操作者提供的 2026-10-11 快照为准：两端已 applied，服务器四应用最后确认停止，
+第 3 节的传包、独立 checkout、构建与新双端 plan 也已完成。deployment 为
+`cf-return-env-loopback-20261011-r1`，固定 release 为
+`d9bae61a043f1be4303e5c23661ec51904d5e708`，候选为
+`sha256:bcb3e42fef5ba5a91232ca04e49a959cbecab4b45eb3bec0a0b9b3aadf717185`；
+新计划尚未 apply/start/verify。文档分支的新提交不替换这些部署绑定。
+
+用户随后只对 CFserver 执行 `sudo reboot`；重启完成情况及之后的容器、Gate、微信
+登录状态待核验，Windows 是否关机未确认。先核验当前现场和现存材料，满足条件及维护
+授权后再从第 4 节接续，不能用重启前 PID 或零队列快照证明当前状态，也不要为恢复
+会话变量重跑第 0–3 节的初始化、传包、克隆、构建或回退。
+
+以下保留原故障起点 `f9c601cba25cbc5459bb03519d1954ae55995ded` / PR #14，
+deployment `cf-return-site-readonly-20261007-r2`。本次文档任务**没有执行现场操作**。
+操作者当时提供的 2026-10-11 快照为：两端已 applied，服务器四应用最后确认停止，
 Windows 已启动但报 `native_http_not_loopback`，8642 绑定 LAN、18642 未监听。
 不能把它称为全停、未启动或 TLS ready。执行前必须刷新观察。
 
@@ -29,23 +41,26 @@ Hermes 自己的 `.env` 仍可把它改回 LAN。插件的 loopback 门禁正确
 重复或无法确定含义的监听配置拒绝；不设置全局环境变量，不修改官方核心。
 
 现有双端协议绑定相同 release、deployment 和各自 plan。**修复提交不能直接拿旧回执启动**，
-也不能把旧 request 中的 SHA 替换后覆盖原件。采用已有入口能证明的路线：
+也不能把旧 request 中的 SHA 替换后覆盖原件。原恢复路线如下；第 1–3 项和第 4 项中的
+候选构建、双端规划已经完成，仅新受控应用与验收尚未开始：
 
 1. 新鲜核对服务器确实停止，导出旧计划的 quiesced 回执。
 2. 原 `f9c601cb` Windows 入口按旧 start-intent 身份停回，双方原 journal 回退。
 3. 原入口恢复旧 HTTP 和旧服务器核心，Gate 继续关闭；这只是恢复可规划基线。
 4. 独立修复 release、新 deployment、新镜像和两端新计划，重新受控应用并验收。
 
-本次同时更新部署配置、验收入口及插件 TLS context，因此必须通过新计划安装新 bundle，
-不得直接覆盖原 12 项已应用文件。仍须从修复 release
-**真实构建新候选镜像**，因为现有协议要求两端同一 release，服务器验证镜像 revision
+原修复同时更新部署配置、验收入口及插件 TLS context，因此必须通过新计划安装新 bundle，
+不得直接覆盖原 12 项已应用文件。已从固定修复 release
+**真实构建新候选镜像并完成规划**，因为现有协议要求两端同一 release，服务器验证镜像 revision
 和 release 绑定。不能给旧 `sha256:fcfc56...` 镜像冒填新 SHA。本次没有服务器运行时
 功能变化、数据库迁移或新业务权限；不重签现有有效证书，复用已有私有签名文件。
 
 ## 0. 固定入口和材料目录（Windows PowerShell 5.1）
 
+本节为已完成的历史初始化，不是重启后的接管入口。
+
 全部命令在已批准维护窗口由操作者执行。Git 和跨机传输各只选以下一个可执行路径；
-Linux 命令在原有服务器管理会话执行，不另建 SSH 通道。先用最终交付 SHA 核对 `$Fix`。
+Linux 命令在原有服务器管理会话执行，不另建 SSH 通道。固定修复 SHA 为 d9，不随文档 HEAD 改变。
 新公共输出写到新目录，旧 `2d15` 工作树及其 `.task-artifacts` 只读保留。
 
 ```powershell
@@ -64,8 +79,9 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 $env:GIT_OPTIONAL_LOCKS = '0'
 if ((& $Git -C $Old rev-parse HEAD).Trim() -ne $OldCommit) { throw '旧恢复入口版本改变' }
 if (& $Git -C $Old status --porcelain --untracked-files=no) { throw '旧入口有受管文件修改' }
-$FixCommit = (& $Git -C $Fix rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $FixCommit -eq $OldCommit) { throw '修复入口未固定' }
+$FixCommit = 'd9bae61a043f1be4303e5c23661ec51904d5e708'
+if ((& $Git -C $Fix rev-parse HEAD).Trim() -ne $FixCommit) { throw '修复入口与固定 d9 不符' }
+if ($LASTEXITCODE -ne 0) { throw '修复入口 Git 核对失败' }
 if (& $Git -C $Fix status --porcelain --untracked-files=no) { throw '修复入口不干净' }
 $RequestData = Get-Content -LiteralPath $OldRequest -Raw | ConvertFrom-Json
 $HermesHome = $RequestData.hermes_home
@@ -113,6 +129,8 @@ $Listeners | Select-Object LocalAddress,LocalPort,OwningProcess
 占用时停止接续；不要调用 `Stop-Process`。原日志/start-intent/tls-ready 缺失状态全部保留。
 
 ## 1. 服务器刷新旧 quiesced（原管理会话）
+
+本节为已完成的旧部署历史步骤；不用于证明重启后的当前队列或容器状态。
 
 以下只读部分先核对原 request、当前容器和当前数据库计数。`quiesce` 在四应用全停时
 只检查容器并复用原停机前数据库记录，因此**它单独不能证明当前队列**。先做下面的新鲜
@@ -196,6 +214,9 @@ Get-FileHash -LiteralPath $ServerQuiesced -Algorithm SHA256
 
 ## 2. 原 Windows 停回；双方原 journal 回退
 
+本节旧部署停回、回退及旧核心恢复均已完成，完整收尾历史见
+[服务器回退收尾说明](server-rollback-resume.md)，不要重放下面命令。
+
 `quiesce` 使用旧 reviewed-plan、原 request、12 份已应用资产以及 start-intent 的身份。
 不是初始 `stop`；不重复 start，不删除 intent，不预先改变 `.env` 或 bundle。
 
@@ -266,13 +287,20 @@ old_server start-old > "$RECOVERY/old-server-start-output.json"
 所有历史异常都视为自动阻断，不可声称该入口会自行拒绝任何 uncertain；出现这类变化应
 停止本流程并另行核对，不清理记录来满足条件。旧 HTTP 的 LAN 监听只属于回退状态，
 **不是新功能验收**。
-在 Gate 关闭的这个基线上完成新规划后立即进入下一窗口，不手工 Controller start。
+该历史阶段建立了 Gate 关闭的可规划基线；后续新规划已完成。当前须先核验重启后现场，
+不能据此立即进入切换窗口或手工 Controller start。
 
 ## 3. 独立修复 release 和全新双端计划
 
+本节为**已完成的新计划准备记录**，保留原流程供核对，不是重启后重复执行的清单。
+用户终端回传：Windows 新 plan 共 13 项，含 `.env` 的 `API_SERVER_HOST` 单字段修改，
+原 17 项工具集保留；服务器原 `env_file` 解析及环境等价检查通过。新旧迁移头均为
+`20260928_01`，本次不需要迁移。后续先复用并核对现存候选、request、plan 和公共回执；
+本节 shell 初始化中的排他创建检查不应通过删除或重建现有目录来绕过。
+
 从这一步起不能再使用旧部署 ID/plan/intents。Windows 新请求仅复用已验证的本机引用，
-不复制凭据或证书正文，不动旧 request。保存新 request 前核对 `$FixCommit` 等于最终交付
-且 CI 通过的 SHA；新目录名示例 `cf-return-env-loopback-20261011-r1`。
+不复制凭据或证书正文，不动旧 request。已保存的新 request 的 `$FixCommit` 固定为
+`d9bae61a043f1be4303e5c23661ec51904d5e708`；新部署 ID 为 `cf-return-env-loopback-20261011-r1`。
 
 ```powershell
 $NewDeployment = 'cf-return-env-loopback-20261011-r1'
@@ -298,10 +326,10 @@ Get-FileHash -LiteralPath (Join-Path $Recovery 'windows-new-prepared.json') -Alg
 仅 `cf_artifact_return`。如果 Process/User/Machine 冲突或文件歧义阻止规划，交操作者定位
 实际继承来源；不 `setx`、不删变量来掩盖不明来源、不用临时 shell 值冒充持久修复。
 
-服务器使用新独立 checkout，绝不推进旧 `$OLD_RELEASE`。按
-[固定发布获取和实际构建](artifact-return-site.md#入口及固定发布获取) 构建并验证新 image ID；
-基础镜像仍使用该文档已核验的固定 digest。新 `SOURCE_COMMIT` 为 `$FixCommit` 的完整值，
-新应用 image ID 必须来自此次 `--iidfile`。复用有效证书和保留的签名文件；不运行安装器。
+服务器已使用新独立 checkout，未推进旧 `$OLD_RELEASE`。已按
+[固定发布获取和实际构建](artifact-return-site.md#入口及固定发布获取) 完成构建，固定候选
+为本页顶部的 `sha256:bcb3e42...`。基础镜像仍使用该文档已核验的固定 digest，
+`SOURCE_COMMIT` 为固定 d9。复用有效证书和保留的签名文件；不运行安装器或重复构建。
 
 服务器设定下列新变量后，沿用原入口的新 plan 流程。`RELEASE` 是新 checkout，
 `IMAGE_ID` 由实际构建产生。先用前文同一 `$Scp` 上传 `windows-new-prepared.json`，
@@ -310,7 +338,7 @@ Get-FileHash -LiteralPath (Join-Path $Recovery 'windows-new-prepared.json') -Alg
 CA 路径从原 request 读取，不复制私钥。
 
 ```sh
-COMMIT='<最终修复完整 SHA>'
+COMMIT=d9bae61a043f1be4303e5c23661ec51904d5e708
 RELEASE=/root/cf-return-env-loopback-20261011-r1-release
 DEPLOYMENT=cf-return-env-loopback-20261011-r1
 NEW_STATE=/root/cf-return-env-loopback-20261011-r1-state
@@ -358,6 +386,17 @@ HTTPS origins、CA 摘要与 Profile 必须一致。
 
 ## 4. 新计划按原交错顺序应用
 
+**尚未执行；不能直接从历史 shell 会话继续。** 先按现场摘要核验 CFserver 重启完成、
+当前容器/镜像/Gate/数据库与队列、微信登录以及 Windows/Hermes 实际状态。用户回传的
+重启前基线是旧 Hermes、Gateway API、Dispatch 运行，Poll/Delivery 停止、Gate 关闭、
+数据库正常，待处理/在途/uncertain 为 0、历史 dead=2 保留；这些不是重启后证明。
+
+当前材料核验一致且进入批准维护窗口后，才采用下表已有交错顺序。重新打开的会话中，
+从已保存的新 request、reviewed plan 和阶段回执核对并绑定 `$FixEntry`、`$NewRequest`、
+`$NewPlan`、`RELEASE`、`SERVER_REQUEST`、`NEW_STATE` 和实际公共回执文件路径；固定
+`COMMIT` 为 d9、`IMAGE_ID` 为本页顶部候选，重新定义 `new_server` 也只采用这些已核验
+绑定。不以当前文档 HEAD 推导版本，不为获得这些变量重跑前面的初始化或构建块。
+
 每步成功才进入下一步；每份跨机回执都采用前文原字节摘要验证、单文件 0600 入受管
 peer 路径的流程。新服务器 `peer_state_file` 从新 request 读取，绝不覆盖旧请求或
 把旧 `server-plan.json` 复制到新 deployment。
@@ -394,8 +433,11 @@ loopback、新 18642 的监听归属同一个绑定进程，前后观察均一�
 - 任意恢复后都需当前队列/DB/schema 检查；不得清除 uncertain/dead、重派历史任务，
   也不能用保存的零队列快照代替实时查询。无 TLS ready 就不得新服务器 start。
 
-修复分支从 f9 普通追加提交，只推 `codex/fix-hermes-env-loopback`。PR #14 保持
-Draft/Open；本轮不合并、不 force push、不 Tag。后续接回 PR 时先读取远端
+原修复分支从 f9 普通追加提交，固定 d9 位于 `codex/fix-hermes-env-loopback`。
+2026-10-11 远端核对 PR #14 为 Draft/Open、head=f9、base=main；不能将独立修复分支
+或文档分支的 d9 后继写成已进入 main 或 PR #14 已合并。本次文档 PR 使用
+`codex/fix-hermes-env-loopback` 为 base，只推新文档分支，不改变 PR #14。
+下面只保留未来功能集成的说明，不是本次文档任务的操作：后续接回 PR 时先读取远端
 `feat/wechat-inbound-media`：若仍为 f9，可在独立 checkout 验证修复是其后代后普通
 fast-forward 推送该远端 PR 分支；若已有新提交，在独立集成分支 cherry-pick 修复并
 重跑相关测试，再普通推送。**不要 checkout、reset、merge 或推进旧 2d15 的本地分支**。

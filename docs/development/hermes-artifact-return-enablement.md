@@ -8,8 +8,11 @@
 2026-10-07 补充：两台机器的可执行规划/维护窗口衔接现在见
 [现场准备入口](../deployment/artifact-return-site.md)。它们复用本 helper 和已有 Controller /
 官方 Hermes 管理命令；下面的低层 helper 自身仍不负责服务管理。
-2026-10-11 的两端已应用、Windows 已启动但验收失败状态，按
-[专用恢复步骤](../deployment/hermes-env-loopback-recovery.md) 接续；这不是初始应用状态。
+2026-10-11 最新停点见 [用户终端回传现场摘要](../validation/2026-10-11-gateway-site-status.md)：
+旧 f9 两端回退与旧核心恢复已完成；固定 d9 候选已构建，新计划通过、未切换，
+用户已发出 CFserver 重启命令，是否完成及重启后状态待核验。“两端已应用、Windows 启动验收失败”是此前
+f9 阶段，不能再作为当前起点。[专用恢复步骤](../deployment/hermes-env-loopback-recovery.md)
+保留历史过程及后续交错切换入口。
 
 固定兼容目标是官方 Hermes `0f4a98f87c17007b81500239d0bd5b9574027b73`。
 统一部署入口必须先核验安装源码与选定执行器，不能仅凭 manifest 中的版本常量视为现场已核验。
@@ -94,9 +97,12 @@ protected owner/System DACL。现有 POSIX owner/mode 与 Windows target DACL �
 公共计划仅含路径、`API_SERVER_HOST` 字段名与 before/after 摘要。
 
 本修复同时改变配置 helper、现场控制器和 bundle 的 TLS context。不能在旧 12 项已应用
-目录上直接规划覆盖新模块；字节不一致仍会拒绝。先按原 start-intent 身份停回，使用
-原入口/原 journal 完整回退，并恢复可规划基线；再创建独立 release/deployment 的新计划，
-安装新 bundle 与 `.env` HOST 变更。旧 plan/request/journal/intents 全部保留。
+目录上直接规划覆盖新模块；字节不一致仍会拒绝。对尚未恢复的旧已应用状态，需要按
+原 start-intent 身份停回，并通过对应恢复入口/原 journal 完整回退，再建立独立计划。
+用户回传的本次现场已完成这段恢复和新计划准备，不重跑；核验重启后现场和现存材料后
+复用 `cf-return-env-loopback-20261011-r1`，再按既有顺序安装新 bundle 与 `.env` HOST
+变更。部署 release 固定为 `d9bae61a043f1be4303e5c23661ec51904d5e708`，不能改成
+文档分支 HEAD。旧 plan/request/journal/intents 全部保留。
 不得重写旧 SHA、删除 start-intent 或从失败已启动状态重复初始 stop/apply；具体双端
 交错顺序见 [专用恢复步骤](../deployment/hermes-env-loopback-recovery.md)。
 
