@@ -196,6 +196,121 @@ def _change(path, before, after, fields):
     return Change(path, tuple(fields), before, encoded)
 
 
+def _listener_bindings(raw: bytes | None, *, include_key=False):
+    """Read dotenv syntax without expanding secrets or reserializing any bytes.
+
+    Unrelated quoted values can span lines, so line-by-line substitution is not
+    safe. Accept the official dotenv assignment forms, fail closed on malformed
+    bindings, and retain character spans only for the two listener fields.
+    """
+    try:
+        text = (raw or b"").decode("utf-8")
+    except UnicodeError:
+        raise EnablementError("unsupported_listener_dotenv_encoding") from None
+    if "\x00" in text:
+        raise EnablementError("ambiguous_listener_dotenv")
+    index = 1 if text.startswith("\ufeff") else 0
+    selected = {}
+    while index < len(text):
+        whitespace = re.match(r"\s*", text[index:])
+        index += whitespace.end()
+        if index == len(text):
+            break
+        if text[index] == "#":
+            index += re.match(r"[^\r\n]*", text[index:]).end()
+            continue
+        exported = re.match(r"export[^\S\r\n]+", text[index:])
+        if exported:
+            index += exported.end()
+        key_match = re.match(r"'([^']+)'|([^=\s#]+)", text[index:])
+        if key_match is None:
+            raise EnablementError("ambiguous_listener_dotenv")
+        name = key_match.group(1) or key_match.group(2)
+        index += key_match.end()
+        index += re.match(r"[^\S\r\n]*", text[index:]).end()
+        start = end = index
+        value = None
+        if index < len(text) and text[index] == "=":
+            index += 1
+            index += re.match(r"[^\S\r\n]*", text[index:]).end()
+            start = index
+            if index < len(text) and text[index] in "\"'":
+                quote = text[index]
+                start = index = index + 1
+                while index < len(text):
+                    if text[index] == "\\" and index + 1 < len(text):
+                        index += 2
+                    elif text[index] == quote:
+                        break
+                    else:
+                        index += 1
+                if index == len(text):
+                    raise EnablementError("ambiguous_listener_dotenv")
+                end = index
+                value = text[start:end]
+                index += 1
+            else:
+                index += re.match(r"[^\r\n]*", text[index:]).end()
+                token = re.split(r"\s+#", text[start:index], maxsplit=1)[0].rstrip()
+                end = start + len(token)
+                value = token
+        # A quoted binding or a key without a value must end at a comment/EOL.
+        tail = re.match(r"[^\S\r\n]*(?:#[^\r\n]*)?(?:\r\n|\r|\n|$)", text[index:])
+        if tail is None:
+            raise EnablementError("ambiguous_listener_dotenv")
+        index += tail.end()
+        names = {"API_SERVER_HOST", "API_SERVER_PORT"}
+        if include_key:
+            names.add("API_SERVER_KEY")
+        if name not in names and name.upper() in names:
+            # Windows environ folds names case-insensitively. A lowercase or
+            # mixed-case (including Unicode uppercase aliases) can override it at load
+            # time even though POSIX dotenv parsing treats it as another key.
+            raise EnablementError("ambiguous_listener_dotenv_field")
+        if name not in names:
+            continue
+        if name in selected:
+            raise EnablementError("duplicate_listener_dotenv_field")
+        if value is None or any(token in value for token in ("\r", "\n", "\\", "${")):
+            raise EnablementError("ambiguous_listener_dotenv_field")
+        if name != "API_SERVER_KEY" and not re.fullmatch(r"[A-Za-z0-9_.:\-]*", value):
+            raise EnablementError("ambiguous_listener_dotenv_field")
+        if (
+            name == "API_SERVER_PORT"
+            and value
+            and (not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 65535)
+        ):
+            raise EnablementError("invalid_listener_dotenv_port")
+        selected[name] = (value, start, end)
+    return text, selected
+
+
+def listener_values(raw: bytes | None) -> dict[str, str]:
+    """Return only literal HOST/PORT values; never return unrelated secrets."""
+    _, bindings = _listener_bindings(raw)
+    return {name: binding[0] for name, binding in bindings.items()}
+
+
+def http_env_values(raw: bytes) -> dict[str, str]:
+    """Private probe inputs including API_SERVER_KEY; never log or serialize."""
+    _, bindings = _listener_bindings(raw, include_key=True)
+    return {name: binding[0] for name, binding in bindings.items()}
+
+
+def _listener_change(path: Path) -> Change:
+    before = _read(path)
+    text, bindings = _listener_bindings(before)
+    if "API_SERVER_HOST" in bindings:
+        _, start, end = bindings["API_SERVER_HOST"]
+        revised = text[:start] + "127.0.0.1" + text[end:]
+    else:
+        endings = re.findall(r"\r\n|\r|\n", text)
+        newline = endings[-1] if endings else "\n"
+        separator = "" if text in {"", "\ufeff"} or text.endswith(("\r", "\n")) else newline
+        revised = text + separator + "API_SERVER_HOST=127.0.0.1" + newline
+    return Change(path, ("API_SERVER_HOST",), before, revised.encode("utf-8"))
+
+
 def plan_gateway(config_path: str | Path, delta: dict[str, object]) -> Plan:
     """Only managed Gateway fields; existing model/auth/database values are inherited."""
     if not isinstance(delta, dict) or not delta or set(delta) - GATEWAY_FIELDS:
@@ -285,9 +400,9 @@ def plan_hermes(
 ) -> Plan:
     """Plan the fixed official plugin bundle and config, preserving existing tools/model/auth.
 
-    Official PlatformConfig promotes the top-level host into extra, with an
-    explicit extra.host taking precedence. Both are pinned when both exist;
-    the resulting explicit setting overrides the API_SERVER_HOST fallback.
+    Official environment overrides run after YAML. Pin both YAML host forms
+    and the persistent home .env HOST while retaining the existing port/auth.
+    The controller must reject conflicting inherited process/user/machine env.
     """
     from cf_agent_gateway.hermes.return_bridge.plugin import BridgeSettings
 
@@ -358,6 +473,10 @@ def plan_hermes(
         if old is not None and old != content:
             raise EnablementError("existing_bundle_asset_conflict")
         changes.append(Change(destination, ("reviewed_plugin_bundle",), old, content))
+    env_path = config_path.parent / ".env"
+    if env_path in (config_path, target) or target in env_path.parents:
+        raise EnablementError("listener_dotenv_path_conflict")
+    changes.append(_listener_change(env_path))
     changes.append(
         _change(
             config_path,
@@ -382,7 +501,8 @@ def plan_hermes(
             },
             {
                 "kind": "native_http_loopback",
-                "instruction": "native host pinned to loopback; verify effective service config",
+                "instruction": "YAML and home .env host pinned; reject inherited environment "
+                "conflicts and verify effective service listener before accepting TLS",
             },
             {
                 "kind": "existing_auth_and_model",

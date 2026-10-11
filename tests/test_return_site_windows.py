@@ -73,12 +73,20 @@ def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(site, "executor", lambda _: str(home / "tools/python.exe"))
     monkeypatch.setattr(site, "toolset_snapshot", lambda *_: tools)
     monkeypatch.setattr(site, "process_snapshot", lambda _: runtime)
+    monkeypatch.setattr(
+        site, "listener_environment_snapshot", lambda: {"Process": {}, "User": {}, "Machine": {}}
+    )
 
     def management(_, action):
         actions.append(action)
         runtime["processes"] = [] if action == "stop" else [process(43)]
         runtime["listeners"] = (
-            [{"host": "127.0.0.1", "port": 8642, "pid": 43}] if action == "start" else []
+            [
+                {"host": "127.0.0.1", "port": 8642, "pid": 43},
+                {"host": "127.0.0.1", "port": 18642, "pid": 43},
+            ]
+            if action == "start"
+            else []
         )
 
     def get_json(origin, endpoint, key, ca_file=None):
@@ -405,6 +413,71 @@ def test_live_toolsets_snapshot_does_not_load_plugin_or_expand_mcp(tmp_path, mon
     assert len(calls) == 1
 
 
+def test_live_toolsets_uses_dotenv_override_after_yaml(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        f"API_SERVER_KEY={OLD_SECRET}\nAPI_SERVER_HOST=192.0.2.5\nAPI_SERVER_PORT=8642\n"
+    )
+    request = {"hermes_home": str(tmp_path), "legacy_origin": "http://192.0.2.5:8642"}
+    monkeypatch.setattr(
+        site,
+        "_get_json",
+        lambda *args: {"platform": "api_server", "data": [{"name": "file", "tools": []}]},
+    )
+    # Mirrors the incident's contradictory YAML and Hermes-home .env.
+    result = site.toolset_snapshot(
+        request, {"platforms": {"api_server": {"host": "127.0.0.1", "port": 9999}}}
+    )
+    assert result["enabled"] == []
+
+
+@pytest.mark.parametrize("scope", ["Process", "User", "Machine"])
+@pytest.mark.parametrize("name,value", [("API_SERVER_HOST", "192.0.2.5"), ("API_SERVER_PORT", "9")])
+def test_listener_environment_conflicts_refuse_plan_without_secrets(
+    fixture, monkeypatch, scope, name, value
+):
+    observed = {"Process": {}, "User": {}, "Machine": {}}
+    observed[scope][name] = value
+    monkeypatch.setattr(site, "listener_environment_snapshot", lambda: observed)
+    with pytest.raises(site.SiteError, match=f"listener_environment_conflict:{scope}:{name}"):
+        site.plan(fixture[0])
+    assert fixture[4] == []
+    assert not (fixture[1].parent / "cf-artifact-return-site").exists()
+
+
+def test_matching_listener_environment_is_accepted(fixture, monkeypatch):
+    monkeypatch.setattr(
+        site,
+        "listener_environment_snapshot",
+        lambda: {
+            scope: {"API_SERVER_HOST": "127.0.0.1", "API_SERVER_PORT": "8642"}
+            for scope in ("Process", "User", "Machine")
+        },
+    )
+    assert site.plan(fixture[0])[1] is not None
+
+
+@pytest.mark.parametrize("phase", ["apply", "start"])
+def test_late_environment_conflict_prevents_apply_or_first_start(fixture, monkeypatch, phase):
+    request = fixture[0]
+    summary = stop(fixture)
+    options = {
+        "authorized": True,
+        "expected_plan_sha256": summary["plan_sha256"],
+        "peer": peer(request, "applied"),
+    }
+    if phase == "start":
+        site.execute(request, "apply", **options)
+    monkeypatch.setattr(
+        site,
+        "listener_environment_snapshot",
+        lambda: {"Process": {"API_SERVER_HOST": "0.0.0.0"}, "User": {}, "Machine": {}},
+    )
+    with pytest.raises(site.SiteError, match="listener_environment_conflict:Process"):
+        site.execute(request, phase, **options)
+    assert fixture[4] == ["stop"]
+    assert site._load_optional(site.request_defaults(request), "start-intent.json") is None
+
+
 def test_partial_apply_can_rollback_without_applied_receipt(fixture, monkeypatch):
     request, path, *_ = fixture
     original = path.read_bytes()
@@ -457,6 +530,33 @@ def test_stop_receipt_crash_recovers_without_second_stop_or_old_http(fixture, mo
     )
     assert site.execute(request, "stop", **options)["state"] == "quiesced"
     assert actions == ["stop"]
+
+
+def test_changed_dotenv_after_reviewed_plan_never_submits_initial_stop(fixture, monkeypatch):
+    request, path, _, _, actions, _ = fixture
+    summary, _ = site.plan(request)
+    options = {
+        "authorized": True,
+        "expected_plan_sha256": summary["plan_sha256"],
+        "peer": peer(request, "quiesced"),
+    }
+    real_save = site._save
+
+    def interrupt(request, name, value):
+        result = real_save(request, name, value)
+        if name == "reviewed-plan.json":
+            raise OSError("fixture interruption before management intent")
+        return result
+
+    monkeypatch.setattr(site, "_save", interrupt)
+    with pytest.raises(OSError, match="before management intent"):
+        site.execute(request, "stop", **options)
+    monkeypatch.setattr(site, "_save", real_save)
+    dotenv = path.parent / ".env"
+    dotenv.write_bytes(dotenv.read_bytes() + b"# external edit\n")
+    with pytest.raises(site.SiteError, match="site_asset_changed_since_review"):
+        site.execute(request, "stop", **options)
+    assert actions == []
 
 
 def test_uncertain_stop_never_resubmits_and_recovers_from_observation(fixture, monkeypatch):
@@ -613,6 +713,119 @@ def test_quiesce_accepts_previously_bound_process_exit_without_another_stop(fixt
         == "quiesced"
     )
     assert actions == ["stop", "start"]
+
+
+@pytest.mark.parametrize("missing_port", [8642, 18642])
+def test_start_requires_both_actual_managed_listeners(fixture, monkeypatch, missing_port):
+    request, _, _, runtime, actions, http = fixture
+    summary = stop(fixture)
+    options = {
+        "authorized": True,
+        "expected_plan_sha256": summary["plan_sha256"],
+        "peer": peer(request, "applied"),
+    }
+    site.execute(request, "apply", **options)
+    management = site._management
+
+    def missing_listener(request, action):
+        management(request, action)
+        runtime["listeners"] = [row for row in runtime["listeners"] if row["port"] != missing_port]
+
+    monkeypatch.setattr(site, "_management", missing_listener)
+    for _ in range(2):
+        with pytest.raises(site.SiteError, match="uncertain_observation_only"):
+            site.execute(request, "start", **options)
+    assert actions == ["stop", "start"] and http == []
+    assert site._load_optional(site.request_defaults(request), "tls-ready.json") is None
+
+
+@pytest.mark.parametrize("after_host,after_pid", [("192.0.2.5", 43), ("127.0.0.1", 99)])
+def test_listener_gate_rechecks_after_authenticated_probe(
+    fixture, monkeypatch, after_host, after_pid
+):
+    request, _, _, runtime, actions, _ = fixture
+    summary = stop(fixture)
+    options = {
+        "authorized": True,
+        "expected_plan_sha256": summary["plan_sha256"],
+        "peer": peer(request, "applied"),
+    }
+    site.execute(request, "apply", **options)
+
+    def changed_after_probe(*args):
+        runtime["listeners"][0].update(host=after_host, pid=after_pid)
+        return {"object": "list", "data": []}
+
+    monkeypatch.setattr(site, "_get_json", changed_after_probe)
+    error = (
+        "native_http_not_loopback" if after_pid == 43 else "management_listener_identity_changed"
+    )
+    with pytest.raises(site.SiteError, match=error):
+        site.execute(request, "start", **options)
+    assert actions == ["stop", "start"]
+    assert site._load_optional(site.request_defaults(request), "tls-ready.json") is None
+
+
+def test_native_http_failed_start_only_observes_retry_then_quiesces_bound_process(
+    fixture, monkeypatch
+):
+    request, path, _, runtime, actions, http = fixture
+    original_config = path.read_bytes()
+    original_env = (path.parent / ".env").read_bytes()
+    summary = stop(fixture)
+    options = {"authorized": True, "expected_plan_sha256": summary["plan_sha256"]}
+    site.execute(request, "apply", peer=peer(request, "applied"), **options)
+    management = site._management
+
+    def bad_listener(request, action):
+        management(request, action)
+        if action == "start":
+            runtime["listeners"] = [{"host": "192.0.2.5", "port": 8642, "pid": 43}]
+
+    monkeypatch.setattr(site, "_management", bad_listener)
+    for _ in range(2):
+        with pytest.raises(site.SiteError, match="native_http_not_loopback"):
+            site.execute(request, "start", peer=peer(request, "applied"), **options)
+    normalized = site.request_defaults(request)
+    first_intent = site._load(normalized, "start-intent.json")
+    assert first_intent["process"] == runtime["processes"][0]
+    assert first_intent["management_result"] == "returned"
+    assert site._load_optional(normalized, "tls-ready.json") is None
+    assert actions == ["stop", "start"] and http == []
+    # A changed caller environment cannot force a second start or block recovery.
+    monkeypatch.setattr(
+        site,
+        "listener_environment_snapshot",
+        lambda: {"Process": {"API_SERVER_HOST": "0.0.0.0"}, "User": {}, "Machine": {}},
+    )
+    with pytest.raises(site.SiteError, match="native_http_not_loopback"):
+        site.execute(request, "start", peer=peer(request, "applied"), **options)
+    site.execute(request, "quiesce", peer=peer(request, "quiesced"), **options)
+    site.execute(request, "quiesce", peer=peer(request, "quiesced"), **options)
+    assert actions == ["stop", "start", "stop"]
+    site.execute(request, "rollback", peer=peer(request, "quiesced"), **options)
+    assert path.read_bytes() == original_config
+    assert (path.parent / ".env").read_bytes() == original_env
+    assert site._load(normalized, "start-intent.json") == first_intent
+
+
+def test_applied_receipt_cannot_redirect_to_copied_journal(fixture, tmp_path):
+    request = fixture[0]
+    summary = stop(fixture)
+    options = {
+        "authorized": True,
+        "expected_plan_sha256": summary["plan_sha256"],
+        "peer": peer(request, "applied"),
+    }
+    applied = site.execute(request, "apply", **options)
+    original = Path(applied["journal"]["manifest"])
+    copied = tmp_path / "copied-manifest.json"
+    copied.write_bytes(original.read_bytes())
+    applied["journal"]["manifest"] = str(copied)
+    site._save(site.request_defaults(request), "applied.json", applied)
+    with pytest.raises(site.SiteError, match="local_phase_receipt_changed"):
+        site.execute(request, "start", **options)
+    assert fixture[4] == ["stop"]
 
 
 def test_real_windows_server_public_and_phase_receipts_interoperate(fixture, tmp_path, monkeypatch):

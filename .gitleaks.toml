@@ -24,3 +24,10 @@ id = "generic-api-key"
   paths = ['''^tests/hermes_return_probe/probe\.py$''']
   regexTarget = "secret"
   regexes = ['''^(5bd5e91fa2296f3c150a87845c047a6a69933c71|8b662cacbdf4a541c7b7b0c0eb8c953d0180001e)$''']
+
+  [[rules.allowlists]]
+  description = "Exact public pinned official config/management probe source blobs"
+  condition = "AND"
+  paths = ['''^tests/hermes_listener_probe/probe\.py$''']
+  regexTarget = "secret"
+  regexes = ['''^(5bd5e91fa2296f3c150a87845c047a6a69933c71|ca7f9357c1312171a3b0c28d8f053b874ed469b3)$''']

@@ -35,6 +35,7 @@ from cf_agent_gateway.hermes.return_bridge.protocol import (
     TOOLSET,
 )
 from cf_agent_gateway.hermes.return_bridge.scope import ReturnScope, _claims, activate_scope
+from cf_agent_gateway.hermes.tls import stdlib_ssl_context
 
 _execution = contextvars.ContextVar("cf_return_execution", default=None)
 _tool_execution = contextvars.ContextVar("cf_return_tool_execution", default=None)
@@ -381,8 +382,7 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
 
     async def start_tls():
         try:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context = stdlib_ssl_context(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(settings.tls_cert_file, settings.tls_key_file)
             async with asyncio.timeout(5):
                 while adapter._runner is None or adapter._runner.server is None:

@@ -30,10 +30,15 @@ PEER_SCHEMA = "cf-artifact-return/site-peer/v1"
 OBSERVATION_SECONDS = 30
 OBSERVATION_INTERVAL = 0.5
 SOURCE_FILES = (
+    "agent/ssl_verify.py",
+    "gateway/config.py",
+    "gateway/config_env.py",
     "gateway/platforms/api_server.py",
     "hermes_cli/tools_config.py",
     "hermes_cli/gateway_windows.py",
+    "hermes_cli/main.py",
     "hermes_cli/config.py",
+    "hermes_cli/env_loader.py",
 )
 RELEASE_FILES = (
     "deploy/prepare-return-windows.ps1",
@@ -218,19 +223,7 @@ def _auth_reference(home: Path) -> tuple[str, dict]:
     raw = en._read(home / ".env")
     if raw is None:
         raise SiteError("existing_http_auth_reference_missing")
-    selected = {}
-    for line in raw.decode("utf-8-sig").splitlines():
-        name, equals, value = line.partition("=")
-        name = name.strip()
-        if equals and name in {"API_SERVER_KEY", "API_SERVER_HOST", "API_SERVER_PORT"}:
-            if name in selected:
-                raise SiteError("ambiguous_http_auth_reference")
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                value = value[1:-1]
-            if "${" in value or "\n" in value or "\r" in value:
-                raise SiteError("unsupported_http_auth_reference")
-            selected[name] = value
+    selected = en.http_env_values(raw)
     key = selected.pop("API_SERVER_KEY", "")
     if len(key) < 16:
         raise SiteError("existing_http_auth_reference_missing")
@@ -257,8 +250,11 @@ def toolset_snapshot(request: dict, config: dict) -> dict:
     origin = _origin(request["legacy_origin"], https=False)
     api = config.get("platforms", {}).get("api_server", {})
     extra = api.get("extra", {})
-    host = extra.get("host", api.get("host", env.get("API_SERVER_HOST", "127.0.0.1")))
-    port = int(extra.get("port", api.get("port", env.get("API_SERVER_PORT", 8642))))
+    # The pinned official loader applies nonempty environment overrides after
+    # YAML. The reviewed .env is read here without loading its credentials into
+    # this process; external listener overrides are checked separately.
+    host = env.get("API_SERVER_HOST") or extra.get("host", api.get("host", "127.0.0.1"))
+    port = int(env.get("API_SERVER_PORT") or extra.get("port", api.get("port", 8642)))
     if (origin.hostname, origin.port or 80) != (host, port):
         raise SiteError("legacy_origin_differs_from_current_configuration")
     response = _get_json(request["legacy_origin"], "/v1/toolsets", key)
@@ -317,6 +313,53 @@ $ports = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Wh
     if result.returncode:
         raise SiteError("process_observation_failed")
     return json.loads(result.stdout.decode("utf-8-sig"))
+
+
+def listener_environment_snapshot() -> dict:
+    """Read only the two listener fields, never the complete process environment."""
+    names = ("API_SERVER_HOST", "API_SERVER_PORT")
+    result = {"Process": {name: os.environ.get(name) for name in names}}
+    if os.name != "nt":
+        # Non-Windows fixtures have no Windows persistent environment scopes.
+        return {**result, "User": {}, "Machine": {}}
+    script = r"""$result = @{}
+foreach ($scope in @('User', 'Machine')) {
+    $fields = @{}
+    foreach ($name in @('API_SERVER_HOST', 'API_SERVER_PORT')) {
+        $fields[$name] = [Environment]::GetEnvironmentVariable($name, $scope)
+    }
+    $result[$scope] = $fields
+}
+$result | ConvertTo-Json -Depth 3 -Compress"""
+    try:
+        persistent = json.loads(
+            _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]).decode(
+                "utf-8-sig"
+            )
+        )
+        if set(persistent) != {"User", "Machine"} or any(
+            not isinstance(fields, dict) or set(fields) != set(names)
+            for fields in persistent.values()
+        ):
+            raise ValueError()
+    except (ValueError, TypeError, OSError, subprocess.TimeoutExpired, en.EnablementError):
+        raise SiteError("listener_environment_observation_failed") from None
+    return {**result, **persistent}
+
+
+def _check_listener_environment(request, *, legacy=False):
+    origin = _origin(request["legacy_origin"], https=False)
+    expected = {
+        "API_SERVER_HOST": origin.hostname if legacy else "127.0.0.1",
+        "API_SERVER_PORT": str(origin.port or 80),
+    }
+    observed = listener_environment_snapshot()
+    for scope in ("Process", "User", "Machine"):
+        for name, expected_value in expected.items():
+            value = observed[scope].get(name)
+            if value not in (None, "", expected_value):
+                # No variable contents are included, even for malformed fields.
+                raise SiteError(f"listener_environment_conflict:{scope}:{name}")
 
 
 def executor(request: dict) -> str:
@@ -392,6 +435,7 @@ def _tls_assets(request):
 
 def plan(request: dict, *, snapshot: dict | None = None) -> tuple[dict, en.Plan | None]:
     request = request_defaults(request)
+    _check_listener_environment(request)
     home = en._path(request["hermes_home"])
     proof = source_proof(request)
     raw, config = en._configuration(home / "config.yaml")
@@ -573,7 +617,10 @@ def _verified_applied(request, summary):
     applied = _load(request, "applied.json")
     if applied.get("plan_sha256") != summary["plan_sha256"]:
         raise SiteError("local_phase_receipt_changed")
-    manifest = en._manifest_read(en._path(applied["journal"]["manifest"]))
+    manifest_path = _journal_path(request, summary)
+    if en._path(applied["journal"]["manifest"]) != manifest_path:
+        raise SiteError("local_phase_receipt_changed")
+    manifest = en._manifest_read(manifest_path)
     if manifest["state"] != "applied" or manifest["plan"] != summary["enablement"]:
         raise SiteError("local_phase_receipt_changed")
     for asset in manifest["plan"]["changes"]:
@@ -665,6 +712,8 @@ def _stop_once(request, summary, *, intent_name, expected_process=None):
     if intent is None:
         state = process_snapshot(request)
         if not state["processes"] and expected_process is not None:
+            if state["listeners"]:
+                raise SiteError("management_listener_identity_changed")
             _save(
                 request,
                 intent_name,
@@ -691,8 +740,11 @@ def _stop_once(request, summary, *, intent_name, expected_process=None):
         _management_once(request, "stop", intent_name, intent)
 
     def stopped():
-        processes = process_snapshot(request)["processes"]
+        state = process_snapshot(request)
+        processes = state["processes"]
         if not processes:
+            if state["listeners"]:
+                raise SiteError("management_listener_identity_changed")
             return {"observed_stopped": True}
         if len(processes) != 1 or _process_identity(processes[0]) != intent["process"]:
             raise SiteError("management_process_identity_changed")
@@ -717,12 +769,33 @@ def _gateway_tls(request):
         }
 
 
+def _listeners_ready(request, state, identity, *, legacy=False):
+    listeners = state["listeners"]
+    if any(row["pid"] != identity["pid"] for row in listeners):
+        raise SiteError("management_listener_identity_changed")
+    native_port = _origin(request["legacy_origin"], https=False).port or 80
+    native = [row for row in listeners if row["port"] == native_port]
+    if not legacy and any(row["host"] not in {"127.0.0.1", "::1"} for row in native):
+        raise SiteError("native_http_not_loopback")
+    if not native:
+        return False
+    if not legacy:
+        tls_port = _origin(request["hermes_origin"]).port or 443
+        if not any(row["port"] == tls_port for row in listeners):
+            return False
+    return True
+
+
 def _start_once(request, summary, *, legacy=False):
     intent_name = "start-legacy-intent.json" if legacy else "start-intent.json"
     intent = _intent(request, summary, intent_name, "start")
     if intent is None:
-        if process_snapshot(request)["processes"]:
+        _check_listener_environment(request, legacy=legacy)
+        before = process_snapshot(request)
+        if before["processes"]:
             raise SiteError("gateway_must_remain_stopped")
+        if before["listeners"]:
+            raise SiteError("management_listener_identity_changed")
         intent = {
             "plan_sha256": summary["plan_sha256"],
             "action": "start",
@@ -750,14 +823,8 @@ def _start_once(request, summary, *, legacy=False):
             _save(request, intent_name, intent)
         elif identity != intent["process"]:
             raise SiteError("management_process_identity_changed")
-        if any(row["pid"] != identity["pid"] for row in state["listeners"]):
-            raise SiteError("management_listener_identity_changed")
-        if not legacy and any(
-            row["port"] == (_origin(request["legacy_origin"], https=False).port or 80)
-            and row["host"] not in {"127.0.0.1", "::1"}
-            for row in state["listeners"]
-        ):
-            raise SiteError("native_http_not_loopback")
+        if not _listeners_ready(request, state, identity, legacy=legacy):
+            return None
         key, _ = _auth_reference(en._path(request["hermes_home"]))
         try:
             response = _get_json(
@@ -774,7 +841,9 @@ def _start_once(request, summary, *, legacy=False):
         after = process_snapshot(request)
         if len(after["processes"]) != 1 or _process_identity(after["processes"][0]) != identity:
             raise SiteError("management_process_identity_changed")
-        return {"process": identity, "gateway_tls": gateway}
+        if not _listeners_ready(request, after, identity, legacy=legacy):
+            return None
+        return {"process": identity, "listeners": after["listeners"], "gateway_tls": gateway}
 
     return _observe_until(ready)
 
@@ -820,6 +889,11 @@ def _execute_mutation(request, phase, expected_plan_sha256, peer):
             != summary["config_sha256"]
         ):
             raise SiteError("configuration_changed_since_review")
+        if any(
+            en._digest(en._read(en._path(asset["path"]))) != asset["before_sha256"]
+            for asset in summary["enablement"]["changes"]
+        ):
+            raise SiteError("site_asset_changed_since_review")
         _bind_peer(request, peer, first=True)
         _stop_once(request, summary, intent_name="stop-intent.json")
         return _save(request, "quiesced.json", _receipt(request, "quiesced", summary))
@@ -829,6 +903,7 @@ def _execute_mutation(request, phase, expected_plan_sha256, peer):
     _bind_peer(request, peer)
     if phase == "apply":
         _require_peer(request, peer, {"quiesced", "applied"})
+        _check_listener_environment(request)
         _load(request, "quiesced.json")
         if process_snapshot(request)["processes"]:
             raise SiteError("gateway_must_remain_stopped")

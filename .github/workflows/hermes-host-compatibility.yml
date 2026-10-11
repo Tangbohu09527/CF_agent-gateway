@@ -12,6 +12,70 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  official-windows-listener:
+    name: Official Windows manager and persistent listener config (0f4a98f)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Preserve official Git blob bytes
+        run: git config --global core.autocrlf false
+      - name: Check out Gateway
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check out immutable official Hermes
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 0f4a98f87c17007b81500239d0bd5b9574027b73
+          path: .pytest_cache/hermes-listener-probe/source
+          persist-credentials: false
+      - name: Set up Gateway test Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build isolated Gateway dependencies
+        shell: python
+        run: |
+          import subprocess, sys
+          from pathlib import Path
+          root = Path('.pytest_cache/hermes-listener-probe/gateway-venv')
+          subprocess.run([sys.executable, '-m', 'venv', str(root)], check=True)
+          subprocess.run([str(root / 'Scripts/python.exe'), '-m', 'pip', 'install',
+                          '-e', '.[dev]', 'psutil==7.2.2'], check=True)
+      - name: Set up fixed official Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+      - name: Build isolated Hermes dependencies
+        shell: python
+        run: |
+          import subprocess, sys
+          from pathlib import Path
+          root = Path('.pytest_cache/hermes-listener-probe/hermes-venv')
+          subprocess.run([sys.executable, '-m', 'venv', str(root)], check=True)
+          subprocess.run([str(root / 'Scripts/python.exe'), '-m', 'pip', 'install',
+                          '-r', 'tests/hermes_return_probe/requirements.txt'], check=True)
+      - name: Reproduce override then verify official managed restart and readonly TLS
+        shell: python
+        run: |
+          import subprocess
+          from pathlib import Path
+          root = Path('.pytest_cache/hermes-listener-probe').resolve()
+          subprocess.run([str(root / 'gateway-venv/Scripts/python.exe'),
+                          'tests/hermes_listener_probe/probe.py',
+                          '--hermes-source', str(root / 'source'),
+                          '--hermes-python', str(root / 'hermes-venv/Scripts/python.exe'),
+                          '--output', str(root / 'case')], check=True)
+      - name: Preserve only sanitized result summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-hermes-listener-${{ github.sha }}
+          path: .pytest_cache/hermes-listener-probe/case/report.json
+          if-no-files-found: warn
+          retention-days: 7
+
   real-hermes-api:
     name: Real Hermes API (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

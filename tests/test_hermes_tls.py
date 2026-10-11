@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import ssl
+import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -315,6 +318,28 @@ def test_ca_configuration_loading_and_fail_closed_errors(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Hermes CA bundle could not be loaded") as exc:
         verified_ssl_context(str(tmp_path / "private-missing-ca.pem"))
     assert "private-missing" not in str(exc.value)
+
+
+def test_official_truststore_injection_keeps_server_and_explicit_ca_local(certificates, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    _test_certificates(other)
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root / "src")
+    # Injection is global in official Hermes; isolate it from the pytest process.
+    result = subprocess.run(
+        [sys.executable, str(root / "tests/hermes_tls_truststore_probe.py"), str(tmp_path)],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "truststore-local-context-ok" in result.stdout
 
 
 def test_dispatch_runtime_passes_ca_reference_without_reading_extra_environment(monkeypatch):

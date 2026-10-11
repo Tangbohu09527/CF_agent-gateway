@@ -7,7 +7,9 @@
 
 2026-10-07 补充：两台机器的可执行规划/维护窗口衔接现在见
 [现场准备入口](../deployment/artifact-return-site.md)。它们复用本 helper 和已有 Controller /
-官方 Hermes 管理命令；下面的低层 helper 自身仍不负责服务管理。现场尚未应用。
+官方 Hermes 管理命令；下面的低层 helper 自身仍不负责服务管理。
+2026-10-11 的两端已应用、Windows 已启动但验收失败状态，按
+[专用恢复步骤](../deployment/hermes-env-loopback-recovery.md) 接续；这不是初始应用状态。
 
 固定兼容目标是官方 Hermes `0f4a98f87c17007b81500239d0bd5b9574027b73`。
 统一部署入口必须先核验安装源码与选定执行器，不能仅凭 manifest 中的版本常量视为现场已核验。
@@ -22,12 +24,18 @@
   为防无意改变既有有效工具选择，缺少显式列表且未提供已核验的 `inherited_api_toolsets`
   时拒绝规划；Windows 入口按固定官方源码与认证只读工具目录核验并保留有效列表；
   不回退为全工具。
-- 官方 `PlatformConfig.from_dict` 会将顶层 host 提升到 extra，显式 extra.host 优先。
-  helper 将已有 extra.host 固定为 127.0.0.1；顶层 host 同时存在时也固定，避免歧义；
-  没有 extra.host 时显式设置顶层 host，覆盖 API_SERVER_HOST 的缺省回退。
-  原 port（包括已知 8642）保持不变。实际 adapter 必须独立验证 loopback 才启用插件 TLS。
+- 官方 `PlatformConfig.from_dict` 会将顶层 host 提升到 extra，显式 extra.host 优先，
+  但随后 `_apply_env_overrides()` 的 `API_SERVER_HOST` 会覆盖 YAML。helper 将已有
+  YAML host 固定为 127.0.0.1，并把 Hermes home `.env` 的 `API_SERVER_HOST` 精确替换
+  为 127.0.0.1；缺少该字段时追加它。`.env` 固定为 config.yaml 同目录的文件，
+  不接受任意环境文件路径。`API_SERVER_PORT` 只核验、不改写，原端口（包括已知 8642）保持不变。
+  控制器仍须拒绝与审核目标冲突的 Process/User/Machine HOST/PORT；启动后实际 adapter
+  及进程监听必须独立验证 loopback，不能凭计划成功宣布插件 TLS 已就绪。
 - TLS 由本插件在官方现有 Application/runner 上新增 TLS site，字段是插件的
   `tls_host/tls_port/tls_cert_file/tls_key_file`，不是捏造的官方 TLS 字段。
+  官方 CLI 注入 truststore 时，插件局部使用原生 SSL context，以免 Windows 服务端
+  握手错误检查客户端证书；不改进程全局 TLS 设置。最低 TLS 1.2、显式 CA/主机名
+  验证及原 HTTP 鉴权保持。
 - Gateway 侧 `plan_gateway(config_path, delta)` 只接受 `hermes.base_url/ca_file`、
   `api.max_request_body_bytes`、
   `artifact.storage_root`、`artifact_return.*` 白名单；不会改变 model、API Key 引用、数据库、
@@ -76,6 +84,21 @@ plan 的内存对象持有拟写配置，但 repr 与公开 JSON 只显示字段
 apply 先保存原始及拟写配置字节，再写受管资产；POSIX journal 为 0700/0600，Windows 使用
 protected owner/System DACL。现有 POSIX owner/mode 与 Windows target DACL 保留。
 原始字节可能含既有敏感配置，因此 journal 必须留在管理者私有存储，不能上传 PR 或普通日志。
+
+`.env` 只修改 HOST 值的字节区间；原引号、export、注释、BOM、换行与其他字段字节保留。
+缺少 HOST 时按已有最后一种换行追加；不重建整份文件、不展开环境引用、不输出 KEY。
+解析支持独立的无引号/单双引号赋值及其他字段的多行引号值，避免把密钥正文中的
+`API_SERVER_HOST=...` 当作设置。重复 HOST/PORT、非规范大小写监听键（Windows 环境名
+不区分大小写）、无值键、受管值中的插值/转义/多行、
+无效端口、语法歧义与非 UTF-8 文件拒绝规划。完整 `.env` 原字节只写本机私有 journal，
+公共计划仅含路径、`API_SERVER_HOST` 字段名与 before/after 摘要。
+
+本修复同时改变配置 helper、现场控制器和 bundle 的 TLS context。不能在旧 12 项已应用
+目录上直接规划覆盖新模块；字节不一致仍会拒绝。先按原 start-intent 身份停回，使用
+原入口/原 journal 完整回退，并恢复可规划基线；再创建独立 release/deployment 的新计划，
+安装新 bundle 与 `.env` HOST 变更。旧 plan/request/journal/intents 全部保留。
+不得重写旧 SHA、删除 start-intent 或从失败已启动状态重复初始 stop/apply；具体双端
+交错顺序见 [专用恢复步骤](../deployment/hermes-env-loopback-recovery.md)。
 
 每次操作使用带固定标识的 OS advisory lock，进程硬退出会释放；未知旧锁仍拒绝并保留。
 保存 plan 摘要、每份资产 before/after 摘要，逐份原子替换。
