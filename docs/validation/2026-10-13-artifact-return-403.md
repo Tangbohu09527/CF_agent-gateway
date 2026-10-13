@@ -43,6 +43,7 @@ Hermes 服务、数据库、凭据、旧 request/plan/journal，未升级/回退
 | `tests/test_return_bridge_diagnostics.py` | 拒绝路径、未知异常脱敏、断连、关闭作用域及随机关联号回归 |
 | `tests/hermes_return_probe/probe.py` / `README.md` | 双版本源码校验、default Profile、V2/既有会话完整路径 |
 | `.github/workflows/hermes-host-compatibility.yml` | 返回探针扩展为双 SHA × Windows/Linux；历史其他兼容任务保持 |
+| `.gitleaks.toml` | 限定探针文件及一个已验证的官方 Git blob 值，消除源码哈希误报；其余秘密扫描保留 |
 
 日志只有 `stage`、`reason` 和本次生成的随机 `request_id`，不输出请求头、正文、
 密钥、授权、会话、文件内容、路径、URL、异常字符串或 traceback。该 ID 不是
@@ -73,7 +74,8 @@ legacy 六个用例均返回 200 和匹配 ACK；文字不上传 Artifact；PDF/
 
 受影响回归：scope 57 passed / 1 skipped（Windows symlink 权限）；HTTP、
 client、integration、plugin、enablement、site_windows、probe audit 合计
-187 passed；诊断完整用例 26 passed。临时目录/loopback 被执行沙箱阻断的初始尝试
+187 passed；诊断完整用例 26 passed；扩展后的 probe audit/脱敏 6 passed（其中原有
+3 项已计入前述 187）。全仓 Ruff lint 和 format 通过。临时目录/loopback 被执行沙箱阻断的初始尝试
 不计通过；使用同一隔离边界的授权执行后完成上述测试。
 
 诊断前后证据：把 d9 的 `src` 归档至新私有目录，运行新增 wrong-profile 用例，
