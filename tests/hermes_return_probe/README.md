@@ -4,17 +4,29 @@ This is an explicit, opt-in companion to the existing Hermes host probe and
 `test_artifact_return_integration.py`. It is not a new production executor,
 client, downloader, installer, or service. Pytest never launches it implicitly.
 
-The pinned official source is
-`0f4a98f87c17007b81500239d0bd5b9574027b73`. Ten HTTP, plugin, middleware, and
-execution-source blobs are checked before launch. Use the already selected
-Python **3.14.7** and its existing site-packages directory; no dependency install
-is performed. `HERMES_DISABLE_LAZY_INSTALLS=1` is passed only to the disposable
-child to disable official automatic source-update completion.
+The explicitly supported official source commits are
+`0f4a98f87c17007b81500239d0bd5b9574027b73` and
+`427d605d4985c2d49a795493ef6c5d66413057d1`. Select one with
+`--hermes-commit`; its ten HTTP, plugin, middleware, and execution-source blobs
+are checked before launch. Each manifest was obtained from that commit's Git
+tree, not by accepting whatever files happen to be installed. These specific
+blob checks complement the immutable checkout; they are not a hash of every
+transitive Agent dependency. Use an independent checkout and isolated Python
+**3.14.7** dependency environment. The probe itself never installs dependencies.
+`HERMES_DISABLE_LAZY_INSTALLS=1` is passed only to the disposable child to disable
+official automatic source-update completion. Existing deployment/source-proof
+pins in `site_windows.py` and old installation journals are unchanged.
 
 ## Executed path
 
-1. Existing Gateway admission creates a new isolated Message/thread/Dispatch.
-2. The actual `HermesClient` sends one business request over verified HTTPS.
+1. Normal Gateway admission creates a new isolated Message/thread/Dispatch.
+   Legacy routing and V2 routing are separate cases. V2 provisions a new
+   `AgentProfile` with external reference `default`, revision 1, and a private
+   conversation or group-sender binding through the normal stores before
+   admission. Neither path edits a Dispatch to force success.
+2. The actual dispatch worker calls `issue_context`, and the actual
+   `HermesClient` constructs and sends the business request over verified HTTPS.
+   The probe does not manufacture a capability or substitute the middleware.
 3. A temporary official `APIServerAdapter` discovers the repository return
    plugin through the official plugin loader. It uses a new private Hermes home,
    empty bundled/project-plugin roots, no installed Skills, and only the
@@ -41,15 +53,29 @@ Run with the existing Gateway test interpreter and dependencies:
 ```text
 python tests/hermes_return_probe/probe.py \
   --hermes-source <verified-official-source> \
+  --hermes-commit 427d605d4985c2d49a795493ef6c5d66413057d1 \
   --hermes-python <existing-python-3.14.7-executable> \
   --site-packages <selected-generation-site-packages> \
   --output <new-private-directory> \
-  --kind file
+  --kind file --routing v2
 ```
 
 `--kind image` checks group targeting; `--kind text` checks that a real Agent
 request with a return context can complete without uploading or adding an
-Artifact. Every output directory must be new; old evidence is never overwritten.
+Artifact. `--routing legacy` retains the earlier admission case; `--routing v2`
+adds the actual Profile-bound request fields and session metadata. All cases use
+the `default` reference/revision 1 at both ends, matching the reported field
+configuration without using production data or credentials.
+
+`--kind text --routing v2 --established-session` first completes and delivers a
+separately admitted ordinary text task through the real worker. It then admits
+another new text message in the same conversation and checks that the second
+HTTPS business request continues the same native Hermes session. Each task has
+its own real one-use return grant; no session or database row is pre-filled to
+bypass the normal lifecycle. This case makes two business POSTs; all other
+cases make one. A failed or uncertain task is never retried by the driver.
+
+Every output directory must be new; old evidence is never overwritten.
 All listeners bind dynamic loopback ports. The probe never uses port 8642.
 The request and host scope have a finite 600-second limit; the existing Gateway
 grant remains limited to 900 seconds. The CLI's synthetic runs use a 3-second
@@ -113,6 +139,15 @@ run is not evidence for either approved-model case.
 - `receiver-<filename>`: actual protocol-peer bytes, independently compared with the input.
 - `credential-scan.json`: counts only, covering all files including SQLite/WAL/SHM.
 - `report.json`: produced only after all success assertions and the offline scan pass.
+- `safe-summary.json`: statuses, counters, selected source/routing, ACK and scan
+  booleans only; no request/response content, headers, session IDs, credentials,
+  paths or URLs. This is the only uploaded CI artifact and the CLI's final JSON.
+
+The richer local files listed above contain exclusively the controlled
+synthetic probe's evidence (or the inputs of a separately authorized historical
+programmatic run). They are not production diagnostic logs and are not uploaded
+by this workflow. Production refusal diagnostics must keep their own fixed
+stage/reason and random-correlation-only contract.
 
 The receiver is a substitute. PNG byte equality in this probe does not assert
 that real WeChat avoids compression or transcoding. READY means pending delivery,
@@ -120,8 +155,11 @@ not “WeChat received.” Existing historical PDF pending and Skill deviations 
 not changed by these results.
 
 The existing `hermes-host-compatibility.yml` retains the earlier `4d55ca9`
-compatibility matrix and adds a separate Linux job for this `0f4a98f` probe.
-CI creates separate Gateway Python 3.12 and Hermes Python 3.14.7 environments,
-then runs the file, image, and text cases with a loopback synthetic model. The
-requirements file is used only by that CI environment; it does not install or
-upgrade the existing Windows runtime or provide production deployment evidence.
+compatibility matrix and Windows listener job unchanged. Its artifact-return
+job now crosses Windows/Linux with the two exact commits above. Every cell
+creates separate Gateway Python 3.12 and Hermes Python 3.14.7 environments and
+runs legacy and V2 text/PDF/PNG plus V2 established-session text, using only the
+loopback synthetic model. The requirements file is for disposable test
+environments; it does not install or upgrade the existing Windows runtime or
+provide production deployment evidence. Configuring this CI matrix is not a
+claim that a run has passed: record the actual run/SHA and results separately.

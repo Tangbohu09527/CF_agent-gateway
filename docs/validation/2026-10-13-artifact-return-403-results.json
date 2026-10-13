@@ -1,0 +1,267 @@
+{
+  "date": "2026-10-13",
+  "environment": "isolated Windows; Gateway Python 3.12; Hermes Python 3.14.7",
+  "gateway_base": "d9bae61a043f1be4303e5c23661ec51904d5e708",
+  "model": "deterministic loopback substitute",
+  "receiver": "loopback substitute; no real WeChat",
+  "production_validated": false,
+  "ack02_root_cause": "not reproduced; undetermined",
+  "cases": [
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "legacy",
+      "kind": "text",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 0,
+      "upload_status_codes": [],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "40876e79384bc6b394a08359d75c9e5f3167f1799d66589c206756fb815d7f87",
+      "private_report_sha256": "4f0129e3db5a3309331751d1be10be18aa0e3eb1a0d19069c0117083f82ea4cd"
+    },
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "legacy",
+      "kind": "file",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "cdc5f1e97ed761524f7610124cf6757f661c860202444d3525434dfc6d999ccc"
+    },
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "legacy",
+      "kind": "image",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "be2ea4dd4f59832c960fc411fb01e83aa7d0df36eebac79f8ae4994b06ca5571"
+    },
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "v2",
+      "kind": "text",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 0,
+      "upload_status_codes": [],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "b089860158db884049f25bbcea03d67d9a8fc018eb29b2eaed158783cd29aba7"
+    },
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "v2",
+      "kind": "file",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "3d515438361c57160a4649d87191ed0740d7a05b8181c12169c16b3b6ce8cc51"
+    },
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "v2",
+      "kind": "image",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "8311272716402b822f6f5d6412722ad77059995a763b2322721cca44b909c92b"
+    },
+    {
+      "hermes_commit": "0f4a98f87c17007b81500239d0bd5b9574027b73",
+      "routing": "v2",
+      "kind": "text",
+      "established_session": true,
+      "http_status_codes": [
+        200,
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 0,
+      "upload_status_codes": [],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "0f5adad8c99a677becb963950df66b719921b089f751cef671afba58f5dc955b"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "legacy",
+      "kind": "text",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 0,
+      "upload_status_codes": [],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "40876e79384bc6b394a08359d75c9e5f3167f1799d66589c206756fb815d7f87",
+      "private_report_sha256": "c1d271daee32c8bd9d71ea3b9047061a86077159f3c6b803ee26ba0b1b277a46"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "legacy",
+      "kind": "file",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "c32bfbeaa07b5afec13247ffdcffcc9b3c0a5fb84bed952732904f9eb2d5494a"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "legacy",
+      "kind": "image",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "32e1d3f2f0cb1b25d64289c6e9cccb5681351758ba9dcc6829ce3b5fa90b7a98"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "v2",
+      "kind": "text",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 0,
+      "upload_status_codes": [],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "c9113835575a839c1093c6f1dd2788d446fc2ab2f0b0ab451862d437de47b68e"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "v2",
+      "kind": "file",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "1312dd32003054d36797de998bc7743556f40f956cb61eb3dfc145c94222c8ec"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "v2",
+      "kind": "image",
+      "established_session": false,
+      "http_status_codes": [
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 1,
+      "upload_status_codes": [
+        200
+      ],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "0582add694415bd24697e52b746031ae0a76da62ef35da927bd42a382d3be8cd"
+    },
+    {
+      "hermes_commit": "427d605d4985c2d49a795493ef6c5d66413057d1",
+      "routing": "v2",
+      "kind": "text",
+      "established_session": true,
+      "http_status_codes": [
+        200,
+        200
+      ],
+      "ack_verified": true,
+      "dispatch_status": "success",
+      "delivery_status": "delivered",
+      "artifact_count": 0,
+      "upload_status_codes": [],
+      "credential_matches": 0,
+      "bridge_plugin_sha256": "88f1742a9d57dc853b4147b299373e3a83ba32012f1f084afff540a9845b384d",
+      "private_report_sha256": "b5acfb305c89d8c5d60d4d229d3aff0ff757546f201aa25f388db8a918170f16"
+    }
+  ]
+}

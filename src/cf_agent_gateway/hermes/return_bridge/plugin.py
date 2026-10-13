@@ -24,6 +24,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, fields
+from enum import StrEnum
 from pathlib import Path
 
 from cf_agent_gateway.hermes.return_bridge.files import ReturnBridgeError
@@ -41,6 +42,51 @@ _execution = contextvars.ContextVar("cf_return_execution", default=None)
 _tool_execution = contextvars.ContextVar("cf_return_tool_execution", default=None)
 _APP_KEY = "cf_artifact_return_bridge"
 logger = logging.getLogger(__name__)
+
+
+class _RejectionStage(StrEnum):
+    AUTH = "auth"
+    TRANSPORT = "transport"
+    REQUEST = "request"
+    CONTEXT = "context"
+    PROFILE = "profile"
+    LEDGER = "ledger"
+    SCOPE = "scope"
+    EXECUTION = "execution"
+    COMPLETION = "completion"
+
+
+class _RejectionReason(StrEnum):
+    API_KEY_MISSING = "api_key_missing"
+    NATIVE_AUTH_REJECTED = "native_auth_rejected"
+    TLS_UNAVAILABLE = "tls_unavailable"
+    INVALID_ENDPOINT = "invalid_endpoint"
+    INVALID_HEADERS = "invalid_headers"
+    INVALID_BODY = "invalid_body"
+    PROFILE_MISMATCH = "profile_mismatch"
+    INVALID_RETURN_CONTEXT = "invalid_return_context"
+    RETURN_CONTEXT_CONSUMED = "return_context_consumed"
+    RETURN_CAPACITY_EXCEEDED = "return_capacity_exceeded"
+    RETURN_LEDGER_UNAVAILABLE = "return_ledger_unavailable"
+    RETURN_SCOPE_CLOSED = "return_scope_closed"
+    EXECUTION_DEADLINE = "execution_deadline"
+    CLIENT_DISCONNECTED = "client_disconnected"
+    AGENT_NOT_BOUND = "agent_not_bound"
+    BRIDGE_ERROR = "bridge_error"
+    VALUE_ERROR = "value_error"
+    TYPE_ERROR = "type_error"
+    KEY_ERROR = "key_error"
+
+
+def _record_rejection(stage: _RejectionStage, reason: _RejectionReason, request_id: str):
+    # These enums and our random ID are the complete log payload. Never attach
+    # exception text/traceback or request-derived values (including session IDs).
+    logger.warning(
+        "Artifact return rejected stage=%s reason=%s request_id=%s",
+        stage.value,
+        reason.value,
+        request_id,
+    )
 
 
 @dataclass(frozen=True)
@@ -450,7 +496,11 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
         if not present:
             return await handler(request)
 
-        def denied(status):
+        request_id = uuid.uuid4().hex
+        stage = _RejectionStage.AUTH
+
+        def denied(status, reason):
+            _record_rejection(stage, reason, request_id)
             return web.json_response(
                 {"error": "artifact return unavailable"},
                 status=status,
@@ -458,34 +508,39 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
             )
 
         if not adapter._expected_api_key():
-            return denied(401)
+            return denied(401, _RejectionReason.API_KEY_MISSING)
         auth_error = adapter._check_auth(request)
         if auth_error is not None:
+            _record_rejection(stage, _RejectionReason.NATIVE_AUTH_REJECTED, request_id)
             return auth_error
+        stage = _RejectionStage.TRANSPORT
         if not state["ready"] or not request.secure:
-            return denied(503)
+            return denied(503, _RejectionReason.TLS_UNAVAILABLE)
+        stage = _RejectionStage.REQUEST
         if request.method != "POST" or request.raw_path != "/v1/chat/completions":
-            return denied(400)
+            return denied(400, _RejectionReason.INVALID_ENDPOINT)
         if any(
             len(request.headers.getall(name, [])) != 1
             for name in (RETURN_AUTH_HEADER, RETURN_URL_HEADER, "X-Hermes-Session-Id")
         ):
-            return denied(400)
+            return denied(400, _RejectionReason.INVALID_HEADERS)
         scope = None
         running = disconnected = None
         token = None
         try:
             body = await request.json()
             if not isinstance(body, dict) or body.get("stream", False) is not False:
-                return denied(400)
+                return denied(400, _RejectionReason.INVALID_BODY)
+            stage = _RejectionStage.CONTEXT
             session_id = request.headers["X-Hermes-Session-Id"]
             claims = _claims(request.headers[RETURN_AUTH_HEADER], session_id)
+            stage = _RejectionStage.PROFILE
             if (claims.get("profile"), claims.get("revision")) != (
                 settings.profile_reference,
                 settings.profile_revision,
             ):
-                return denied(403)
-            request_id = uuid.uuid4().hex
+                return denied(403, _RejectionReason.PROFILE_MISMATCH)
+            stage = _RejectionStage.LEDGER
             await asyncio.to_thread(
                 _consume_capability,
                 root,
@@ -493,6 +548,7 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
                 request_id,
                 claims["expires"],
             )
+            stage = _RejectionStage.SCOPE
             work_root = root / request_id
             work_root.mkdir(mode=0o700)
             scope = ReturnScope(
@@ -511,6 +567,7 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
                 prepare_scope(scope)
             token = _execution.set(current)
             with activate_scope(scope):
+                stage = _RejectionStage.EXECUTION
                 running = asyncio.create_task(handler(request))
                 disconnected = asyncio.create_task(watch_disconnect(request))
                 done, _ = await asyncio.wait(
@@ -519,12 +576,18 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if running not in done:
-                    return denied(504)
+                    reason = (
+                        _RejectionReason.CLIENT_DISCONNECTED
+                        if disconnected in done
+                        else _RejectionReason.EXECUTION_DEADLINE
+                    )
+                    return denied(504, reason)
                 response = running.result()
+                stage = _RejectionStage.COMPLETION
                 scope.check_active()
                 if current.turn is None:
                     # An idempotency-cache hit did not execute this request's Agent.
-                    return denied(409)
+                    return denied(409, _RejectionReason.AGENT_NOT_BOUND)
                 response.headers[RETURN_ACK_HEADER] = scope.accepted_ack
                 current.event(
                     "completion_ack",
@@ -534,9 +597,17 @@ def configure_app(native, adapter, settings, *, prepare_scope=None, observer=Non
                 )
                 return response
         except ReturnBridgeError as error:
-            return denied(409 if error.code == "return_context_consumed" else 403)
-        except (ValueError, TypeError, KeyError):
-            return denied(403)
+            try:
+                reason = _RejectionReason(error.code)
+            except ValueError:
+                reason = _RejectionReason.BRIDGE_ERROR
+            return denied(409 if error.code == "return_context_consumed" else 403, reason)
+        except ValueError:
+            return denied(403, _RejectionReason.VALUE_ERROR)
+        except TypeError:
+            return denied(403, _RejectionReason.TYPE_ERROR)
+        except KeyError:
+            return denied(403, _RejectionReason.KEY_ERROR)
         finally:
             if scope is not None:
                 # Revoke immediately; run bounded network drain outside the event loop.
