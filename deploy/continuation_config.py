@@ -14,6 +14,7 @@ import re
 from pathlib import PurePosixPath
 
 SERVICES = ("gateway", "worker", "dispatch-worker", "delivery-worker")
+DEPLOYMENT_IMAGE_SERVICES = (*SERVICES, "migration", "heartbeat-init")
 TARGET = "/app/config/production.yaml"
 
 
@@ -142,6 +143,118 @@ def require_preserved_references(before: dict, after: dict, protected_paths: set
                 "compose_env_options_invalid",
             )
             require(path in protected_paths, "compose_env_input_unprotected")
+
+
+def compose_image_candidate(original: dict, candidate_image: str) -> dict:
+    """Return six explicit image overrides; preserve extensions and other data.
+
+    This pure transformation can operate on a protected parsed Compose file or
+    its rendered model. It does not render interpolation, read env files or write
+    an asset. The caller must independently validate real Compose semantics.
+    """
+    require(
+        isinstance(candidate_image, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", candidate_image),
+        "candidate_image_invalid",
+    )
+    require(isinstance(original, dict), "compose_shape_invalid")
+    services = original.get("services")
+    require(isinstance(services, dict), "compose_services_invalid")
+    require("include" not in original, "compose_include_requires_review")
+    for name in DEPLOYMENT_IMAGE_SERVICES:
+        require(isinstance(services.get(name), dict), "deployment_image_service_missing")
+        require("extends" not in services[name], "compose_extends_requires_review")
+    candidate = copy.deepcopy(original)
+    candidate["services"] = copy.deepcopy(services)
+    for name in DEPLOYMENT_IMAGE_SERVICES:
+        # Break YAML aliases before editing, so x-runtime and unrelated services
+        # cannot inherit an unintended in-memory mutation.
+        candidate["services"][name] = copy.deepcopy(services[name])
+        candidate["services"][name]["image"] = candidate_image
+    return candidate
+
+
+def verify_compose_image_transition(
+    before: dict,
+    after: dict,
+    *,
+    approved_before_images: dict,
+    resolved_before_images: dict,
+    runtime_images: dict,
+    expected_runtime_image: str,
+    candidate_image: str,
+) -> None:
+    """Validate audited mixed image references without conflating them with IDs.
+
+    Each approved entry is {reference_sha256, image_id}. Resolved observations
+    must come from the caller's protected, current local Docker inspection; this
+    function never resolves or pulls an image. Four running-app image identities
+    are checked separately from the two deployment helpers and x-runtime.
+    """
+    expected = compose_image_candidate(before, candidate_image)
+    require(
+        isinstance(expected_runtime_image, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", expected_runtime_image),
+        "runtime_image_invalid",
+    )
+    references = {name: before["services"][name].get("image") for name in DEPLOYMENT_IMAGE_SERVICES}
+    if "x-runtime" in before:
+        require(isinstance(before["x-runtime"], dict), "compose_runtime_extension_invalid")
+        if "image" in before["x-runtime"]:
+            references["x-runtime"] = before["x-runtime"]["image"]
+    require(
+        isinstance(approved_before_images, dict)
+        and isinstance(resolved_before_images, dict)
+        and set(approved_before_images) == set(resolved_before_images) == set(references),
+        "compose_image_inventory_changed",
+    )
+    for name, reference in references.items():
+        require(
+            isinstance(reference, str)
+            and 0 < len(reference) <= 512
+            and "$" not in reference
+            and all(33 <= ord(c) <= 126 for c in reference),
+            "compose_image_reference_invalid",
+        )
+        approved = approved_before_images[name]
+        require(
+            isinstance(approved, dict)
+            and set(approved) == {"reference_sha256", "image_id"}
+            and isinstance(approved["image_id"], str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", approved["image_id"]),
+            "compose_image_approval_invalid",
+        )
+        require(
+            approved["reference_sha256"] == hashlib.sha256(reference.encode("ascii")).hexdigest()
+            and resolved_before_images[name] == approved["image_id"],
+            "compose_image_reference_changed",
+        )
+    require(
+        isinstance(runtime_images, dict)
+        and set(runtime_images) == set(SERVICES)
+        and all(
+            runtime_images[name] == expected_runtime_image == resolved_before_images[name]
+            for name in SERVICES
+        ),
+        "runtime_image_changed",
+    )
+    require(
+        isinstance(after, dict)
+        and isinstance(after.get("services"), dict)
+        and all(
+            isinstance(after["services"].get(name), dict)
+            and after["services"][name].get("image") == candidate_image
+            for name in DEPLOYMENT_IMAGE_SERVICES
+        ),
+        "candidate_deployment_images_mismatch",
+    )
+    try:
+        expected_bytes = json.dumps(
+            expected, sort_keys=True, allow_nan=False, separators=(",", ":")
+        )
+        after_bytes = json.dumps(after, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raise ConfigurationProofError("compose_semantic_shape_invalid") from None
+    require(after_bytes == expected_bytes, "compose_non_image_semantics_changed")
 
 
 def verify_failed_prepare_state(

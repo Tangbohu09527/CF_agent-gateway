@@ -258,3 +258,143 @@ def test_partial_failure_result_is_specific_preflight_stop(key, value):
             expected_package_names=package,
             expected_evidence_names=evidence,
         )
+
+
+def mixed_image_observations():
+    runtime = "sha256:" + "a" * 64
+    helper = "sha256:" + "b" * 64
+    candidate = "sha256:" + "c" * 64
+    before = {
+        "services": {},
+        "x-runtime": {"image": "synthetic/helpers:before", "env_file": ["./runtime.env"]},
+    }
+    approved, resolved = {}, {}
+    for name in (*module.DEPLOYMENT_IMAGE_SERVICES, "x-runtime"):
+        reference = runtime if name in module.SERVICES else "synthetic/helpers:before"
+        image = runtime if name in module.SERVICES else helper
+        approved[name] = {
+            "reference_sha256": hashlib.sha256(reference.encode()).hexdigest(),
+            "image_id": image,
+        }
+        resolved[name] = image
+        if name != "x-runtime":
+            before["services"][name] = {
+                "image": reference,
+                "environment": {"KEEP": "synthetic-private"},
+                "env_file": [{"path": "/etc/synthetic/runtime.env", "required": True}],
+                "volumes": [
+                    {
+                        "source": "/opt/synthetic/config/custom.yaml",
+                        "target": module.TARGET,
+                        "read_only": True,
+                    }
+                ],
+                "read_only": True,
+                "restart": "no",
+                "depends_on": {},
+            }
+    return before, dict(
+        approved_before_images=approved,
+        resolved_before_images=resolved,
+        runtime_images={name: runtime for name in module.SERVICES},
+        expected_runtime_image=runtime,
+        candidate_image=candidate,
+    )
+
+
+def test_mixed_before_images_accept_explicit_six_service_candidate():
+    before, arguments = mixed_image_observations()
+    untouched = copy.deepcopy(before)
+    after = module.compose_image_candidate(before, arguments["candidate_image"])
+    module.verify_compose_image_transition(before, after, **arguments)
+    assert before == untouched and after["x-runtime"] == before["x-runtime"]
+    assert all(
+        after["services"][n]["image"] == arguments["candidate_image"]
+        for n in module.DEPLOYMENT_IMAGE_SERVICES
+    )
+
+
+def test_env_selector_override_does_not_switch_hardcoded_app_images():
+    before, arguments = mixed_image_observations()
+    after = copy.deepcopy(before)
+    for name in ("migration", "heartbeat-init"):
+        after["services"][name]["image"] = arguments["candidate_image"]
+    after["x-runtime"]["image"] = arguments["candidate_image"]
+    with pytest.raises(
+        module.ConfigurationProofError, match="candidate_deployment_images_mismatch"
+    ):
+        module.verify_compose_image_transition(before, after, **arguments)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["approved-ref", "resolved-helper", "runtime", "missing-approved", "unresolved", "helper-old"],
+)
+def test_image_observation_drift_rejected(fault):
+    before, arguments = mixed_image_observations()
+    after = module.compose_image_candidate(before, arguments["candidate_image"])
+    if fault == "approved-ref":
+        arguments["approved_before_images"]["migration"]["reference_sha256"] = "0" * 64
+    elif fault == "resolved-helper":
+        arguments["resolved_before_images"]["migration"] = "sha256:" + "d" * 64
+    elif fault == "runtime":
+        arguments["runtime_images"]["gateway"] = "sha256:" + "d" * 64
+    elif fault == "missing-approved":
+        del arguments["approved_before_images"]["heartbeat-init"]
+    elif fault == "unresolved":
+        before["services"]["migration"]["image"] = "${CF_GATEWAY_IMAGE}"
+    else:
+        after["services"]["heartbeat-init"]["image"] = before["services"]["heartbeat-init"]["image"]
+    with pytest.raises(module.ConfigurationProofError) as raised:
+        module.verify_compose_image_transition(before, after, **arguments)
+    assert "synthetic-private" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "environment",
+        "env_file",
+        "volumes",
+        "restart",
+        "depends_on",
+        "x-runtime",
+        "service-added",
+        "bool-number",
+    ],
+)
+def test_candidate_all_other_semantics_must_match(fault):
+    before, arguments = mixed_image_observations()
+    after = module.compose_image_candidate(before, arguments["candidate_image"])
+    if fault == "x-runtime":
+        after["x-runtime"]["image"] = arguments["candidate_image"]
+    elif fault == "service-added":
+        after["services"]["unapproved"] = {"image": arguments["candidate_image"]}
+    elif fault == "bool-number":
+        after["services"]["migration"]["read_only"] = 1
+    else:
+        after["services"]["migration"][fault] = "changed"
+    with pytest.raises(module.ConfigurationProofError, match="compose_non_image_semantics_changed"):
+        module.verify_compose_image_transition(before, after, **arguments)
+
+
+def test_candidate_breaks_aliases_without_mutating_extension_or_source():
+    shared = {"image": "${CF_GATEWAY_IMAGE}", "environment": {"KEEP": "value"}}
+    before = {
+        "x-runtime": shared,
+        "services": {name: shared for name in module.DEPLOYMENT_IMAGE_SERVICES},
+    }
+    after = module.compose_image_candidate(before, "sha256:" + "c" * 64)
+    assert before["x-runtime"]["image"] == after["x-runtime"]["image"] == "${CF_GATEWAY_IMAGE}"
+    assert all(row["image"] == "sha256:" + "c" * 64 for row in after["services"].values())
+
+
+def test_candidate_breaks_root_services_alias_before_overrides():
+    before, arguments = mixed_image_observations()
+    before["x-service-set"] = before["services"]
+    unchanged = copy.deepcopy(before)
+    after = module.compose_image_candidate(before, arguments["candidate_image"])
+    assert before == unchanged
+    assert after["x-service-set"] == before["services"]
+    assert after["services"] is not after["x-service-set"]
+    module.verify_compose_image_transition(before, after, **arguments)

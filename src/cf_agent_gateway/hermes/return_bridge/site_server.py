@@ -23,6 +23,7 @@ from cf_agent_gateway.hermes.return_bridge import enablement as assets
 SCHEMA = "cf-return-site/v1"
 LIMIT = 1_048_576
 APPS = ("gateway", "dispatch-worker", "worker", "delivery-worker")
+DEPLOYMENT_IMAGE_SERVICES = (*APPS, "migration", "heartbeat-init")
 SIGNING_ENV = "CF_GATEWAY_ARTIFACT_RETURN_KEY"
 CA_TARGET = "/run/cf-gateway/ca/hermes-ca.pem"
 STATE_TARGET = "/var/lib/cf-agent-gateway"
@@ -221,6 +222,7 @@ def plan_compose(path, request):
     before, original = _yaml(path)
     _compose_structure(original, path.parent)
     revised = copy.deepcopy(original)
+    revised["services"] = copy.deepcopy(original["services"])
     services = revised.get("services", {})
     state_sources = []
     for name in APPS:
@@ -260,6 +262,14 @@ def plan_compose(path, request):
             ]
     if len(set(state_sources)) != 1 or state_sources[0] != "gateway-state":
         raise assets.EnablementError("existing_named_artifact_volume_required")
+    for name in DEPLOYMENT_IMAGE_SERVICES:
+        if name in APPS:
+            continue
+        service = services.get(name)
+        if not isinstance(service, dict) or not isinstance(service.get("image"), str):
+            raise assets.EnablementError("deployment_image_service_missing")
+        services[name] = copy.deepcopy(service)
+        services[name]["image"] = request["candidate_image"]
     for name, service in services.items():
         if name in {"gateway", "dispatch-worker"}:
             continue
@@ -272,11 +282,14 @@ def plan_compose(path, request):
     expected = copy.deepcopy(revised)
     for name in APPS:
         expected["services"][name] = copy.deepcopy(original["services"][name])
+    for name in DEPLOYMENT_IMAGE_SERVICES:
+        if name not in APPS:
+            expected["services"][name]["image"] = original["services"][name]["image"]
     if expected != original:
         raise assets.EnablementError("unmanaged_compose_change")
     return assets.Change(
         path,
-        ("four_application_images", "api_dispatch_ca_mount", "api_dispatch_signing_env_file"),
+        ("six_deployment_images", "api_dispatch_ca_mount", "api_dispatch_signing_env_file"),
         before,
         yaml.safe_dump(revised, sort_keys=False, allow_unicode=True).encode(),
     )
