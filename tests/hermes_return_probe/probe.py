@@ -26,17 +26,32 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 COMMIT = "0f4a98f87c17007b81500239d0bd5b9574027b73"
-BLOBS = {
-    "gateway/platforms/api_server.py": "5bd5e91fa2296f3c150a87845c047a6a69933c71",
-    "gateway/platforms/api_server_openai_routes.py": "c1cb7f55d3f3fc960063cdc1194347386180331c",
-    "gateway/platforms/api_server_runs.py": "8b662cacbdf4a541c7b7b0c0eb8c953d0180001e",
-    "gateway/platforms/tcp_site.py": "77c9f69850093e55138a458bde1c5ac4e6aa1a86",
-    "gateway/platforms/base.py": "6c544cf9e68db916219af3340de513283a73fe46",
-    "hermes_cli/plugins.py": "bba82a3b4b0a394f69fbb2a54cc5a94f2a1303e5",
-    "hermes_cli/middleware.py": "1c6ed2ae249a3b0539189c2fbd62916fadef65f1",
-    "model_tools.py": "9a068d5a1b42f1fa7bd7e17d9e5d456b40a56713",
-    "agent/tool_executor.py": "53efc4e1c21c11037bfb93a5ca73403d3ef0bb12",
-    "agent/turn_context.py": "452a2f519f9209bb7cc4077ed77135991c6cc8cb",
+CURRENT_COMMIT = "427d605d4985c2d49a795493ef6c5d66413057d1"
+SOURCE_BLOBS = {
+    COMMIT: {
+        "gateway/platforms/api_server.py": "5bd5e91fa2296f3c150a87845c047a6a69933c71",
+        "gateway/platforms/api_server_openai_routes.py": "c1cb7f55d3f3fc960063cdc1194347386180331c",
+        "gateway/platforms/api_server_runs.py": "8b662cacbdf4a541c7b7b0c0eb8c953d0180001e",
+        "gateway/platforms/tcp_site.py": "77c9f69850093e55138a458bde1c5ac4e6aa1a86",
+        "gateway/platforms/base.py": "6c544cf9e68db916219af3340de513283a73fe46",
+        "hermes_cli/plugins.py": "bba82a3b4b0a394f69fbb2a54cc5a94f2a1303e5",
+        "hermes_cli/middleware.py": "1c6ed2ae249a3b0539189c2fbd62916fadef65f1",
+        "model_tools.py": "9a068d5a1b42f1fa7bd7e17d9e5d456b40a56713",
+        "agent/tool_executor.py": "53efc4e1c21c11037bfb93a5ca73403d3ef0bb12",
+        "agent/turn_context.py": "452a2f519f9209bb7cc4077ed77135991c6cc8cb",
+    },
+    CURRENT_COMMIT: {
+        "gateway/platforms/api_server.py": "8045b003177ec790b5350163949c52e10f35906e",
+        "gateway/platforms/api_server_openai_routes.py": "0c3a134381c15d217d20bc39668de8b9f1128c8e",
+        "gateway/platforms/api_server_runs.py": "bfb5b4dbee3b77f74bda3fceaedc4f7788be2b5e",
+        "gateway/platforms/tcp_site.py": "77c9f69850093e55138a458bde1c5ac4e6aa1a86",
+        "gateway/platforms/base.py": "197f6dca7021cebf5d95248a44282e28753bc0a7",
+        "hermes_cli/plugins.py": "a652179cd4a7a3ac04fe7eb2a0377de6a6dfbc58",
+        "hermes_cli/middleware.py": "753b6643ab2c6b2d7cfc38d1e65043286ceb0080",
+        "model_tools.py": "8dd93efc5eaa44248f9136e38843639259fdc4f9",
+        "agent/tool_executor.py": "f0783edaa75371af786de8e9a7f63f46f0a561cf",
+        "agent/turn_context.py": "70d47a6c2ec661d649e0f9f2776f3f34e7426cea",
+    },
 }
 APPROVED = {
     "file": (
@@ -71,16 +86,47 @@ def write_new(path: Path, value) -> None:
         json.dump(value, stream, ensure_ascii=False, indent=2, default=str)
 
 
-def verify_source(source: Path) -> dict:
+def verify_source(source: Path, commit: str = COMMIT) -> dict:
     """Verify only the explicitly named install's immutable source, no other worktree."""
+    if commit not in SOURCE_BLOBS:
+        raise ValueError("Unsupported official source commit")
     result = {}
-    for name, expected in BLOBS.items():
+    for name, expected in SOURCE_BLOBS[commit].items():
         raw = (source / name).read_bytes()
         actual = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
         if actual != expected:
-            raise ValueError(f"Official source does not match {COMMIT}: {name}")
+            raise ValueError(f"Official source does not match {commit}: {name}")
         result[name] = actual
     return result
+
+
+def safe_summary(
+    *,
+    source_commit,
+    kind,
+    routing,
+    established_session,
+    synthetic_model,
+    report_ok,
+    observations,
+    scan,
+):
+    """CI export allowlist; never copy complete request/response or evidence records."""
+    return {
+        "ok": report_ok and not scan["matches"],
+        "hermes_commit": source_commit,
+        "kind": kind,
+        "routing": routing,
+        "established_session": established_session,
+        "profile_reference": "default",
+        "profile_revision": 1,
+        "synthetic_model": synthetic_model,
+        "http_status_codes": [item["status"] for item in observations],
+        "http_business_posts": sum(item["method"] == "POST" for item in observations),
+        "ack_verified": bool(observations)
+        and all(item["accepted_ack_matches"] for item in observations),
+        "credential_scan": {"files": scan["files"], "matches": scan["matches"]},
+    }
 
 
 def _unused_port() -> int:
@@ -201,7 +247,7 @@ def gateway_https(settings, certificates, observations, lease_seconds=None):
             enabled=True,
             host_contract_confirmed=True,
             public_base_url=origin,
-            profile_reference="test-profile",
+            profile_reference="default",
             signing_key_env="TEST_ARTIFACT_RETURN_KEY",
         ),
     )
@@ -281,6 +327,137 @@ def isolated_environment(case: Path) -> dict[str, str]:
     return env
 
 
+@contextmanager
+def admitted_runtime(case, patch, *, account, group, content, routing):
+    """Provision only new test data through the normal stores and admission path."""
+    import test_artifact_return_integration as existing
+
+    if routing == "legacy":
+        with existing.runtime(case, patch, account=account, group=group, content=content) as state:
+            yield state
+        return
+    if routing != "v2":
+        raise ValueError("Unknown probe routing mode")
+
+    from test_hermes_dispatch_ingestion import normalized_message
+
+    from cf_agent_gateway.access import AccessPolicyService, RiskLevel
+    from cf_agent_gateway.adapters.wechat import WechatConversationType
+    from cf_agent_gateway.agent_profile import AgentProfileStore
+    from cf_agent_gateway.config import (
+        ArtifactSettings,
+        DatabaseSettings,
+        RuntimeSettings,
+        Settings,
+        WorkerSettings,
+    )
+    from cf_agent_gateway.database import (
+        create_database_engine,
+        create_database_session_factory,
+        initialize_database,
+    )
+    from cf_agent_gateway.identity.service import IdentityService
+    from cf_agent_gateway.ingestion import MessageAdmissionService
+    from cf_agent_gateway.message.schemas import ConversationCreate
+    from cf_agent_gateway.message.store import MessageStore
+    from cf_agent_gateway.workspace.models import ThreadPolicy
+
+    patch.setenv(existing.KEY_ENV, "synthetic-return-signing-key-" + "x" * 32)
+    patch.setenv("CF_GATEWAY_API_TOKEN", "synthetic-gateway-api-token")
+    settings = Settings(
+        database=DatabaseSettings(url=f"sqlite+pysqlite:///{case / 'gateway.db'}"),
+        artifact=ArtifactSettings(storage_root=str(case / "artifacts")),
+        runtime=RuntimeSettings(v2_routing_enabled=True),
+        worker=WorkerSettings(retry_limit=0),
+    )
+    engine = create_database_engine(settings.database.url)
+    initialize_database(engine)
+    factory = create_database_session_factory(engine)
+    chat = "return-fixture@chatroom" if group else "wxid-return-user"
+    try:
+        with factory() as session:
+            identities = IdentityService(session)
+            identity = identities.create_identity(employee_id="return-test-employee")
+            identities.create_mapping(
+                platform="wechat",
+                account_id=account,
+                sender_id="wxid-alice",
+                enterprise_identity_id=identity.id,
+            )
+            policy = AccessPolicyService(session)
+            policy.upsert_user_policy(enterprise_identity_id=identity.id, enabled=True)
+            policy.upsert_gateway_policy(enabled=True, allowed_risk_levels={RiskLevel.NORMAL})
+            conversation, _ = MessageStore(session).prepare_conversation(
+                ConversationCreate(
+                    source="wechat",
+                    source_account_id=account,
+                    conversation_id=chat,
+                    conversation_type="group" if group else "private",
+                )
+            )
+            profiles = AgentProfileStore(session)
+            profile, _ = profiles.create_agent_profile(
+                profile_key="isolated-return",
+                revision=1,
+                provider="hermes",
+                external_profile_ref="default",
+                model="hermes-agent",
+            )
+            if group:
+                group_type, _ = profiles.create_group_type(
+                    type_key="isolated-return-group",
+                    display_name="Isolated return group",
+                    agent_profile_id=profile.id,
+                    thread_policy=ThreadPolicy.GROUP_SENDER,
+                )
+                profiles.bind_conversation_group_type(
+                    conversation_record_id=conversation.id,
+                    group_type_id=group_type.id,
+                )
+            else:
+                profiles.bind_conversation_agent_profile(
+                    conversation_record_id=conversation.id,
+                    agent_profile_id=profile.id,
+                )
+            admitted = MessageAdmissionService(session, v2_routing_enabled=True).process(
+                normalized_message(
+                    source_account_id=account,
+                    conversation_id=chat,
+                    conversation_type=(
+                        WechatConversationType.GROUP if group else WechatConversationType.PRIVATE
+                    ),
+                    is_mentioned=True if group else None,
+                    content=content,
+                )
+            )
+            assert admitted.admission.admitted and admitted.dispatch_record_id is not None
+        with existing.gateway_http(settings) as configured:
+            yield configured, factory, admitted, chat
+    finally:
+        engine.dispose()
+
+
+def admit_followup(factory, *, account, chat, content, routing):
+    from test_hermes_dispatch_ingestion import normalized_message
+
+    from cf_agent_gateway.ingestion import MessageAdmissionService
+
+    with factory() as session:
+        admitted = MessageAdmissionService(session, v2_routing_enabled=routing == "v2").process(
+            normalized_message(
+                source_account_id=account,
+                conversation_id=chat,
+                content=content,
+                source_message_id="server-002",
+                source_server_id="server-002",
+                source_local_id="local-002",
+                event_id="wechat:event-002",
+            )
+        )
+        assert admitted.admission.admitted and admitted.dispatch_record_id is not None
+        return admitted
+
+
 def run_case(
     *,
     source: Path,
@@ -290,15 +467,19 @@ def run_case(
     kind: str,
     model_config: dict,
     model_label: str,
+    source_commit: str = COMMIT,
+    routing: str = "legacy",
+    established_session: bool = False,
     input_path: Path | None = None,
     model_calls: list | None = None,
     agent_options: dict | None = None,
     lease_seconds: float | None = None,
 ) -> dict:
-    """One business POST, never retry the Agent after a timeout or failed assertion.
+    """One business POST per new task; never retry a failed or uncertain task.
 
     Callers may supply the already-approved model configuration in memory. This
     function does not discover or read real model credentials/configurations.
+    Established-session mode first completes and delivers a separate text task.
     """
     import httpx
     import pytest
@@ -314,7 +495,11 @@ def run_case(
     from cf_agent_gateway.runtime.dispatch_worker import build_dispatch_worker
     from cf_agent_gateway.task.model import HermesDispatchRecord
 
-    source_proof = verify_source(source)
+    source_proof = verify_source(source, source_commit)
+    if routing not in {"legacy", "v2"}:
+        raise ValueError("Unknown probe routing mode")
+    if established_session and kind != "text":
+        raise ValueError("Established-session probe uses two ordinary text tasks")
     agent_options = dict(agent_options or {})
     if set(agent_options) - {"reasoning_effort", "service_tier"}:
         raise ValueError("Only approved reasoning effort/service tier may be forwarded")
@@ -349,7 +534,9 @@ def run_case(
             "intent_id": session_id,
             "kind": kind,
             "prompt": prompt,
-            "source_commit": COMMIT,
+            "source_commit": source_commit,
+            "routing": routing,
+            "established_session": established_session,
             "source_files": source_proof,
             "bridge_files": {
                 str(path.relative_to(Path(__file__).resolve().parents[2])): digest(
@@ -411,8 +598,13 @@ def run_case(
             "gateway_http",
             lambda s: gateway_https(s, certificate, gateway_observations, lease_seconds),
         )
-        with existing.runtime(
-            case, patch, account=receiver.account, group=kind == "image", content=prompt
+        with admitted_runtime(
+            case,
+            patch,
+            account=receiver.account,
+            group=kind == "image",
+            content=prompt,
+            routing=routing,
         ) as (settings, factory, admitted, chat):
             plugin = case / "home/plugins/cf-artifact-return"
             plugin.mkdir(parents=True)
@@ -432,7 +624,7 @@ def run_case(
                                 "gateway_origin": settings.artifact_return.public_base_url,
                                 "gateway_ca_file": str(certificate[0]),
                                 "work_root": str(case / "work"),
-                                "profile_reference": "test-profile",
+                                "profile_reference": "default",
                                 "profile_revision": 1,
                                 "tls_host": "127.0.0.1",
                                 "tls_port": tls_port,
@@ -454,6 +646,7 @@ def run_case(
             (case / "home/config.yaml").write_text(json.dumps(config), encoding="utf-8")
             child_payload = {
                 "source": str(source),
+                "source_commit": source_commit,
                 "repository": str(Path(__file__).resolve().parents[2]),
                 "case": str(case),
                 "filename": filename if kind != "text" else None,
@@ -512,10 +705,39 @@ def run_case(
                             hermes_client=client,
                             sender_factory=None,
                         )
-                        result = worker.run_once()  # The sole business submission.
+                        if established_session:
+                            warmup = worker.run_once()
+                            assert warmup is not None and warmup.status.value == "success", warmup
+                            assert worker.run_once() is None
+                            with existing.protocol_peer(receiver) as peer:
+                                assert (
+                                    existing.deliver(settings, factory, peer).status.value
+                                    == "delivered"
+                                )
+                                assert existing.deliver(settings, factory, peer) is None
+                            first_admitted = admitted
+                            admitted = admit_followup(
+                                factory,
+                                account=receiver.account,
+                                chat=chat,
+                                content=prompt,
+                                routing=routing,
+                            )
+                            assert admitted.message_id != first_admitted.message_id
+                            assert (
+                                admitted.admission.ai_thread_id
+                                == first_admitted.admission.ai_thread_id
+                            )
+                        result = worker.run_once()  # Sole submission for this admitted task.
                         write_new(case / "http.json", http_observations)
                         assert result is not None and result.status.value == "success", result
                         assert worker.run_once() is None
+                        assert len(http_observations) == (2 if established_session else 1)
+                        if established_session:
+                            assert (
+                                http_observations[0]["session_id"]
+                                == http_observations[1]["session_id"]
+                            )
                     from cf_agent_gateway.hermes.tls import verified_ssl_context
 
                     with httpx.Client(
@@ -539,8 +761,17 @@ def run_case(
                         assert existing.deliver(settings, factory, peer) is None
                     with factory() as db:
                         artifacts = list(db.scalars(select(Artifact)))
-                        response = db.scalar(select(ResponseRecord))
-                        delivery = db.scalar(select(DeliveryOutboxRecord))
+                        response = db.scalar(
+                            select(ResponseRecord).where(
+                                ResponseRecord.message_id == admitted.message_id
+                            )
+                        )
+                        assert response is not None
+                        delivery = db.scalar(
+                            select(DeliveryOutboxRecord).where(
+                                DeliveryOutboxRecord.response_id == response.response_id
+                            )
+                        )
                         dispatch = db.get(HermesDispatchRecord, admitted.dispatch_record_id)
                         receipts = list(db.scalars(select(DeliveryReceipt)))
                         assert response and delivery and dispatch
@@ -561,7 +792,10 @@ def run_case(
                         report = {
                             "ok": True,
                             "contract": "cf-artifact-return/v1",
-                            "hermes_commit": COMMIT,
+                            "hermes_commit": source_commit,
+                            "profile_reference": settings.artifact_return.profile_reference,
+                            "routing": routing,
+                            "established_session": established_session,
                             "model": model_label,
                             "official_http_and_agent": True,
                             "tls_both_directions": True,
@@ -626,6 +860,19 @@ def run_case(
                         "included": "all files including SQLite/WAL/SHM and sample bytes",
                     }
                     write_new(case / "credential-scan.json", scan)
+                    write_new(
+                        case / "safe-summary.json",
+                        safe_summary(
+                            source_commit=source_commit,
+                            kind=kind,
+                            routing=routing,
+                            established_session=established_session,
+                            synthetic_model=model_label == "loopback synthetic model",
+                            report_ok=report is not None,
+                            observations=http_observations,
+                            scan=scan,
+                        ),
+                    )
                     if matches:
                         raise AssertionError("Credential leaked into probe evidence")
                     if report is not None:
@@ -808,7 +1055,7 @@ async def child():
     _PAYLOAD = json.loads(sys.stdin.readline())
     case, source = Path(_PAYLOAD["case"]), Path(_PAYLOAD["source"])
     assert platform.python_version() == "3.14.7", "Use selected existing Python 3.14.7"
-    verify_source(source)
+    verify_source(source, _PAYLOAD["source_commit"])
     sys.path[:0] = [str(source), str(Path(_PAYLOAD["repository"]) / "src")]
     sys.modules["cf_return_probe_child"] = sys.modules[__name__]
     import mimetypes
@@ -898,10 +1145,13 @@ async def child():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-source", type=Path)
+    parser.add_argument("--hermes-commit", choices=tuple(SOURCE_BLOBS), default=COMMIT)
     parser.add_argument("--hermes-python", type=Path)
     parser.add_argument("--site-packages", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--kind", choices=("file", "image", "text"), default="file")
+    parser.add_argument("--routing", choices=("legacy", "v2"), default="legacy")
+    parser.add_argument("--established-session", action="store_true")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.child:
@@ -915,6 +1165,9 @@ def main():
     with synthetic_model(filename, args.kind) as (model, calls):
         report = run_case(
             source=args.hermes_source,
+            source_commit=args.hermes_commit,
+            routing=args.routing,
+            established_session=args.established_session,
             hermes_python=args.hermes_python,
             site_packages=args.site_packages,
             output=args.output,
@@ -924,7 +1177,8 @@ def main():
             model_calls=calls,
             lease_seconds=3,
         )
-    print(json.dumps(report, ensure_ascii=False))
+    assert report["ok"]
+    print((args.output / "safe-summary.json").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

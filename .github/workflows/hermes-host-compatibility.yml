@@ -126,19 +126,28 @@ jobs:
                           '--hermes-source', '.pytest_cache/hermes-host-probe/source'], check=True)
 
   official-artifact-return:
-    name: Official Hermes HTTPS artifact return (0f4a98f)
-    runs-on: ubuntu-latest
+    name: Official Hermes HTTPS artifact return (${{ matrix.os }}, ${{ matrix.hermes }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        hermes:
+          - 0f4a98f87c17007b81500239d0bd5b9574027b73
+          - 427d605d4985c2d49a795493ef6c5d66413057d1
     steps:
+      - name: Preserve official Git blob bytes
+        run: git config --global core.autocrlf false
       - name: Check out Gateway
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Check out current immutable official Hermes source
+      - name: Check out selected immutable official Hermes source
         uses: actions/checkout@v4
         with:
           repository: NousResearch/hermes-agent
-          ref: 0f4a98f87c17007b81500239d0bd5b9574027b73
+          ref: ${{ matrix.hermes }}
           path: .pytest_cache/hermes-return-probe/source
           persist-credentials: false
       - name: Set up Gateway test Python
@@ -146,10 +155,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build isolated Gateway test environment
-        shell: bash
+        shell: python
         run: |
-          python -m venv .pytest_cache/hermes-return-probe/gateway-venv
-          .pytest_cache/hermes-return-probe/gateway-venv/bin/python -m pip install -e '.[dev]'
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path('.pytest_cache/hermes-return-probe/gateway-venv')
+          subprocess.run([sys.executable, '-m', 'venv', str(root)], check=True)
+          python = root / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-m', 'pip', 'install', '-e', '.[dev]'], check=True)
       - name: Set up pinned official Hermes test Python
         uses: actions/setup-python@v5
         with:
@@ -157,34 +170,45 @@ jobs:
           cache: pip
           cache-dependency-path: tests/hermes_return_probe/requirements.txt
       - name: Build separate official probe dependency environment
-        shell: bash
+        shell: python
         run: |
-          python -m venv .pytest_cache/hermes-return-probe/hermes-venv
-          .pytest_cache/hermes-return-probe/hermes-venv/bin/python -m pip install -r tests/hermes_return_probe/requirements.txt
-      - name: Exercise official HTTPS and real Agent tools for PDF, PNG and text
-        shell: bash
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path('.pytest_cache/hermes-return-probe/hermes-venv')
+          subprocess.run([sys.executable, '-m', 'venv', str(root)], check=True)
+          python = root / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-m', 'pip', 'install', '-r',
+                          'tests/hermes_return_probe/requirements.txt'], check=True)
+      - name: Exercise official HTTPS and real Agent tools for text, PDF and PNG
+        shell: python
+        env:
+          PROBE_HERMES_COMMIT: ${{ matrix.hermes }}
         run: |
-          set -euo pipefail
-          root="$GITHUB_WORKSPACE/.pytest_cache/hermes-return-probe"
-          for kind in file image text; do
-            "$root/gateway-venv/bin/python" tests/hermes_return_probe/probe.py \
-              --hermes-source "$root/source" \
-              --hermes-python "$root/hermes-venv/bin/python" \
-              --site-packages "$root/hermes-venv/lib/python3.14/site-packages" \
-              --output "$root/case-$kind" --kind "$kind"
-          done
-      - name: Preserve isolated result summaries and traces
+          import os, subprocess
+          from pathlib import Path
+          root = Path('.pytest_cache/hermes-return-probe').resolve()
+          executable = 'Scripts/python.exe' if os.name == 'nt' else 'bin/python'
+          packages = 'Lib/site-packages' if os.name == 'nt' else 'lib/python3.14/site-packages'
+          cases = [('legacy', kind, False) for kind in ('text', 'file', 'image')]
+          cases += [('v2', kind, False) for kind in ('text', 'file', 'image')]
+          cases += [('v2', 'text', True)]
+          for routing, kind, established in cases:
+              suffix = f'{routing}-{kind}' + ('-established' if established else '')
+              subprocess.run([str(root / 'gateway-venv' / executable),
+                              'tests/hermes_return_probe/probe.py',
+                              '--hermes-source', str(root / 'source'),
+                              '--hermes-commit', os.environ['PROBE_HERMES_COMMIT'],
+                              '--hermes-python', str(root / 'hermes-venv' / executable),
+                              '--site-packages', str(root / 'hermes-venv' / packages),
+                              '--output', str(root / f'case-{suffix}'), '--kind', kind,
+                              '--routing', routing] +
+                             (['--established-session'] if established else []), check=True)
+      - name: Preserve only sanitized isolated summaries
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: official-hermes-artifact-return-${{ github.sha }}
+          name: official-hermes-artifact-return-${{ matrix.os }}-${{ matrix.hermes }}-${{ github.sha }}
           path: |
-            .pytest_cache/hermes-return-probe/case-*/intent.json
-            .pytest_cache/hermes-return-probe/case-*/report.json
-            .pytest_cache/hermes-return-probe/case-*/http.json
-            .pytest_cache/hermes-return-probe/case-*/events.jsonl
-            .pytest_cache/hermes-return-probe/case-*/gateway-http.json
-            .pytest_cache/hermes-return-probe/case-*/credential-scan.json
-            .pytest_cache/hermes-return-probe/case-*/child.stderr.txt
+            .pytest_cache/hermes-return-probe/case-*/safe-summary.json
           if-no-files-found: warn
           retention-days: 7

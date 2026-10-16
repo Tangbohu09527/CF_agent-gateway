@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,49 @@ import pytest
 from hermes_return_probe import probe
 
 from cf_agent_gateway.hermes.return_bridge import files
+
+
+@pytest.mark.parametrize("status,accepted,leaks", [(200, True, 0), (403, False, 0), (200, True, 1)])
+def test_ci_summary_allowlist_excludes_private_probe_records(status, accepted, leaks):
+    private = "must-never-export-private-value"
+    summary = probe.safe_summary(
+        source_commit=probe.CURRENT_COMMIT,
+        kind="text",
+        routing="v2",
+        established_session=True,
+        synthetic_model=True,
+        report_ok=status == 200,
+        observations=[
+            {
+                "method": "POST",
+                "status": status,
+                "accepted_ack_matches": accepted,
+                "request": {"messages": [{"content": private}]},
+                "response": {"choices": [{"content": private}]},
+                "headers": {"Authorization": private},
+                "capability": private,
+                "session_id": private,
+                "endpoint": private,
+                "path": private,
+            }
+        ],
+        scan={"files": 42, "matches": leaks, "private_extension": private},
+    )
+    assert private not in json.dumps(summary)
+    assert summary == {
+        "ok": status == 200 and not leaks,
+        "hermes_commit": probe.CURRENT_COMMIT,
+        "kind": "text",
+        "routing": "v2",
+        "established_session": True,
+        "profile_reference": "default",
+        "profile_revision": 1,
+        "synthetic_model": True,
+        "http_status_codes": [status],
+        "http_business_posts": 1,
+        "ack_verified": accepted,
+        "credential_scan": {"files": 42, "matches": leaks},
+    }
 
 
 def test_linux_probe_metadata_is_exact_public_files():
