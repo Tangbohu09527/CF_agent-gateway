@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from cf_agent_gateway.hermes.return_bridge import enablement as en
+from cf_agent_gateway.hermes.return_bridge import windows_work_root as work_security
 from cf_agent_gateway.hermes.tls import verified_ssl_context
 
 PEER_SCHEMA = "cf-artifact-return/site-peer/v1"
@@ -44,6 +45,7 @@ RELEASE_FILES = (
     "deploy/prepare-return-windows.ps1",
     "src/cf_agent_gateway/hermes/return_bridge/site_windows.py",
     "src/cf_agent_gateway/hermes/return_bridge/enablement.py",
+    "src/cf_agent_gateway/hermes/return_bridge/windows_work_root.py",
     *("src/cf_agent_gateway/" + path for path in en.BUNDLE_FILES),
 )
 REQUEST_FIELDS = frozenset(
@@ -433,8 +435,25 @@ def _tls_assets(request):
     return result
 
 
+def _runtime_user(request, *, running):
+    user = work_security.current_user()
+    if running:
+        before = process_snapshot(request)
+        if len(before["processes"]) != 1:
+            raise SiteError("unique_current_gateway_required")
+        identity = _process_identity(before["processes"][0])
+        if work_security.process_user(identity["pid"]) != user:
+            raise SiteError("installer_runtime_user_mismatch")
+        after = process_snapshot(request)
+        if len(after["processes"]) != 1 or _process_identity(after["processes"][0]) != identity:
+            raise SiteError("management_process_identity_changed")
+    work_security.check(en._path(request["work_root"]), user, missing_allowed=True)
+    return user
+
+
 def plan(request: dict, *, snapshot: dict | None = None) -> tuple[dict, en.Plan | None]:
     request = request_defaults(request)
+    runtime_user = _runtime_user(request, running=snapshot is None)
     _check_listener_environment(request)
     home = en._path(request["hermes_home"])
     proof = source_proof(request)
@@ -451,6 +470,7 @@ def plan(request: dict, *, snapshot: dict | None = None) -> tuple[dict, en.Plan 
         "installation": installation_proof(request),
         "config_sha256": _sha(raw),
         "executor": executor(request),
+        "runtime_user": runtime_user,
         "existing_toolsets": effective,
         "pending": pending,
         "activation_allowed": False,
@@ -598,6 +618,7 @@ def _reviewed(request, summary, expected_plan_sha256):
         or summary.get("request_sha256") != _json_sha(request)
     ):
         raise SiteError("reviewed_plan_changed")
+    work_security.require_user(summary.get("runtime_user"))
     _recheck_installation(request, summary)
 
 
@@ -729,6 +750,12 @@ def _stop_once(request, summary, *, intent_name, expected_process=None):
         if len(state["processes"]) != 1:
             raise SiteError("unique_current_gateway_required")
         identity = _process_identity(state["processes"][0])
+        if work_security.process_user(identity["pid"]) != summary["runtime_user"]:
+            raise SiteError("installer_runtime_user_mismatch")
+        if intent_name == "stop-intent.json":
+            work_security.check(
+                en._path(request["work_root"]), summary["runtime_user"], missing_allowed=True
+            )
         if expected_process is not None and identity != expected_process:
             raise SiteError("management_process_identity_changed")
         intent = {
@@ -791,6 +818,9 @@ def _start_once(request, summary, *, legacy=False):
     intent = _intent(request, summary, intent_name, "start")
     if intent is None:
         _check_listener_environment(request, legacy=legacy)
+        work_security.check(
+            en._path(request["work_root"]), summary["runtime_user"], missing_allowed=legacy
+        )
         before = process_snapshot(request)
         if before["processes"]:
             raise SiteError("gateway_must_remain_stopped")
@@ -812,6 +842,11 @@ def _start_once(request, summary, *, legacy=False):
         if len(processes) != 1:
             raise SiteError("management_process_identity_changed")
         identity = _process_identity(processes[0])
+        if work_security.process_user(identity["pid"]) != summary["runtime_user"]:
+            raise SiteError("started_runtime_user_mismatch")
+        work_security.check(
+            en._path(request["work_root"]), summary["runtime_user"], missing_allowed=legacy
+        )
         if intent["process"] is None:
             # Only an observed newly started process may complete this intent.
             # PID plus creation timestamp prevents reuse by a later process.
@@ -863,6 +898,8 @@ def execute(request, phase, *, authorized=False, expected_plan_sha256=None, peer
         return csr_plan(request)
     if not authorized:
         raise SiteError("explicit_maintenance_authorization_required")
+    # Official management inherits this token; never stop under an elevated caller.
+    work_security.current_user()
     # Serialize intents and phase receipts across concurrent invocations. The
     # separate enablement journal retains its own lock and recovery rules.
     with en._lock(en._path(request["state_directory"]) / request["deployment_id"]):
@@ -923,8 +960,7 @@ def _execute_mutation(request, phase, expected_plan_sha256, peer):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(request["tls_cert_file"], request["tls_key_file"])
         work = en._path(request["work_root"])
-        work.mkdir(parents=True, exist_ok=True)
-        en._private(work)
+        work_security.prepare(work, summary["runtime_user"])
         journal = en.apply_plan(
             material,
             en._path(request["state_directory"]) / "journal",
