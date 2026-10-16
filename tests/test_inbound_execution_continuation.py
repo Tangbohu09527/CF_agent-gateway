@@ -23,6 +23,8 @@ from test_inbound_media_queue import rig as queue_rig
 
 from cf_agent_gateway.adapters.wechat.inbound_media import parse_inbound_media
 from cf_agent_gateway.adapters.wechat.inbound_media_http import BoundMediaResult, MediaFetchError
+from cf_agent_gateway.adapters.wechat.polling_models import WechatSyncCheckpoint
+from cf_agent_gateway.adapters.wechat.polling_store import WechatSyncCheckpointStore
 from cf_agent_gateway.artifact import ArtifactRepository
 from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
 from cf_agent_gateway.config import ArtifactSettings, DatabaseSettings, Settings, WorkerSettings
@@ -364,12 +366,34 @@ def test_default_false_preserves_four_attempt_dead_and_never_calls_media_host(co
 def test_text_pdf_text_png_second_pdf_restart_keeps_bytes_and_old_dead(continuation):
     h = continuation
     original = establish_text(h)
+    # Poll owns cursor progress. These already-normalized admissions, dispatches,
+    # returns and deliveries must neither reset nor advance its existing cursor.
+    with h.rig.sessions() as session:
+        _, created = WechatSyncCheckpointStore(session).initialize(
+            source_account_id=normalized_message().source_account_id,
+            conversation_id="wxid-alice",
+            last_local_id=1,
+            last_message_fingerprint=hashlib.sha256(b"synthetic-poll-cursor").hexdigest(),
+        )
+        assert created
+
+    def checkpoint_state():
+        with h.rig.sessions() as session:
+            return [
+                {column.name: getattr(row, column.name) for column in row.__table__.columns}
+                for row in session.scalars(
+                    select(WechatSyncCheckpoint).order_by(WechatSyncCheckpoint.id)
+                )
+            ]
+
+    original_checkpoint = checkpoint_state()
     old_tip = h.tip(original.ai_thread_id)
     rejected = h.admit(2, kind="pdf")
     for _ in range(4):
         h.run()
     old_dead = h.snapshot(rejected.dispatch_record_id)
     assert old_dead["status"].value == "dead"
+    assert checkpoint_state() == original_checkpoint
     instruction = establish_text(h, 3, "Read the next file and return its unchanged bytes.")
     old_history = list(h.host.sessions[old_tip])
     h.configure(fresh_session_thread_ids=(original.ai_thread_id,))
@@ -428,8 +452,10 @@ def test_text_pdf_text_png_second_pdf_restart_keeps_bytes_and_old_dead(continuat
             )
     for path, headers, data, _ in h.host.uploads:
         assert h.client.put(path, headers=headers, content=data).status_code == 403
+    assert checkpoint_state() == original_checkpoint
     before_restart_history = list(h.host.sessions[png_tip])
     h.restart()
+    assert checkpoint_state() == original_checkpoint
     second = h.admit(7, kind="pdf")
     assert h.run().status.value == "success"
     second_tip = h.tip(original.ai_thread_id)
@@ -462,6 +488,7 @@ def test_text_pdf_text_png_second_pdf_restart_keeps_bytes_and_old_dead(continuat
             row.status.value == "delivered" for row in session.scalars(select(DeliveryOutboxRecord))
         )
     assert h.snapshot(rejected.dispatch_record_id) == old_dead
+    assert checkpoint_state() == original_checkpoint
     assert h.run() is None
 
 
