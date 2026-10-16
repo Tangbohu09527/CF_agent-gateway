@@ -141,7 +141,9 @@ def test_worker_revokes_and_waits_for_closed_before_completing(rig, failure):
             )
             assert session.scalar(select(HermesDispatchResponse)) is None
         acknowledge_closed(rig, binding_id)
-        result = future.result(timeout=3)
+        # The heartbeat exit may join for the claim's full lease duration. Allow
+        # that cleanup bound plus scheduling/final persistence slack after close.
+        result = future.result(timeout=max(1.0, worker._lease_seconds) + 5.0)
     assert result.status is (
         HermesDispatchStatus.FAILED if failure else HermesDispatchStatus.SUCCESS
     )
