@@ -17,6 +17,12 @@ class HostBindingSettings:
     runtime_provider: str = ""
     runtime_model_options: dict = dataclass_field(default_factory=dict)
     legacy_runtime_confirmed: bool = False
+    # Explicit per-private-thread approval to start a new runtime-bound history.
+    # This is not an attestation about the old session and never enables a group.
+    fresh_session_thread_ids: tuple[str, ...] = ()
+    # The official /v1 route does not enforce the persisted session model lock.
+    # Confirm the protected execution Profile's effective fallback chain is empty.
+    runtime_fallback_disabled_confirmed: bool = False
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool) or not isinstance(
@@ -56,6 +62,24 @@ class HostBindingSettings:
             raise ValueError("host_binding requires an approved dedicated endpoint and profile")
         if not isinstance(self.legacy_runtime_confirmed, bool):
             raise ValueError("host_binding.legacy_runtime_confirmed must be boolean")
+        threads = self.fresh_session_thread_ids
+        if (
+            not isinstance(threads, (list, tuple))
+            or any(
+                not isinstance(value, str)
+                or not value
+                or len(value) > 36
+                or any(not (c.isascii() and (c.isalnum() or c == "-")) for c in value)
+                for value in threads
+            )
+            or len(set(threads)) != len(threads)
+        ):
+            raise ValueError("invalid host_binding.fresh_session_thread_ids")
+        object.__setattr__(self, "fresh_session_thread_ids", tuple(threads))
+        if not isinstance(self.runtime_fallback_disabled_confirmed, bool):
+            raise ValueError("host_binding.runtime_fallback_disabled_confirmed must be boolean")
+        if threads and not self.runtime_fallback_disabled_confirmed:
+            raise ValueError("fresh execution requires verified runtime fallback disabled")
         for field_name in ("runtime_model", "runtime_provider"):
             value = getattr(self, field_name)
             if (
