@@ -134,6 +134,10 @@ def prepare_binding(
     profile_reference,
     profile_revision,
     expected_claim_token,
+    execution_policy=None,
+    previous_session_id=None,
+    instruction_message_id=None,
+    instruction_digest=None,
 ):
     from cf_agent_gateway.inbound.access import _authorized_manifest, grant_read
 
@@ -165,6 +169,11 @@ def prepare_binding(
         _principal(existing, settings)
         if (
             existing.state != "preparing"
+            or existing.parent_session_id != parent_session_id
+            or existing.execution_policy != execution_policy
+            or existing.previous_session_id != previous_session_id
+            or existing.instruction_message_id != instruction_message_id
+            or existing.instruction_digest != instruction_digest
             or existing.grant_ciphertext is None
             or aware(existing.grant_expires_at) <= datetime.now(UTC)
         ):
@@ -184,6 +193,10 @@ def prepare_binding(
         claim_epoch=str(uuid.uuid4()),
         session_id="cfgw-" + uuid.uuid4().hex,
         parent_session_id=parent_session_id,
+        execution_policy=execution_policy,
+        previous_session_id=previous_session_id,
+        instruction_message_id=instruction_message_id,
+        instruction_digest=instruction_digest,
         profile_reference=profile_reference,
         profile_revision=profile_revision,
         host_id=settings.host_id,
