@@ -114,6 +114,8 @@ def exercise(tmp_path, compose, monkeypatch):
             b"  worker: {<<: *runtime, profiles: [worker]}\n"
             b"  dispatch-worker: {<<: *runtime, profiles: [worker]}\n"
             b"  delivery-worker: {<<: *runtime, profiles: [worker]}\n"
+            b"  migration: {<<: *runtime, profiles: [tools]}\n"
+            b"  heartbeat-init: {<<: *runtime, profiles: [tools]}\n"
             b"  maintenance: {<<: *runtime, profiles: [maintenance]}\n"
             b"volumes: {gateway-state: {}}\n"
         ),
@@ -239,16 +241,19 @@ def test_pinned_compose_original_failure_and_preserved_candidate_semantics(exerc
         for value in reversed(exercise["outputs"])
         if all(
             value["services"][name]["image"] == exercise["request"]["candidate_image"]
-            for name in site.APPS
+            for name in site.DEPLOYMENT_IMAGE_SERVICES
         )
     )
-    assert set(resolved["services"]) == {*site.APPS, "maintenance"}
+    assert set(resolved["services"]) == {*site.DEPLOYMENT_IMAGE_SERVICES, "maintenance"}
     for name, service in resolved["services"].items():
         assert service["environment"]["ORDERED_OVERRIDE"] == "last"
         assert service["environment"]["EXPLICIT_OVERRIDE"] == "explicit-selection"
         assert site.SIGNING_ENV not in service["environment"]
-        if name in site.APPS:
+        if name in site.DEPLOYMENT_IMAGE_SERVICES:
             assert service["image"] == exercise["request"]["candidate_image"]
+        else:
+            assert name == "maintenance"
+            assert service["image"] == exercise["request"]["baseline_image"]
     assert exercise["nginx_checks"]
     assert all(path.read_bytes() == before for path, before in original.items())
     assert not Path(exercise["request"]["signing_env_file"]).exists()
