@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 SCHEMA = "cf-return-site/v1"
 PEER_SCHEMA = "cf-artifact-return/site-peer/v1"
 APPS = ("gateway", "worker", "dispatch-worker", "delivery-worker")
+DEPLOYMENT_IMAGE_SERVICES = (*APPS, "migration", "heartbeat-init")
 GATED = ("worker", "delivery-worker")
 SIGNING_ENV = "CF_GATEWAY_ARTIFACT_RETURN_KEY"
 ENV_PROBE = "x-cf-return-validation-env"
@@ -1100,7 +1101,9 @@ class ServerEntry:
     def validate_candidate_images(self, value):
         services = value.get("services", {})
         if any(
-            services.get(name, {}).get("image") != self.request["candidate_image"] for name in APPS
+            not isinstance(services.get(name), dict)
+            or services[name].get("image") != self.request["candidate_image"]
+            for name in DEPLOYMENT_IMAGE_SERVICES
         ):
             fail("candidate_compose_images_mismatch")
 

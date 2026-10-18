@@ -355,9 +355,25 @@ class WechatPollingService:
         sink: NormalizedMessageSink,
         *,
         bootstrap_mode: BootstrapMode | str = BootstrapMode.LATEST,
+        poll_source_account_id: str | None = None,
+        poll_conversation_id: str | None = None,
         clock: Callable[[], datetime] | None = None,
         lifecycle_state: WechatPollingLifecycleState | None = None,
     ) -> None:
+        scope = (poll_source_account_id, poll_conversation_id)
+        if any(value is not None for value in scope) and any(
+            not isinstance(value, str)
+            or not value
+            or len(value) > 255
+            or any(
+                character.isspace() or ord(character) < 32 or ord(character) == 127
+                for character in value
+            )
+            for value in scope
+        ):
+            raise ValueError("wechat poll scope requires an exact account and conversation pair")
+        self._poll_source_account_id = poll_source_account_id
+        self._poll_conversation_id = poll_conversation_id
         self._client = client
         self._checkpoint_store = checkpoint_store
         self._sink = sink
@@ -389,6 +405,20 @@ class WechatPollingService:
                 code="wechat_auth_status_error",
             )
             return PollResult(logged_in=False, failures=[failure])
+        if (
+            self._poll_source_account_id is not None
+            and source_account_id != self._poll_source_account_id
+        ):
+            self._lifecycle_state.invalidate_all()
+            return PollResult(
+                logged_in=True,
+                failures=[
+                    PollFailure(
+                        stage=PollFailureStage.AUTH,
+                        code="wechat_poll_scope_account_mismatch",
+                    )
+                ],
+            )
         self._lifecycle_state.observe_account(source_account_id)
 
         try:
@@ -405,6 +435,16 @@ class WechatPollingService:
         failed_conversation_ids: set[str] = set()
         chat_results: list[ChatPollResult] = []
         for chat in chats:
+            if self._poll_conversation_id is not None:
+                try:
+                    conversation_id, _ = _parse_chat(chat)
+                except Exception:
+                    # Preserve the existing safe parse-failure result, without
+                    # fetching messages or touching any checkpoint.
+                    pass
+                else:
+                    if conversation_id != self._poll_conversation_id:
+                        continue
             result = self._poll_chat(
                 source_account_id,
                 chat,

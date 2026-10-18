@@ -69,8 +69,11 @@ def test_compose_preserves_shared_env_and_all_unmanaged_fields(deployment):
     new = yaml.safe_load(change.after)
     assert new["x-runtime"] == old["x-runtime"]
     assert new["networks"] == old["networks"]
-    assert new["services"]["migration"] == old["services"]["migration"]
-    assert new["services"]["heartbeat-init"] == old["services"]["heartbeat-init"]
+    for name in ("migration", "heartbeat-init"):
+        assert new["services"][name] == {
+            **old["services"][name],
+            "image": deployment["candidate_image"],
+        }
     for name in site.APPS:
         service, prior = new["services"][name], old["services"][name]
         assert service["image"] == deployment["candidate_image"]
@@ -82,6 +85,74 @@ def test_compose_preserves_shared_env_and_all_unmanaged_fields(deployment):
         else:
             assert service["env_file"] == prior["env_file"]
             assert service["volumes"] == prior["volumes"]
+
+
+@pytest.mark.parametrize("custom_config", [False, True])
+def test_mixed_images_bind_six_services_without_changing_config_or_extension(
+    deployment, custom_config
+):
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    for name in site.APPS:
+        original["services"][name]["image"] = deployment["baseline_image"]
+    for name in ("migration", "heartbeat-init"):
+        original["services"][name]["image"] = "synthetic/helpers:approved-before"
+    original["x-runtime"]["image"] = "synthetic/helpers:approved-before"
+    if custom_config:
+        for service in original["services"].values():
+            service["volumes"] = [
+                "./config/custom.yaml:/app/config/production.yaml:ro"
+                if isinstance(item, str) and ":/app/config/production.yaml:" in item
+                else item
+                for item in service.get("volumes", [])
+            ]
+    path.write_text(yaml.safe_dump(original, sort_keys=False))
+    before = path.read_bytes()
+    revised = yaml.safe_load(site.plan_compose(path, deployment).after)
+    assert path.read_bytes() == before
+    assert revised["x-runtime"] == original["x-runtime"]
+    assert set(site.APPS) == {"gateway", "worker", "dispatch-worker", "delivery-worker"}
+    for name in site.DEPLOYMENT_IMAGE_SERVICES:
+        assert revised["services"][name]["image"] == deployment["candidate_image"]
+        if name in ("migration", "heartbeat-init"):
+            assert revised["services"][name] == {
+                **original["services"][name],
+                "image": deployment["candidate_image"],
+            }
+        else:
+            assert (
+                revised["services"][name]["environment"]
+                == original["services"][name]["environment"]
+            )
+            assert (
+                revised["services"][name]["volumes"][: len(original["services"][name]["volumes"])]
+                == original["services"][name]["volumes"]
+            )
+
+
+@pytest.mark.parametrize("helper", ["migration", "heartbeat-init"])
+def test_missing_deployment_helper_is_rejected(deployment, helper):
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    del original["services"][helper]
+    path.write_text(yaml.safe_dump(original))
+    with pytest.raises(assets.EnablementError, match="deployment_image_service_missing"):
+        site.plan_compose(path, deployment)
+
+
+def test_plan_does_not_mutate_extension_aliasing_whole_services(deployment):
+    path = Path(deployment["gateway_root"]) / "docker-compose.prod.yml"
+    original = yaml.safe_load(path.read_bytes())
+    original["x-service-set"] = original["services"]
+    path.write_text(yaml.safe_dump(original, sort_keys=False))
+    before = path.read_bytes()
+    candidate = yaml.safe_load(site.plan_compose(path, deployment).after)
+    assert path.read_bytes() == before
+    assert candidate["x-service-set"] == original["services"]
+    assert all(
+        candidate["services"][name]["image"] == deployment["candidate_image"]
+        for name in site.DEPLOYMENT_IMAGE_SERVICES
+    )
 
 
 @pytest.mark.parametrize("fault", ["different-volume", "read-only", "wrong-user", "signing-inline"])

@@ -9,6 +9,14 @@ peer in Gateway tests is a **synthetic host**, not the FileBrowser plugin.
 
 ## Compatibility corrections and enablement gates
 
+The default legacy-fork path below is unchanged. The opt-in
+[execution continuation policy](inbound-execution-continuation.md) offers a
+separate path for an explicitly approved private thread: preserve its old
+session, create a new runtime-bound root with one identified user instruction,
+and continue only its proven new execution history. It does not set or imply
+`legacy_runtime_confirmed`. This attestation never required inventing a complete
+per-call audit for every historical chat.
+
 See [the real API probe](inbound-host-session-compatibility.md). A claim gets one
 persisted, unique child session ID before any create/fork request. An existing
 thread must fork its exact confirmed tip and retain history; a missing, ended,

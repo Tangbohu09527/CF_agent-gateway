@@ -444,6 +444,28 @@ def test_rendered_secret_must_never_reach_workers_or_migration(entry, monkeypatc
     assert "synthetic-secret" not in str(caught.value)
 
 
+@pytest.mark.parametrize("helper", ["migration", "heartbeat-init"])
+@pytest.mark.parametrize("fault", ["old-image", "missing", "invalid-shape"])
+def test_candidate_validation_requires_both_deployment_helpers(module, helper, fault):
+    entry = object.__new__(module.ServerEntry)
+    entry.request = {"candidate_image": "sha256:" + "b" * 64}
+    services = {
+        name: {"image": entry.request["candidate_image"]}
+        for name in module.DEPLOYMENT_IMAGE_SERVICES
+    }
+    entry.validate_candidate_images({"services": services})
+    assert set(module.APPS) == {"gateway", "worker", "dispatch-worker", "delivery-worker"}
+    assert module.GATED == ("worker", "delivery-worker")
+    if fault == "missing":
+        del services[helper]
+    elif fault == "invalid-shape":
+        services[helper] = None
+    else:
+        services[helper]["image"] = "synthetic/helpers:old"
+    with pytest.raises(module.EntryError, match="candidate_compose_images_mismatch"):
+        entry.validate_candidate_images({"services": services})
+
+
 def test_rollback_keeps_gate_closed_and_requires_windows_rollback_before_start(entry, monkeypatch):
     initialize(entry, "applied")
     monkeypatch.setattr(entry, "verify_restored_assets", lambda: None)
@@ -639,7 +661,8 @@ def test_candidate_compose_and_nginx_are_validated_before_plan(entry, monkeypatc
     original_probe = protected(directory / "original.validation.yaml", b"private-original-probe")
     resolved = protected(directory / "resolved.validation.yaml", b"private-resolved-probe")
     services = {
-        name: {"image": entry.request["candidate_image"], "env_file": []} for name in rows(entry)
+        name: {"image": entry.request["candidate_image"], "env_file": []}
+        for name in helpers["DEPLOYMENT_IMAGE_SERVICES"]
     }
     external = protected(entry.root.parent / "external-dotted.env", b"SYNTHETIC=hidden-profile\n")
     services["maintenance.ops"] = {

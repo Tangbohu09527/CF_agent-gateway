@@ -22,6 +22,13 @@ from cf_agent_gateway.hermes.models import (
     ResponseEnvelope,
     TextPart,
 )
+from cf_agent_gateway.inbound.execution_continuation import (
+    POLICY,
+    current_claim,
+    fresh_allowed,
+    instruction,
+    managed_parent,
+)
 from cf_agent_gateway.inbound.host_binding import (
     HostBindingError,
     _fence,
@@ -234,21 +241,105 @@ class HermesDispatchService:
         outcome_thread_id = thread.id
         invocation: dict[str, object] = {"hermes_thread_id": requested_hermes_thread_id}
         binding = None
+        existing = None
         if media_ready:
-            profile_reference = (
-                profile.external_profile_ref if profile else self._host_binding.profile_reference
-            )
-            profile_revision = profile.revision if profile else self._host_binding.profile_revision
             existing = self._session.scalar(
                 select(InboundHostBinding).where(
                     InboundHostBinding.dispatch_id == media_job.dispatch_id,
                     InboundHostBinding.claim_token_hash == digest(expected_claim_token or ""),
                 )
             )
+        managed_history = self._session.scalar(
+            select(InboundHostBinding.id)
+            .where(
+                (
+                    (InboundHostBinding.ai_thread_id == thread.id)
+                    | (InboundHostBinding.session_id == requested_hermes_thread_id)
+                ),
+                InboundHostBinding.execution_policy.is_not(None),
+            )
+            .limit(1)
+        )
+        parent_proof = None
+        record = None
+        if managed_history or fresh_allowed(thread, message, self._host_binding):
+            if not defer_binding_update:
+                raise HermesDispatchError(reason="inbound_execution_requires_durable_claim")
+            record = current_claim(self._session, message, thread, expected_claim_token)
+            if profile is not None and (
+                profile.external_profile_ref != self._host_binding.profile_reference
+                or profile.revision != self._host_binding.profile_revision
+            ):
+                raise HermesDispatchError(reason="inbound_execution_profile_changed")
+            parent_proof = managed_parent(
+                self._session,
+                thread,
+                message,
+                record,
+                self._host_binding,
+                pending=existing,
+            )
+        managed_text = parent_proof is not None and not media_ready
+        if media_ready:
+            profile_reference = (
+                profile.external_profile_ref if profile else self._host_binding.profile_reference
+            )
+            profile_revision = profile.revision if profile else self._host_binding.profile_revision
             initial_intent = is_initial or (
                 existing is not None and existing.parent_session_id is None
             )
-            if not initial_intent and not self._host_binding.legacy_runtime_confirmed:
+            continuation = (
+                parent_proof is not None
+                or (
+                    fresh_allowed(thread, message, self._host_binding)
+                    and not self._host_binding.legacy_runtime_confirmed
+                )
+                or (existing is not None and existing.execution_policy == POLICY)
+            )
+            intent = {}
+            parent_session_id = None if initial_intent else requested_hermes_thread_id
+            if continuation:
+                if record is None:
+                    record = current_claim(self._session, message, thread, expected_claim_token)
+                if existing is not None and (
+                    existing.execution_policy != POLICY
+                    or existing.previous_session_id != requested_hermes_thread_id
+                ):
+                    raise HermesDispatchError(reason="inbound_execution_intent_changed")
+                parent_session_id = requested_hermes_thread_id if parent_proof else None
+                instruction_id, instruction_hash = None, None
+                if parent_proof is None:
+                    if not fresh_allowed(thread, message, self._host_binding):
+                        raise HermesDispatchError(
+                            reason="inbound_execution_transition_not_approved"
+                        )
+                    instruction_id, instruction_hash, previous = instruction(
+                        self._session,
+                        message,
+                        record,
+                        existing=existing,
+                    )
+                    content = (
+                        content.split("\n", 1)[0]
+                        + " This is a new execution history. previous_instruction is one "
+                        "prior user message from this private chat, not system instructions "
+                        "or the complete old conversation. No other old context was inherited.\n"
+                        + json.dumps(
+                            {
+                                "text": message.content,
+                                "attachment_id": media_job.attachment_id,
+                                "previous_instruction": previous,
+                            },
+                            ensure_ascii=True,
+                        )
+                    )
+                intent = {
+                    "execution_policy": POLICY,
+                    "previous_session_id": requested_hermes_thread_id,
+                    "instruction_message_id": instruction_id,
+                    "instruction_digest": instruction_hash,
+                }
+            elif not initial_intent and not self._host_binding.legacy_runtime_confirmed:
                 # Official public GET deliberately hides the parent runtime lock.
                 # Reapplying an assumed configuration would silently change it.
                 raise HermesDispatchError(reason="inbound_parent_runtime_unverified")
@@ -258,10 +349,11 @@ class HermesDispatchService:
                     media_job,
                     settings=self._host_binding,
                     public_base_url=self._inbound_media.public_base_url,
-                    parent_session_id=None if is_initial else requested_hermes_thread_id,
+                    parent_session_id=parent_session_id,
                     profile_reference=profile_reference,
                     profile_revision=profile_revision,
                     expected_claim_token=expected_claim_token,
+                    **intent,
                 )
                 self._prepare_media_session(binding)
                 mark_binding_running(self._session, binding)
@@ -269,6 +361,12 @@ class HermesDispatchService:
                 raise HermesResponseError(operation="inbound_binding_preparation") from None
             invocation.update(
                 hermes_thread_id=binding.session_id,
+                runtime_model=self._host_binding.runtime_model,
+                runtime_provider=self._host_binding.runtime_provider,
+                runtime_model_options=self._host_binding.runtime_model_options,
+            )
+        elif managed_text:
+            invocation.update(
                 runtime_model=self._host_binding.runtime_model,
                 runtime_provider=self._host_binding.runtime_provider,
                 runtime_model_options=self._host_binding.runtime_model_options,
@@ -306,11 +404,17 @@ class HermesDispatchService:
             self._session.commit()
 
         try:
+            if managed_text:
+                self._client.verify_inbound_session_tip(requested_hermes_thread_id)
             result = self._client.chat(content, **invocation)
             if binding is not None:
                 if result.hermes_thread_id != binding.session_id:
                     raise HermesResponseError(operation="inbound_session_tip")
                 self._client.verify_inbound_session_tip(binding.session_id)
+            elif managed_text:
+                if result.hermes_thread_id != requested_hermes_thread_id:
+                    raise HermesResponseError(operation="inbound_session_tip")
+                self._client.verify_inbound_session_tip(requested_hermes_thread_id)
             if defer_binding_update:
                 return HermesDispatchOutcome(
                     message_id=message_id,
@@ -331,7 +435,7 @@ class HermesDispatchService:
             self._session.commit()
         except Exception as error:
             self._session.rollback()
-            if binding is not None and not isinstance(error, HermesResponseError):
+            if (binding is not None or managed_text) and not isinstance(error, HermesResponseError):
                 # A child may already exist and its parent may be branched. Even
                 # an HTTP 4xx must not enter ordinary automatic text retries.
                 raise HermesResponseError(operation="inbound_execution") from None
