@@ -7,8 +7,8 @@ on:
       - "tests/hermes_file_return_probe/**"
       - "tests/test_hermes_file_return_probe.py"
       - "src/cf_agent_gateway/hermes/**"
-      - "src/cf_agent_gateway/artifacts/**"
-      - "src/cf_agent_gateway/inbound_media/**"
+      - "src/cf_agent_gateway/artifact/**"
+      - "src/cf_agent_gateway/inbound/**"
       - "src/cf_agent_gateway/channels/**"
       - "pyproject.toml"
   workflow_dispatch:

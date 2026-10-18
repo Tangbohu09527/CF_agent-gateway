@@ -12,6 +12,7 @@ import json
 import re
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 READ = "filebrowser_read_inbound"
@@ -305,8 +306,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except Exception as error:
-            # Fixed type only; no model messages/tool output/credentials in CI.
-            self.server.errors.append(type(error).__name__)
+            # Safe source line numbers, never model/tool bodies or exception text.
+            self.server.errors.append(
+                {
+                    "class": type(error).__name__,
+                    "lines": [
+                        frame.lineno
+                        for frame in traceback.extract_tb(error.__traceback__)
+                        if frame.filename == __file__
+                    ],
+                }
+            )
             self.send_json(
                 {"error": {"type": "fixture_assertion", "message": "model contract failed"}}, 400
             )

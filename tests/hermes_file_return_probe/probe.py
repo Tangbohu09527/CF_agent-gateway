@@ -164,8 +164,11 @@ def install_host_audit(case, sources, worker, support):
         "/etc/localtime",
         "/etc/ssl/certs/ca-certificates.crt",
         f"/proc/{os.getpid()}/stat",
+        f"/proc/{os.getppid()}/stat",
     }
     violations = []
+    optional_metadata_denials = []
+    spawn_ticket = threading.local()
     io_support = support._local_module("cf_probe_io_support", "hermes_probe_support.py")
 
     def within(path, allowed):
@@ -178,6 +181,11 @@ def install_host_audit(case, sources, worker, support):
             raise PermissionError("isolated global housekeeping unavailable")
         if name == "open" and not isinstance(args[0], int):
             path, _mode, flags = args
+            if Path(os.fsdecode(path)).resolve() == (sources[0].parent / "manifest.json").resolve():
+                # The official environment detector probes above its source checkout.
+                # Keep it unavailable; do not read a machine/package manifest.
+                optional_metadata_denials.append("source_parent_manifest")
+                raise FileNotFoundError(errno.ENOENT, "isolated optional manifest unavailable")
             write = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
             if os.name == "nt" and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
                 os.path.abspath(f"/proc/{os.getpid()}/stat")
@@ -215,11 +223,21 @@ def install_host_audit(case, sources, worker, support):
             )
         elif name == "subprocess.Popen":
             executable, command, cwd, env = args
+            spawn_ticket.value = None
             expected = subprocess.list2cmdline([str(worker)]) if os.name == "nt" else [str(worker)]
             native = command == expected and executable in (None, str(worker))
             parser = support.content_parser_launch_allowed(case, executable, command, cwd, env)
             denied = not (native or parser)
-        elif name in {"os.system", "os.exec", "os.posix_spawn"}:
+            if not denied and isinstance(command, (list, tuple)) and isinstance(env, dict):
+                # CPython 3.14 may implement this exact vetted Popen via posix_spawn.
+                # One same-thread ticket binds the low-level audit to that launch.
+                spawn_ticket.value = (str(executable or command[0]), tuple(command), dict(env))
+        elif name == "os.posix_spawn":
+            executable, command, env = args
+            ticket = getattr(spawn_ticket, "value", None)
+            spawn_ticket.value = None
+            denied = ticket is None or ticket != (str(executable), tuple(command), env)
+        elif name in {"os.system", "os.exec"}:
             denied = True
         if denied:
             violations.append(
@@ -235,7 +253,7 @@ def install_host_audit(case, sources, worker, support):
             raise PermissionError("isolated operation rejected")
 
     sys.addaudithook(guard)
-    return violations
+    return violations, optional_metadata_denials
 
 
 async def host():
@@ -271,7 +289,7 @@ async def host():
                 raise FileNotFoundError("isolated optional git unavailable")
 
     sys.addaudithook(deny_optional_git)
-    violations = install_host_audit(
+    violations, optional_metadata_denials = install_host_audit(
         case, (source, REPO, fb), Path(_HOST_PAYLOAD["worker"]), support
     )
     from agent.secret_scope import reset_secret_scope, set_secret_scope
@@ -349,6 +367,7 @@ async def host():
             {
                 "closed": True,
                 "audit_denials": len(violations),
+                "optional_metadata_reads_denied": len(optional_metadata_denials),
                 "ordinary_windows_token": ordinary,
                 "denials": violations,
             },

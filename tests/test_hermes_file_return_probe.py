@@ -176,3 +176,111 @@ def test_multimodal_and_deferred_descriptors_are_read_from_http_content():
         ]
     }
     assert descriptor() in list(model.objects(nested))
+
+
+def test_followup_is_ordinary_text_without_another_tool_or_descriptor():
+    planner = model.Planner()
+    body = request(label="followup")
+    body["tools"] = []
+    answer = planner.decide(body)
+    assert isinstance(answer["content"], str) and answer["content"]
+    assert "tool_calls" not in answer
+    assert planner.prepared == {}
+
+
+def test_audit_denies_source_parent_manifest_without_reading_it(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "file_return_audit_contract", MODULE.with_name("probe.py")
+    )
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    callbacks = []
+    monkeypatch.setattr(probe.sys, "addaudithook", callbacks.append)
+
+    class IO:
+        @staticmethod
+        def audit_path_within(path, roots, **_):
+            return any(Path(path).resolve().is_relative_to(root) for root in roots)
+
+    class Support:
+        @staticmethod
+        def _local_module(*_):
+            return IO
+
+    case, source = tmp_path / "case", tmp_path / "source"
+    violations, metadata = probe.install_host_audit(case, (source,), tmp_path / "worker", Support)
+    with pytest.raises(FileNotFoundError):
+        callbacks[0]("open", (str(source.parent / "manifest.json"), "r", 0))
+    assert metadata == ["source_parent_manifest"] and violations == []
+    with pytest.raises(PermissionError):
+        callbacks[0]("open", (str(source / ".env"), "r", 0))
+    assert len(violations) == 1
+
+
+@pytest.fixture
+def guarded_events(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "file_return_spawn_contract", MODULE.with_name("probe.py")
+    )
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    callbacks = []
+    monkeypatch.setattr(probe.sys, "addaudithook", callbacks.append)
+
+    class IO:
+        @staticmethod
+        def audit_path_within(path, roots, **_):
+            return any(Path(path).resolve().is_relative_to(root) for root in roots)
+
+    class Support:
+        @staticmethod
+        def _local_module(*_):
+            return IO
+
+        @staticmethod
+        def content_parser_launch_allowed(case, executable, command, cwd, env):
+            return command == ["fixed-parser", "--fixed"] and executable == "fixed-parser"
+
+    failures, _ = probe.install_host_audit(
+        tmp_path / "case", (tmp_path / "source",), tmp_path / "worker", Support
+    )
+    return probe, callbacks[0], failures
+
+
+def test_posix_spawn_requires_matching_vetted_popen_once(guarded_events):
+    _, guard, failures = guarded_events
+    command, env = ["fixed-parser", "--fixed"], {"PATH": "test-only"}
+    with pytest.raises(PermissionError):
+        guard("os.posix_spawn", ("fixed-parser", command, env))
+    guard("subprocess.Popen", ("fixed-parser", command, None, env))
+    guard("os.posix_spawn", ("fixed-parser", command, env.copy()))
+    with pytest.raises(PermissionError):
+        guard("os.posix_spawn", ("fixed-parser", command, env))
+    assert len(failures) == 2
+
+
+@pytest.mark.parametrize("change", ["executable", "arguments", "environment"])
+def test_posix_spawn_rejects_modified_popen_ticket(guarded_events, change):
+    _, guard, _ = guarded_events
+    command, env = ["fixed-parser", "--fixed"], {"PATH": "test-only"}
+    guard("subprocess.Popen", ("fixed-parser", command, None, env))
+    with pytest.raises(PermissionError):
+        guard(
+            "os.posix_spawn",
+            (
+                "other" if change == "executable" else "fixed-parser",
+                command + ["extra"] if change == "arguments" else command,
+                {"PATH": "other"} if change == "environment" else env,
+            ),
+        )
+    with pytest.raises(PermissionError):
+        guard("os.posix_spawn", ("fixed-parser", command, env))
+
+
+def test_proc_metadata_only_for_probe_and_direct_parent(guarded_events):
+    probe, guard, _ = guarded_events
+    guard("open", (f"/proc/{probe.os.getppid()}/stat", "r", 0))
+    with pytest.raises(PermissionError):
+        guard("open", ("/proc/999999/environ", "r", 0))
+    with pytest.raises(PermissionError):
+        guard("open", ("/proc/999999/stat", "r", 0))
