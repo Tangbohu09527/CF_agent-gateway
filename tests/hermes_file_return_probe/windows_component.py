@@ -88,7 +88,8 @@ async def run(args, evidence):
     certificates[0].write_bytes(
         certificates[0].read_bytes() + (tests / "fixtures/cert.pem").read_bytes()
     )
-    model = model_module.ModelServer()
+    single_pdf = getattr(args, "download_first_pdf", False)
+    model = model_module.ModelServer(download_first=single_pdf)
     thread = threading.Thread(target=model.serve_forever, daemon=True)
     thread.start()
     keys = {"hermes": "synthetic-component-hermes-" + os.urandom(16).hex(), "host": SERVICE_SECRET}
@@ -169,13 +170,16 @@ async def run(args, evidence):
                 follow_redirects=False,
                 timeout=75,
             ) as client:
-                for serial, label in enumerate(("pdf", "png", "identity", "lease"), 1):
+                labels = ("pdf",) if single_pdf else ("pdf", "png", "identity", "lease")
+                for serial, label in enumerate(labels, 1):
                     kind = "png" if label == "png" else "pdf"
                     fixture.body, fixture.mime = (
                         content[kind],
                         "image/png" if kind == "png" else "application/pdf",
                     )
-                    session = "isolated-component-" + label
+                    session = (
+                        "isolated-download-first-" if single_pdf else "isolated-component-"
+                    ) + label
                     claims, authorization = capability(
                         serial, session, mismatch=label == "identity"
                     )
@@ -243,30 +247,46 @@ async def run(args, evidence):
                     # New requests may reuse an attachment number in a different
                     # task; only actual live descriptors count inside that task.
                     model.planner.prepared.clear()
-                # Request/header session mismatch must fail before model/tools.
-                before = len(model.planner.calls)
-                response = await client.post(
-                    origin + "/v1/chat/completions",
-                    headers={
-                        "Authorization": "Bearer " + keys["hermes"],
-                        "X-Hermes-Session-Id": "wrong-session",
-                        "X-CF-Artifact-Return-URL": url,
-                        "X-CF-Artifact-Return-Authorization": authorization,
-                    },
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [{"role": "user", "content": "session-negative"}],
-                    },
-                )
-                assert response.status_code == 403 and len(model.planner.calls) == before
+                if not single_pdf:
+                    # Request/header session mismatch must fail before model/tools.
+                    before = len(model.planner.calls)
+                    response = await client.post(
+                        origin + "/v1/chat/completions",
+                        headers={
+                            "Authorization": "Bearer " + keys["hermes"],
+                            "X-Hermes-Session-Id": "wrong-session",
+                            "X-CF-Artifact-Return-URL": url,
+                            "X-CF-Artifact-Return-Authorization": authorization,
+                        },
+                        json={
+                            "model": "hermes-agent",
+                            "messages": [{"role": "user", "content": "session-negative"}],
+                        },
+                    )
+                    assert response.status_code == 403 and len(model.planner.calls) == before
         assert not model.errors
         ended = json.loads((case / "host-ended.json").read_text())
         assert ended["closed"] and ended["ordinary_windows_token"] and not ended["audit_denials"]
         assert model.planner.pdf_text_seen
-        assert any(
-            base64.b64decode(value.split(",", 1)[1]) == content["png"]
-            for value in model.planner.images
-        )
+        if not single_pdf:
+            assert any(
+                base64.b64decode(value.split(",", 1)[1]) == content["png"]
+                for value in model.planner.images
+            )
+        else:
+            assert model.planner.download_verified
+            assert model.planner.download_first_steps == [
+                model_module.DOWNLOAD,
+                model_module.READ,
+                model_module.RETURN,
+            ]
+            assert set(model.planner.schema_hashes) == {
+                model_module.DOWNLOAD,
+                model_module.READ,
+                model_module.RETURN,
+            }
+            assert len(uploads) == 1 and uploads[0]["case"] == "pdf"
+            assert fixture.download_calls == 1, "repeat read must reuse the verified download"
         report = {
             "ok": True,
             "chain": "windows-official-hermes-two-plugins-protocol-gateway",
@@ -277,12 +297,16 @@ async def run(args, evidence):
             "uploads": uploads,
             "actual_schema_sha256": model.planner.schema_hashes,
             "pdf_text_in_model_http": True,
-            "png_bytes_in_model_http": True,
-            "identity_mismatch_rejected": True,
-            "session_mismatch_rejected": True,
-            "inbound_revocation_prevents_return": True,
+            "png_bytes_in_model_http": not single_pdf,
+            "identity_mismatch_rejected": not single_pdf,
+            "session_mismatch_rejected": not single_pdf,
+            "inbound_revocation_prevents_return": not single_pdf,
             "native_download_requests": fixture.download_calls,
             "owned_host_closed": True,
+            "cases_executed": list(labels),
+            "download_first_pdf": single_pdf,
+            "model_download_verified": model.planner.download_verified,
+            "model_business_tool_sequence": model.planner.download_first_steps,
         }
         probe.save(evidence / "safe-summary.json", report)
         return report
@@ -306,6 +330,11 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-dirty-source", action="store_true")
+    parser.add_argument(
+        "--download-first-pdf",
+        action="store_true",
+        help="Run only one PDF: actual download tool, read/prepare, return",
+    )
     args = parser.parse_args()
     assert os.name == "nt" and probe.ordinary_windows() is True
     for name in ("hermes_source", "hermes_python", "filebridge_source", "worker", "output"):

@@ -15,6 +15,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+DOWNLOAD = "filebrowser_download_inbound"
 READ = "filebrowser_read_inbound"
 RETURN = "cf_return_current_chat"
 MODEL = "cf-file-return-fixture"
@@ -64,7 +65,11 @@ def verify_schema(name, definition):
     assert parameters.get("type") == "object", "object schema missing"
     assert parameters.get("additionalProperties") is False, "open tool argument schema"
     required = set(parameters.get("required", []))
-    if name == READ:
+    if name == DOWNLOAD:
+        assert required == {"attachment_id"}
+        assert set(properties) == {"attachment_id"}
+        assert properties["attachment_id"] == {"type": "integer", "minimum": 1}
+    elif name == READ:
         assert required == {"attachment_id"}
         assert properties["attachment_id"]["type"] == "integer"
         assert properties["attachment_id"]["minimum"] == 1
@@ -98,7 +103,10 @@ def tool_call(name, arguments, visible):
 
 
 class Planner:
-    def __init__(self):
+    def __init__(self, *, download_first=False):
+        self.download_first = download_first
+        self.download_verified = False
+        self.download_first_steps = []
         self.schema_hashes = {}
         self.prepared = {}
         self.calls = []
@@ -131,6 +139,9 @@ class Planner:
         recent = messages[marker + 1 :]
         visible, available = schemas(body, recent)
         wanted = [RETURN] if label == "replay" else [READ, RETURN]
+        if self.download_first:
+            assert label == "pdf", "download-first probe is PDF-only"
+            wanted.insert(0, DOWNLOAD)
         missing = [name for name in wanted if name not in available]
         if missing:
             describe = visible.get("tool_describe", {}).get("parameters", {})
@@ -184,6 +195,30 @@ class Planner:
         match = re.search(r'"attachment_id"\s*:\s*(\d+)', text)
         assert match, "real Gateway omitted attachment ID"
         attachment = int(match.group(1))
+        if self.download_first:
+            downloads = [
+                item
+                for item in records
+                if item.get("ok") is True and item.get("verified") is True and "handle" in item
+            ]
+            if not downloads:
+                assert (
+                    not errors and not prepared and not any("handle" in item for item in records)
+                ), "actual first download failed"
+                self.download_first_steps.append(DOWNLOAD)
+                return tool_call(DOWNLOAD, {"attachment_id": attachment}, visible)
+            value = downloads[-1]
+            assert re.fullmatch(r"inbound:[0-9a-f]{48}", value["handle"])
+            assert value.get("formal_archive") is False
+            assert type(value.get("bytes_written")) is int and value["bytes_written"] > 0
+            assert re.fullmatch(r"[0-9a-f]{64}", value.get("sha256", ""))
+            self.download_verified = True
+            if not prepared:
+                assert not errors, "read after verified download failed"
+                self.download_first_steps.append(READ)
+                return tool_call(
+                    READ, {"attachment_id": attachment, "prepare_return": True}, visible
+                )
         if not errors and not prepared:
             # Real active binding must reject an unrelated attachment, before the
             # successful read. This is not a fabricated transport response.
@@ -200,6 +235,10 @@ class Planner:
         assert not descriptor["file_ref"].startswith(("inbound:", "/", "\\"))
         assert re.fullmatch(r"[0-9a-f]{64}", descriptor["sha256"])
         assert descriptor["kind"] == ("image" if label == "png" else "file")
+        if self.download_first:
+            assert descriptor["sha256"] == value["sha256"] and (
+                descriptor["size_bytes"] == value["bytes_written"]
+            ), "prepared bytes differ from the verified download"
         if attachment not in self.prepared:
             self.prepared[attachment] = descriptor
             return tool_call(READ, {"attachment_id": attachment, "prepare_return": True}, visible)
@@ -211,6 +250,8 @@ class Planner:
             self.lease_entered.set()
             assert self.lease_release.wait(15), "bounded lease fixture not released"
         if not receipts:
+            if self.download_first:
+                self.download_first_steps.append(RETURN)
             return tool_call(
                 RETURN, {key: descriptor[key] for key in ("file_ref", "kind", "filename")}, visible
             )
@@ -220,9 +261,9 @@ class Planner:
 class ModelServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self):
+    def __init__(self, *, download_first=False):
         super().__init__(("127.0.0.1", 0), Handler)
-        self.planner = Planner()
+        self.planner = Planner(download_first=download_first)
         self.errors = []
 
     @property

@@ -14,7 +14,10 @@ spec.loader.exec_module(model)
 
 
 def definition(name):
-    if name == model.READ:
+    if name == model.DOWNLOAD:
+        required = ["attachment_id"]
+        props = {"attachment_id": {"type": "integer", "minimum": 1}}
+    elif name == model.READ:
         required = ["attachment_id"]
         props = {
             "attachment_id": {"type": "integer", "minimum": 1},
@@ -294,3 +297,76 @@ def test_host_declares_official_isolation_and_never_db_guard_bypass(guarded_even
     result = probe.isolated_host_environment(before, home)
     assert result == {"PATH": "synthetic", "HERMES_HOME": str(home), "HERMES_TEST_ISOLATION": "1"}
     assert "HERMES_STATE_DB_GUARD_BYPASS" in before
+
+
+def download_request(*results):
+    body = request(*results)
+    body["tools"].append({"type": "function", "function": definition(model.DOWNLOAD)})
+    return body
+
+
+def download_receipt():
+    return {
+        "ok": True,
+        "verified": True,
+        "handle": "inbound:" + "c" * 48,
+        "formal_archive": False,
+        "bytes_written": 42,
+        "sha256": "b" * 64,
+    }
+
+
+def test_download_first_checks_actual_schema_and_verified_tool_order():
+    planner = model.Planner(download_first=True)
+    assert called(planner.decide(download_request())) == (model.DOWNLOAD, {"attachment_id": 5})
+    downloaded = download_receipt()
+    assert called(planner.decide(download_request(downloaded))) == (
+        model.READ,
+        {"attachment_id": 5, "prepare_return": True},
+    )
+    read = {"ok": True, "return_preparation": {"ok": True, **descriptor()}}
+    assert called(planner.decide(download_request(downloaded, read)))[0] == model.READ
+    assert called(planner.decide(download_request(downloaded, read, read)))[0] == model.RETURN
+    receipt = {"success": True, "status": "pending_delivery", "artifact_id": "synthetic"}
+    assert "tool_calls" not in planner.decide(download_request(downloaded, read, read, receipt))
+    assert planner.download_first_steps == [model.DOWNLOAD, model.READ, model.RETURN]
+    assert set(planner.schema_hashes) == {model.DOWNLOAD, model.READ, model.RETURN}
+    assert planner.download_verified
+
+
+def test_download_first_never_continues_after_trusted_context_failure():
+    with pytest.raises(AssertionError, match="first download failed"):
+        model.Planner(download_first=True).decide(
+            download_request({"ok": False, "error": {"code": "trusted_context_unavailable"}})
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("verified", False),
+        ("formal_archive", True),
+        ("handle", "/guessed.pdf"),
+        ("bytes_written", 0),
+    ],
+)
+def test_download_first_requires_verified_download_receipt(field, value):
+    receipt = download_receipt()
+    receipt[field] = value
+    planner = model.Planner(download_first=True)
+    with pytest.raises(AssertionError):
+        planner.decide(download_request(receipt))
+
+
+def test_download_first_requires_actual_download_schema():
+    body = download_request()
+    body["tools"][-1]["function"]["parameters"]["properties"]["attachment_id"]["type"] = "string"
+    with pytest.raises(AssertionError):
+        model.Planner(download_first=True).decide(body)
+
+
+def test_download_first_descriptor_must_match_downloaded_bytes():
+    downloaded = download_receipt()
+    read = {"ok": True, "return_preparation": {"ok": True, **descriptor(), "sha256": "d" * 64}}
+    with pytest.raises(AssertionError, match="prepared bytes differ"):
+        model.Planner(download_first=True).decide(download_request(downloaded, read))

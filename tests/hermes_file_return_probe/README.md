@@ -38,3 +38,9 @@ Only the allowlisted safe summary, immutable source proof and safe host lifecycl
 reports are CI artifacts. Synthetic model requests, isolated databases, capabilities
 and event payloads remain local to the test directory. No paid model or production
 process is used, and subprocess cleanup is restricted to processes this probe starts.
+
+For the narrow download-first regression, add `--download-first-pdf` to the
+Windows component command. This runs only one new synthetic PDF session: the
+actual model-visible download schema and tool, then read with prepare_return,
+then the return tool. It requires a verified download receipt and exactly one
+native fetch. PNG and the negative-case matrix are not run by this option.
