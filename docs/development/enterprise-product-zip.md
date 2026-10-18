@@ -45,7 +45,7 @@ Use an independent official Hermes Profile/HOME and authenticated endpoint with 
 
 `--prepare-only` records the new normal Message/Admission/Dispatch and prints its thread ID without calling the model. This permits the operator to configure the product plugin's exact new thread binding before execution. A repeated identical `run_id` is idempotent; a changed input, already attempted or dead task is not retried. The ordinary live worker excludes this source; the CLI claims only its exact new queued task. The proof expires within 12 hours. This is separate from SSH/sudo authorization.
 
-The worker uses the normal current-task capability, heartbeat, Artifact, ACK and response persistence, but captures Response parts without enqueueing WeChat Delivery. A real-model controlled test therefore proves neither real WeChat ingress nor receipt. Actual controlled Artifact bytes can be inspected through the existing authorized storage/receipt path. A successful result can be captured again after a process restart without another model call.
+The worker uses the normal current-task capability, heartbeat, Artifact, ACK and response persistence, but captures Response parts without enqueueing WeChat Delivery. A real-model controlled test therefore proves neither real WeChat ingress nor receipt. Actual controlled Artifact bytes can be inspected through the existing authorized storage/receipt path. A successful result can be captured again after a process restart without another model call. A separate-process regression also submits a new controlled message after reopening the persisted database and verifies that it keeps the controlled thread and Hermes session while producing no Delivery row.
 
 ## Deployment and recovery boundary
 
