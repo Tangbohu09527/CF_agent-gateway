@@ -36,6 +36,8 @@ HERMES = "427d605d4985c2d49a795493ef6c5d66413057d1"
 ACCOUNT, CHAT = "wxid-file-return-fixture", "wxid-file-return-alice"
 SERVICE_ENV = "CF_FILEBRIDGE_HOST_RETURN_PROBE"
 MODEL_KEY = "synthetic-loopback-model-key"
+# Same basename exercised by the separate protocol candidate's native Qt fixture.
+PDF_FILENAME = "中文 空格 (1) %23 #.pdf"
 
 
 def load(name, path):
@@ -48,6 +50,12 @@ def load(name, path):
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def verify_received_pdf(sent, expected):
+    """Assert the actual Gateway outbound JSON, not only its Artifact row."""
+    assert sent["filename"] == PDF_FILENAME, "outbound PDF filename changed"
+    assert base64.b64decode(sent["data"], validate=True) == expected
 
 
 def save(path, value):
@@ -265,10 +273,18 @@ def install_host_audit(case, sources, worker, support):
     return violations, optional_metadata_denials
 
 
+def host_record(case, name, generation=0):
+    assert type(generation) is int and generation in (0, 1)
+    suffix = "" if generation == 0 else f"-{generation}"
+    stem, extension = name.rsplit(".", 1)
+    return case / f"{stem}{suffix}.{extension}"
+
+
 async def host():
     global _HOST_PAYLOAD
     _HOST_PAYLOAD = json.loads(sys.stdin.readline())
     case, source, fb = (Path(_HOST_PAYLOAD[key]) for key in ("case", "hermes", "filebridge"))
+    generation = _HOST_PAYLOAD.get("generation", 0)
     assert platform.python_version() == "3.14.7"
     ordinary = ordinary_windows()
     original = load("cf_return_original_probe", REPO / "tests/hermes_return_probe/probe.py")
@@ -358,12 +374,14 @@ async def host():
             else:
                 raise AssertionError("official TLS listener not ready")
         save(
-            case / "ready.json",
+            host_record(case, "ready.json", generation),
             {
                 "origin": origin,
                 "ordinary_windows_token": ordinary,
                 "plugins": sorted(enabled),
                 "python": platform.python_version(),
+                "pid": os.getpid(),
+                "generation": generation,
             },
         )
         await asyncio.to_thread(sys.stdin.readline)
@@ -372,9 +390,11 @@ async def host():
         manager.unload()
         reset_secret_scope(token)
         save(
-            case / "host-ended.json",
+            host_record(case, "host-ended.json", generation),
             {
                 "closed": True,
+                "pid": os.getpid(),
+                "generation": generation,
                 "audit_denials": len(violations),
                 "optional_metadata_reads_denied": len(optional_metadata_denials),
                 "ordinary_windows_token": ordinary,
@@ -391,22 +411,34 @@ def unused_port():
 
 
 @contextmanager
-def official_host(args, case, model, origin, certificates, keys):
+def official_host(args, case, model, origin, certificates, keys, *, generation=0):
     original = load("cf_return_original_env", REPO / "tests/hermes_return_probe/probe.py")
     fb_plugin = args.filebridge_source / "integrations/hermes-filebridge/plugin"
     home = case / "profile"
-    shutil.copytree(
-        fb_plugin,
-        home / "plugins/cf-filebridge",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
+    assert generation in (0, 1)
     plugin = home / "plugins/cf-artifact-return"
-    plugin.mkdir()
-    (plugin / "plugin.yaml").write_text(
-        'name: cf-artifact-return\nversion: "1.0.0"\nkind: standalone\n'
-    )
-    (plugin / "__init__.py").write_text(RETURN_PLUGIN)
-    port = unused_port()
+    if generation == 0:
+        shutil.copytree(
+            fb_plugin,
+            home / "plugins/cf-filebridge",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        plugin.mkdir()
+        (plugin / "plugin.yaml").write_text(
+            'name: cf-artifact-return\nversion: "1.0.0"\nkind: standalone\n'
+        )
+        (plugin / "__init__.py").write_text(RETURN_PLUGIN)
+        port = unused_port()
+    else:
+        ended = json.loads(host_record(case, "host-ended.json", 0).read_text())
+        assert ended["closed"] and ended["audit_denials"] == 0
+        assert (plugin / "__init__.py").read_text() == RETURN_PLUGIN
+        for source in fb_plugin.rglob("*.py"):
+            assert sha(source.read_bytes()) == sha(
+                (home / "plugins/cf-filebridge" / source.relative_to(fb_plugin)).read_bytes()
+            )
+        old_config = json.loads((home / "config.yaml").read_text())
+        port = old_config["plugins"]["entries"]["cf-artifact-return"]["settings"]["tls_port"]
     config = {
         "model": model.config,
         "models_dev": {"url": f"http://127.0.0.1:{model.server_port}/models-dev.json"},
@@ -466,7 +498,10 @@ def official_host(args, case, model, origin, certificates, keys):
         "fallback_provider_models": [],
         "checkpoints": {"enabled": False},
     }
-    save(home / "config.yaml", config)
+    if generation == 0:
+        save(home / "config.yaml", config)
+    else:
+        assert old_config == config, "restart must reuse the exact isolated HOME configuration"
     environment = isolated_host_environment(original.isolated_environment(case), home)
     # Native child gets only a new test service key via anonymous stdin. No model,
     # Gateway or production configuration is discovered from inherited HOME.
@@ -478,8 +513,14 @@ def official_host(args, case, model, origin, certificates, keys):
         "service_key": keys["hermes"],
         "host_key": keys["host"],
         "origin": f"https://localhost:{port}",
+        "generation": generation,
     }
-    with (case / "host.stdout").open("xb") as stdout, (case / "host.stderr").open("xb") as stderr:
+    ready_path = host_record(case, "ready.json", generation)
+    assert not ready_path.exists()
+    with (
+        host_record(case, "host.stdout", generation).open("xb") as stdout,
+        host_record(case, "host.stderr", generation).open("xb") as stderr,
+    ):
         child = subprocess.Popen(
             [str(args.hermes_python), "-I", "-B", str(Path(__file__).resolve()), "--host"],
             stdin=subprocess.PIPE,
@@ -492,12 +533,16 @@ def official_host(args, case, model, origin, certificates, keys):
             child.stdin.write(json.dumps(payload).encode() + b"\n")
             child.stdin.flush()
             deadline = time.monotonic() + 40
-            while not (case / "ready.json").exists():
+            while not ready_path.exists():
                 assert child.poll() is None, (
                     "isolated official host failed; inspect private evidence"
                 )
                 assert time.monotonic() < deadline, "official host readiness timeout"
                 time.sleep(0.05)
+            ready = json.loads(ready_path.read_text())
+            assert (os.name == "nt" or ready["pid"] == child.pid) and ready[
+                "generation"
+            ] == generation
             yield payload["origin"]
         finally:
             if child.poll() is None:
@@ -520,6 +565,7 @@ async def run_linux(args, case, model, certificates, keys):
     import test_artifact_return_integration as delivery_peer
     import uvicorn
     from sqlalchemy import select
+    from sqlalchemy import text as sql_text
 
     from cf_agent_gateway.access import AccessPolicyService, RiskLevel
     from cf_agent_gateway.adapters.wechat import NormalizedWechatMessage
@@ -546,6 +592,7 @@ async def run_linux(args, case, model, certificates, keys):
     from cf_agent_gateway.inbound.models import InboundMediaJob
     from cf_agent_gateway.inbound.worker import InboundMediaWorker
     from cf_agent_gateway.ingestion import MessageAdmissionService
+    from cf_agent_gateway.message.models import Attachment, Message
     from cf_agent_gateway.response.models import ResponseRecord
     from cf_agent_gateway.runtime.dispatch_worker import build_dispatch_worker
     from cf_agent_gateway.task.model import HermesDispatchRecord
@@ -559,7 +606,10 @@ async def run_linux(args, case, model, certificates, keys):
         logging=LoggingSettings("WARNING"),
         artifact=ArtifactSettings(storage_root=str(case / "artifacts")),
         inbound_media=InboundMediaSettings(
-            enabled=True, staging_root=str(case / "staging"), public_base_url=gateway_origin
+            enabled=True,
+            followup_enabled=True,
+            staging_root=str(case / "staging"),
+            public_base_url=gateway_origin,
         ),
         host_binding=HostBindingSettings(
             enabled=True,
@@ -625,7 +675,7 @@ async def run_linux(args, case, model, certificates, keys):
             access.upsert_gateway_policy(enabled=True, allowed_risk_levels={RiskLevel.NORMAL})
         index = 0
 
-        def admit(label, kind="text"):
+        def admit(label, kind="text", *, attachment_id=None, action=None):
             nonlocal index
             index += 1
             message = NormalizedWechatMessage.model_validate(
@@ -648,7 +698,12 @@ async def run_linux(args, case, model, certificates, keys):
                     if kind == "png"
                     else "file",
                     "raw_type": 1 if kind == "text" else 3 if kind == "png" else 49,
-                    "content": "file-return-case:"
+                    "content": (
+                        f"/attachment {attachment_id} {action}\n"
+                        if attachment_id is not None
+                        else ""
+                    )
+                    + "file-return-case:"
                     + label
                     + " Read the original and return unchanged bytes to the current chat.",
                     "timestamp": datetime.now(UTC),
@@ -696,7 +751,7 @@ async def run_linux(args, case, model, certificates, keys):
                     parse_inbound_media(
                         {
                             "type": "image" if kind == "png" else "file",
-                            "filename": "original." + kind,
+                            "filename": PDF_FILENAME if kind == "pdf" else "original.png",
                             "data": base64.b64encode(content[kind]).decode(),
                         }
                     ),
@@ -704,8 +759,28 @@ async def run_linux(args, case, model, certificates, keys):
 
         intake = InboundMediaWorker(factory, MediaFetch(), InboundMediaStaging(case / "staging"))
         receiver = delivery_peer.WechatReceiver(ACCOUNT)
+        return_context_observations = []
+
+        class ObservedHermesClient(HermesClient):
+            def chat(self, content, **options):
+                # Observe one boolean without changing the real TLS request or
+                # recording authorization/session/body content in the summary.
+                return_context_observations.append(
+                    options.get("artifact_return_context") is not None
+                )
+                return super().chat(content, **options)
+
+        def row_snapshot(row):
+            return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+
+        with factory() as session:
+            assert (
+                session.execute(sql_text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "20261018_01"
+            )
+        original_pdf = None
         with official_host(args, case, model, gateway_origin, certificates, keys) as origin:  # noqa: SIM117
-            with HermesClient(
+            with ObservedHermesClient(
                 origin,
                 keys["hermes"],
                 model.config["default"],
@@ -797,6 +872,9 @@ async def run_linux(args, case, model, certificates, keys):
                             value[media_kind] for value in receiver.requests if media_kind in value
                         )
                         assert base64.b64decode(sent["data"], validate=True) == expected
+                        if kind == "pdf":
+                            assert artifact.filename == PDF_FILENAME
+                            verify_received_pdf(sent, expected)
                         assert all(value["chatId"] == CHAT for value in receiver.requests)
                         reports.append(
                             {
@@ -807,10 +885,71 @@ async def run_linux(args, case, model, certificates, keys):
                                 "delivery_attempts": 1,
                                 "artifact_ready": True,
                                 "receiver_bytes_equal": True,
+                                "receiver_filename_equal": True if kind == "pdf" else None,
                                 "binding_closed": True,
                             }
                         )
                     if kind == "pdf":
+                        with factory() as session:
+                            original_job = session.scalar(
+                                select(InboundMediaJob).where(
+                                    InboundMediaJob.message_id == item.message_id
+                                )
+                            )
+                            original_binding = session.scalar(
+                                select(InboundHostBinding).where(
+                                    InboundHostBinding.dispatch_id == item.dispatch_record_id
+                                )
+                            )
+                            original_pdf = {
+                                "job": row_snapshot(original_job),
+                                "binding": row_snapshot(original_binding),
+                                "artifact_id": artifact.artifact_id,
+                                "response_id": response.response_id,
+                                "delivery_id": delivery.id,
+                                "records": [
+                                    (
+                                        Attachment,
+                                        original_job.attachment_id,
+                                        row_snapshot(
+                                            session.get(Attachment, original_job.attachment_id)
+                                        ),
+                                    ),
+                                    (
+                                        Message,
+                                        item.message_id,
+                                        row_snapshot(session.get(Message, item.message_id)),
+                                    ),
+                                    (
+                                        HermesDispatchRecord,
+                                        item.dispatch_record_id,
+                                        row_snapshot(
+                                            session.get(
+                                                HermesDispatchRecord, item.dispatch_record_id
+                                            )
+                                        ),
+                                    ),
+                                    (
+                                        Artifact,
+                                        artifact.artifact_id,
+                                        row_snapshot(session.get(Artifact, artifact.artifact_id)),
+                                    ),
+                                    (
+                                        ResponseRecord,
+                                        response.response_id,
+                                        row_snapshot(
+                                            session.get(ResponseRecord, response.response_id)
+                                        ),
+                                    ),
+                                    (
+                                        DeliveryOutboxRecord,
+                                        delivery.id,
+                                        row_snapshot(
+                                            session.get(DeliveryOutboxRecord, delivery.id)
+                                        ),
+                                    ),
+                                ],
+                            }
                         with factory() as session:
                             before_tip = session.get(AIThread, item.ai_thread_id).hermes_thread_id
                         followup = admit("followup")
@@ -831,6 +970,155 @@ async def run_linux(args, case, model, certificates, keys):
                 with factory() as session:
                     assert len(list(session.scalars(select(Artifact)))) == 2
                     assert len(list(session.scalars(select(DeliveryReceipt)))) >= 4
+                reuse_reports = []
+                reused_tasks = {original_pdf["binding"]["task_id"]}
+                reused_sessions = {original_pdf["binding"]["session_id"]}
+
+                async def reuse(label, action):
+                    assert original_pdf is not None
+                    prior_artifacts = None
+                    with factory() as session:
+                        prior_artifacts = set(session.scalars(select(Artifact.artifact_id)))
+                        prior_tip = session.get(AIThread, instruction.ai_thread_id).hermes_thread_id
+                    item = admit(
+                        label, attachment_id=original_pdf["job"]["attachment_id"], action=action
+                    )
+                    assert item.message_id != original_pdf["job"]["message_id"]
+                    with factory() as session:
+                        job = session.scalar(
+                            select(InboundMediaJob).where(
+                                InboundMediaJob.message_id == item.message_id
+                            )
+                        )
+                        assert job.source_job_id == original_pdf["job"]["id"]
+                        assert job.attachment_id == original_pdf["job"]["attachment_id"]
+                        assert job.followup_action == action and job.state == "ready"
+                        assert job.read_token_hash is None
+                    before_requests = len(receiver.requests)
+                    before_contexts = len(return_context_observations)
+                    await execute(item)
+                    await deliver()
+                    assert return_context_observations[before_contexts:] == [
+                        action == "read-return"
+                    ]
+                    with factory() as session:
+                        old_job = session.get(InboundMediaJob, original_pdf["job"]["id"])
+                        old_binding = session.get(InboundHostBinding, original_pdf["binding"]["id"])
+                        assert row_snapshot(old_job) == original_pdf["job"]
+                        assert row_snapshot(old_binding) == original_pdf["binding"]
+                        for row_type, row_id, before in original_pdf["records"]:
+                            assert row_snapshot(session.get(row_type, row_id)) == before
+                        assert session.get(Artifact, original_pdf["artifact_id"]).sha256 == sha(
+                            content["pdf"]
+                        )
+                        assert (
+                            session.get(ResponseRecord, original_pdf["response_id"]).status.value
+                            == "delivered"
+                        )
+                        assert (
+                            session.get(
+                                DeliveryOutboxRecord, original_pdf["delivery_id"]
+                            ).status.value
+                            == "delivered"
+                        )
+                        binding = session.scalar(
+                            select(InboundHostBinding).where(
+                                InboundHostBinding.dispatch_id == item.dispatch_record_id
+                            )
+                        )
+                        assert binding.session_id != original_pdf["binding"]["session_id"]
+                        assert binding.parent_session_id == prior_tip
+                        assert binding.task_id not in reused_tasks
+                        assert binding.session_id not in reused_sessions
+                        reused_tasks.add(binding.task_id)
+                        reused_sessions.add(binding.session_id)
+                        assert binding.closed_at and binding.grant_ciphertext is None
+                        response = session.scalar(
+                            select(ResponseRecord).where(
+                                ResponseRecord.message_id == item.message_id
+                            )
+                        )
+                        delivery = session.scalar(
+                            select(DeliveryOutboxRecord).where(
+                                DeliveryOutboxRecord.response_id == response.response_id
+                            )
+                        )
+                        assert delivery.status.value == "delivered" and delivery.attempt_count == 1
+                        new_artifacts = (
+                            set(session.scalars(select(Artifact.artifact_id))) - prior_artifacts
+                        )
+                        assert len(new_artifacts) == (1 if action == "read-return" else 0)
+                        if action == "read-return":
+                            artifact_id = new_artifacts.pop()
+                            assert (
+                                ArtifactRepository(session, settings.artifact.storage_root).read(
+                                    artifact_id
+                                )
+                                == content["pdf"]
+                            )
+                            emitted = [
+                                request["file"]
+                                for request in receiver.requests[before_requests:]
+                                if "file" in request
+                            ]
+                            assert len(emitted) == 1
+                            verify_received_pdf(emitted[0], content["pdf"])
+                        else:
+                            assert not any(
+                                "file" in request or "image" in request
+                                for request in receiver.requests[before_requests:]
+                            )
+                    reuse_reports.append(
+                        {
+                            "operation": label,
+                            "action": action,
+                            "new_dispatch": True,
+                            "same_attachment": True,
+                            "new_task_and_session": True,
+                            "original_completed_job_and_lease_unchanged": True,
+                            "new_artifact": action == "read-return",
+                            "receiver_filename_equal": True if action == "read-return" else None,
+                            "delivered": True,
+                            "return_context_present": action == "read-return",
+                        }
+                    )
+
+                await reuse("reuse-pdf", "read-return")
+
+        # A real process shutdown/start on the same isolated HOME, not merely
+        # another HTTP client. Gateway remains the same process; replace only
+        # its SQLAlchemy session factory to prove reads from durable state.
+        from cf_agent_gateway.database import create_database_session_factory
+
+        old_factory = factory
+        factory = create_database_session_factory(app.state.database_engine)
+        assert factory is not old_factory
+        app.state.database_session_factory = factory
+        with (
+            official_host(
+                args, case, model, gateway_origin, certificates, keys, generation=1
+            ) as origin,
+            ObservedHermesClient(
+                origin,
+                keys["hermes"],
+                model.config["default"],
+                ca_file=str(certificates[0]),
+                timeout=httpx.Timeout(90, connect=5, read=90, write=5, pool=5),
+            ) as client,
+        ):
+            await reuse("reuse-pdf-after-restart", "read-return")
+            await reuse("reuse-read", "read")
+        first_ready = json.loads(host_record(case, "ready.json", 0).read_text())
+        second_ready = json.loads(host_record(case, "ready.json", 1).read_text())
+        assert first_ready["pid"] != second_ready["pid"]
+        assert json.loads(host_record(case, "host-ended.json", 1).read_text())["closed"]
+        assert model.planner.read_only_verified
+        repeated = [
+            value
+            for (label, _aid), value in model.planner.prepared.items()
+            if label in {"pdf", "reuse-pdf", "reuse-pdf-after-restart"}
+        ]
+        assert len(repeated) == 3 and len({value["file_ref"] for value in repeated}) == 3
         assert not model.errors
         assert model.planner.pdf_text_seen and model.planner.images
         assert any(
@@ -843,13 +1131,19 @@ async def run_linux(args, case, model, certificates, keys):
             "cf_return_current_chat",
         }
         assert (
-            sum(row["status"] == 200 and row["path"].endswith("/content") for row in requests) == 2
+            sum(row["status"] == 200 and row["path"].endswith("/content") for row in requests) == 5
         )
         return {
             "ok": True,
             "chain": "linux-real-gateway-official-hermes-filebridge",
             "hermes_commit": HERMES,
             "cases": reports,
+            "existing_attachment_followups": reuse_reports,
+            "hermes_process_restarted_with_same_home": True,
+            "gateway_session_factory_recreated": True,
+            "gateway_process_restarted": False,
+            "schema_head": "20261018_01",
+            "read_without_return_context": True,
             "schema_sha256": model.planner.schema_hashes,
             "normal_followup_text_same_managed_tip": True,
             "pdf_content_in_model_http": True,
@@ -884,7 +1178,7 @@ def main():
         except BaseException as error:
             case = Path(_HOST_PAYLOAD["case"])
             save(
-                case / "host-failure.json",
+                host_record(case, "host-failure.json", _HOST_PAYLOAD.get("generation", 0)),
                 {
                     "class": type(error).__name__,
                     "frames": [

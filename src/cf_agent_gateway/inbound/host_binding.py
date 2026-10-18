@@ -148,6 +148,12 @@ def prepare_binding(
         or profile_revision != settings.profile_revision
     ):
         raise HostBindingError()
+    if job.source_job_id is not None:
+        from cf_agent_gateway.inbound.followup import validate_profile
+
+        validate_profile(
+            session, job, profile_reference=profile_reference, profile_revision=profile_revision
+        )
     _, record = authorized_source(session, job)
     if not expected_claim_token or record.claim_token != expected_claim_token:
         raise HostBindingError()

@@ -8,6 +8,7 @@ from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
 from cf_agent_gateway.artifact.return_handoff import seal_returns
 from cf_agent_gateway.hermes.models import HermesDispatchOutcome, ResponseEnvelope
 from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
+from cf_agent_gateway.inbound.models import InboundMediaJob
 from cf_agent_gateway.task.model.errors import HermesDispatchStateConflictError
 from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispatchStatus
 from cf_agent_gateway.workspace.models import AIThread
@@ -66,15 +67,22 @@ class HermesDispatchResponseStore:
             .execution_options(synchronize_session=False)
         )
         try:
-            if artifact_return is not None and artifact_return.enabled:
-                if artifact_storage_root is None:
+            followup = self._session.scalar(
+                select(InboundMediaJob.id).where(
+                    InboundMediaJob.dispatch_id == dispatch_record_id,
+                    InboundMediaJob.source_job_id.is_not(None),
+                )
+            )
+            if followup is not None or (artifact_return is not None and artifact_return.enabled):
+                settings = artifact_return or ArtifactReturnSettings()
+                if settings.enabled and artifact_storage_root is None:
                     raise ValueError("artifact return storage is required")
                 outcome = seal_returns(
                     self._session,
                     dispatch_record_id,
                     claim_token,
                     outcome,
-                    settings=artifact_return,
+                    settings=settings,
                     storage_root=artifact_storage_root,
                 )
             envelope = outcome.response

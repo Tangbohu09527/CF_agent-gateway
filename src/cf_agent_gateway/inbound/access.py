@@ -59,6 +59,8 @@ def grant_read(session, job, *, public_base_url):
     job.read_token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
     job.read_claim_token = record.claim_token
     job.read_expires_at = now + timedelta(seconds=3660)
+    if job.source_job_id is not None:
+        job.read_expires_at = min(job.read_expires_at, aware(job.deadline_at))
     manifest = job.manifest
     session.flush()
     return {
@@ -115,10 +117,17 @@ def _authorized_manifest(session, job_id, header, *, check_host=True, require_ho
         require_read_binding(session, job, record, required=require_host)
     attachment = session.get(Attachment, job.attachment_id, populate_existing=True)
     manifest = job.manifest
+    source_job = (
+        session.get(InboundMediaJob, job.source_job_id, populate_existing=True)
+        if job.source_job_id is not None
+        else job
+    )
+    if source_job is None:
+        raise MediaFetchError("media_registry_conflict")
     if (
         attachment is None
         or manifest is None
-        or attachment.message_id != job.message_id
+        or attachment.message_id != source_job.message_id
         or attachment.hash != manifest["sha256"]
         or attachment.file_size != manifest["size"]
         or attachment.storage_path != "inbound-media:" + manifest["reference"]
@@ -127,7 +136,7 @@ def _authorized_manifest(session, job_id, header, *, check_host=True, require_ho
     if (
         manifest["reference"]
         != hashlib.sha256(
-            (job.source_fingerprint + ":" + manifest["sha256"]).encode("ascii")
+            (source_job.source_fingerprint + ":" + manifest["sha256"]).encode("ascii")
         ).hexdigest()
     ):
         raise MediaFetchError("media_registry_conflict")

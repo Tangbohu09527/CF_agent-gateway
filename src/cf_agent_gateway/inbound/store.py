@@ -64,9 +64,19 @@ def source_for(message: Message) -> MediaSource:
     )
 
 
-def stage_job(session: Session, record: HermesDispatchRecord, *, wait_seconds: int) -> None:
+def stage_job(
+    session: Session,
+    record: HermesDispatchRecord,
+    *,
+    wait_seconds: int,
+    followup_enabled: bool = False,
+) -> None:
     message = session.get(Message, record.message_id)
     if message is None or not is_media_message(message):
+        if followup_enabled:
+            from cf_agent_gateway.inbound.followup import stage_followup
+
+            stage_followup(session, record, wait_seconds=wait_seconds)
         return
     now = datetime.now(UTC)
     try:
@@ -93,6 +103,10 @@ def authorized_source(
     session: Session, job: InboundMediaJob
 ) -> tuple[Message, HermesDispatchRecord]:
     """Recheck current source identity, not merely a historical allowed outcome."""
+    if job.source_job_id is not None:
+        from cf_agent_gateway.inbound.followup import authorize_followup
+
+        return authorize_followup(session, job)
     message, record = authorized_dispatch_source(
         session,
         message_id=job.message_id,

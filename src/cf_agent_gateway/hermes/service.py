@@ -188,6 +188,12 @@ class HermesDispatchService:
                     f"{media_job.state} / {media_job.last_error_code}。"
                     "未交给 AI，也未归档；请由管理员查看取件状态。"
                 )
+                if (media_job.last_error_code or "").startswith("media_followup_"):
+                    notice = (
+                        "无法续办附件。请唯一引用原附件消息，发送 /attachment quoted "
+                        "read 或 read-return；或使用已确认的附件 ID 替代 quoted。"
+                        "不选择最近附件；原件和旧任务保持不变。"
+                    )
                 return HermesDispatchOutcome(
                     message_id=message.id,
                     workspace_id=workspace.id,
@@ -202,6 +208,19 @@ class HermesDispatchService:
                 raise HermesDispatchError(reason="inbound_media_read_disabled")
             if not self._host_binding.enabled or not defer_binding_update:
                 raise HermesDispatchError(reason="inbound_host_binding_required")
+            if media_job.source_job_id is not None:
+                if not self._inbound_media.followup_enabled:
+                    raise HermesDispatchError(reason="inbound_followup_disabled")
+                if media_job.followup_action == "read-return" and not self._artifact_return.enabled:
+                    raise HermesDispatchError(reason="inbound_followup_return_disabled")
+                from cf_agent_gateway.inbound.followup import verify_available
+
+                try:
+                    verify_available(
+                        self._session, media_job, staging_root=self._inbound_media.staging_root
+                    )
+                except MediaFetchError:
+                    raise HermesResponseError(operation="inbound_followup_unavailable") from None
             media_ready = True
             content = (
                 "An attachment is registered. Use the authorized FileBridge tool with its "
@@ -216,6 +235,12 @@ class HermesDispatchService:
                     ensure_ascii=True,
                 )
             )
+            if media_job.source_job_id is not None:
+                instructions = {
+                    "read": "Read only. No artifact return is authorized for this operation.",
+                    "read-return": "Read as instructed and return only the verified original.",
+                }
+                content = instructions[media_job.followup_action] + " " + content
         if not content:
             raise HermesDispatchError(reason="empty_message_content")
 
@@ -383,7 +408,9 @@ class HermesDispatchService:
                 thread_id=thread.id,
                 session_metadata=metadata,
             )
-        if self._artifact_return.enabled:
+        if self._artifact_return.enabled and not (
+            media_job is not None and media_job.followup_action == "read"
+        ):
             if not defer_binding_update or not expected_claim_token:
                 raise HermesDispatchError(reason="artifact_return_requires_durable_claim")
             record = self._session.scalar(
