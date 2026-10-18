@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 import test_inbound_media_queue as media_tests
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from cf_agent_gateway.admin.recovery import (
     DispatchRecoveryStateConflictError,
@@ -21,6 +21,7 @@ from cf_agent_gateway.hermes import HermesClient, HermesDispatchOutcome, HermesD
 from cf_agent_gateway.hermes.errors import HermesDispatchError
 from cf_agent_gateway.hermes.result_models import HermesDispatchResponse
 from cf_agent_gateway.hermes.result_store import HermesDispatchResponseStore
+from cf_agent_gateway.inbound import host_binding
 from cf_agent_gateway.inbound.host_binding_models import InboundHostBinding
 from cf_agent_gateway.inbound.models import InboundMediaJob
 from cf_agent_gateway.inbound.store import aware
@@ -122,25 +123,46 @@ def acknowledge_closed(rig, binding_id):
 
 
 @pytest.mark.parametrize("failure", [False, True])
-def test_worker_revokes_and_waits_for_closed_before_completing(rig, failure):
+def test_worker_revokes_and_waits_for_closed_before_completing(rig, failure, monkeypatch):
     class Dispatcher:
         def dispatch_record(self, record):
             if failure:
                 raise HermesDispatchError(reason="synthetic_pre_execution_failure")
             return outcome(record)
 
-    worker, claim, binding_id = prepare(rig, Dispatcher())
+    # Keep the closed-ACK case separate from the finite-lease fallback below.
+    # Observing revocation must not race a host lease with the same 3s deadline.
+    worker, claim, binding_id = prepare(rig, Dispatcher(), lease_seconds=30, host_lease_seconds=30)
+    revoked_committed = Event()
+    revoke_dispatch = host_binding.revoke_dispatch
+
+    def observe_revocation(session, dispatch_id, reason, *, claim_token=None):
+        revoke_dispatch(session, dispatch_id, reason, claim_token=claim_token)
+        if dispatch_id == claim.record_id:
+            event.listen(session, "after_commit", lambda _: revoked_committed.set(), once=True)
+
+    monkeypatch.setattr(host_binding, "revoke_dispatch", observe_revocation)
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(worker.process_claim, claim)
-        await_revoked(rig, binding_id)
-        assert not future.done()
-        with rig.sessions() as session:
-            assert (
-                session.get(HermesDispatchRecord, claim.record_id).status
-                is HermesDispatchStatus.RUNNING
-            )
-            assert session.scalar(select(HermesDispatchResponse)) is None
-        acknowledge_closed(rig, binding_id)
+        try:
+            assert revoked_committed.wait(10), "revocation transaction did not commit"
+            with rig.sessions() as session:
+                binding = session.get(InboundHostBinding, binding_id)
+                assert binding.state == "revoked"
+                assert binding.reason == ("dispatch_failed" if failure else "completed")
+                assert binding.grant_ciphertext is None
+                assert session.get(InboundMediaJob, binding.job_id).read_token_hash is None
+                assert aware(binding.host_lease_until) > datetime.now(UTC)
+                assert (
+                    session.get(HermesDispatchRecord, claim.record_id).status
+                    is HermesDispatchStatus.RUNNING
+                )
+                assert session.scalar(select(HermesDispatchResponse)) is None
+            assert not future.done()
+        finally:
+            # Also release the real barrier after a failed assertion so executor
+            # cleanup does not have to wait for the fixture's longer host lease.
+            acknowledge_closed(rig, binding_id)
         # The heartbeat exit may join for the claim's full lease duration. Allow
         # that cleanup bound plus scheduling/final persistence slack after close.
         result = future.result(timeout=max(1.0, worker._lease_seconds) + 5.0)
