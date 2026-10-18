@@ -601,8 +601,8 @@ def test_replacement_during_read_is_blocked_or_detected(tmp_path, monkeypatch):
     original = files._read_descriptor
     blocked = []
 
-    def replace_during_read(fd, limit):
-        content = original(fd, limit)
+    def replace_during_read(fd, limit, check_active=None):
+        content = original(fd, limit, check_active)
         try:
             path.rename(tmp_path / "moved.pdf")
             path.write_bytes(PDF.replace(b"synthetic", b"replacement"))
@@ -629,12 +629,12 @@ def test_windows_task_root_and_ancestor_rename_are_denied_during_read(tmp_path, 
     original = files._read_descriptor
     blocked = []
 
-    def rename_ancestors_while_handles_open(fd, limit):
+    def rename_ancestors_while_handles_open(fd, limit, check_active=None):
         for path in (nested, root, parent):
             with pytest.raises(PermissionError):
                 path.rename(path.with_name(path.name + "-replacement"))
             blocked.append(path.name)
-        return original(fd, limit)
+        return original(fd, limit, check_active)
 
     monkeypatch.setattr(files, "_read_descriptor", rename_ancestors_while_handles_open)
     assert read_task_file(root, "nested/source.pdf", "file").content == PDF

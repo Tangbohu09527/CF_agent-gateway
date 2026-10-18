@@ -49,6 +49,7 @@ BUNDLE_FILES = (
     "hermes/return_bridge/__init__.py",
     "hermes/return_bridge/files.py",
     "hermes/return_bridge/scope.py",
+    "hermes/return_bridge/staging.py",
     "hermes/return_bridge/transport.py",
     "hermes/return_bridge/protocol.py",
     "hermes/return_bridge/plugin.py",

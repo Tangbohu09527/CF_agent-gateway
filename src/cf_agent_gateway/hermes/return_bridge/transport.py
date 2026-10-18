@@ -7,6 +7,7 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -32,6 +33,12 @@ class Publication:
     next_method: str = "PUT"
     terminal: bool = False
     receipt: dict | None = None
+    check_source: Callable[[], None] | None = None
+
+    def check_active(self, scope):
+        scope.check_active()
+        if self.check_source is not None:
+            self.check_source()
 
 
 def expected_receipt(file: TaskFile, *, artifact_id: str, response_id: str) -> dict:
@@ -62,12 +69,12 @@ class UploadTransport:
         if item.terminal:
             raise ReturnBridgeError("return_unavailable")
         if item.receipt is not None:
-            scope.check_active()
+            item.check_active(scope)
             return _projection(item.receipt)
         if not item.deadline:
             item.deadline = time.monotonic() + RETURN_BUDGET_SECONDS
         while item.attempts < 3 and time.monotonic() < item.deadline:
-            scope.check_active()
+            item.check_active(scope)
             headers = {"Authorization": scope._authorization_for_transport()}
             method = item.next_method
             if method == "PUT":
@@ -87,6 +94,7 @@ class UploadTransport:
             item.next_method = "GET"
             try:
                 with scope.network_guard():
+                    item.check_active(scope)
                     remaining = item.deadline - time.monotonic()
                     if remaining <= 0:
                         break
@@ -94,7 +102,7 @@ class UploadTransport:
                         self._exchange(scope, item, method, headers, remaining)
                     )
             except (httpx.TransportError, OSError, TimeoutError):
-                scope.check_active()
+                item.check_active(scope)
                 continue
             except ReturnBridgeError:
                 raise
@@ -105,7 +113,7 @@ class UploadTransport:
                 # Local references are dropped promptly; no normal logs/traceback
                 # include headers or raw upstream error strings.
                 headers.clear()
-            scope.check_active()
+            item.check_active(scope)
             if status == 200:
                 # bool is an int subclass, but is never a valid content length.
                 if (
@@ -146,7 +154,7 @@ class UploadTransport:
                 timeout=min(5.0, remaining),
             ) as client:
                 transfer = asyncio.create_task(self._request(client, scope, item, method, headers))
-                revoked = asyncio.create_task(self._watch_revocation(scope))
+                revoked = asyncio.create_task(self._watch_revocation(scope, item))
                 try:
                     done, _ = await asyncio.wait(
                         (transfer, revoked),
@@ -156,7 +164,7 @@ class UploadTransport:
                         # Prefer revocation if completion and cancellation race.
                         await revoked
                     result = await transfer
-                    scope.check_active()
+                    item.check_active(scope)
                     return result
                 finally:
                     for task in (transfer, revoked):
@@ -164,14 +172,14 @@ class UploadTransport:
                             task.cancel()
                     await asyncio.gather(transfer, revoked, return_exceptions=True)
 
-    async def _watch_revocation(self, scope):
+    async def _watch_revocation(self, scope, item):
         while not self._closed.is_set():
-            scope.check_active()
+            item.check_active(scope)
             await asyncio.sleep(0.01)
         raise ReturnBridgeError("return_scope_closed")
 
     async def _request(self, client, scope, item, method, headers):
-        scope.check_active()
+        item.check_active(scope)
         async with client.stream(
             method,
             scope._slot_url(item.slot),
@@ -179,14 +187,19 @@ class UploadTransport:
             content=item.file.content if method == "PUT" else None,
         ) as response:
             status = response.status_code
-            receipt = json.loads(await _bounded_read(response, scope)) if status == 200 else None
+            receipt = (
+                json.loads(await _bounded_read(response, scope, item)) if status == 200 else None
+            )
             return status, response.headers.get("Retry-After", "1"), receipt
 
 
-async def _bounded_read(response: httpx.Response, scope: ReturnScope) -> bytes:
+async def _bounded_read(response: httpx.Response, scope: ReturnScope, item=None) -> bytes:
     data = bytearray()
     async for chunk in response.aiter_bytes():
-        scope.check_active()
+        if item is None:
+            scope.check_active()
+        else:
+            item.check_active(scope)
         data.extend(chunk)
         if len(data) > 8192:
             raise ValueError()

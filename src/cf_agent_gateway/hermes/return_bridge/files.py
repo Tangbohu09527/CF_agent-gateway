@@ -42,7 +42,7 @@ def safe_filename(value: str) -> str:
     ):
         raise ReturnBridgeError("invalid_file_reference")
     reserved = {"AUX", "CON", "CONIN$", "CONOUT$", "NUL", "PRN"}
-    reserved |= {f"{prefix}{index}" for prefix in ("COM", "LPT") for index in "123456789¹²³"}
+    reserved |= {f"{prefix}{index}" for prefix in ("COM", "LPT") for index in "123456789鹿虏鲁"}
     if value.split(".", 1)[0].rstrip(" .").upper() in reserved:
         raise ReturnBridgeError("invalid_file_reference")
     return value
@@ -75,6 +75,8 @@ def read_task_file(
     filename: str | None = None,
     *,
     max_bytes: int = MAX_BYTES,
+    check_active=None,
+    check_identity=None,
 ) -> TaskFile:
     parts = reference_parts(reference)
     filename = safe_filename(filename if filename is not None else parts[-1])
@@ -84,12 +86,19 @@ def read_task_file(
         raise ReturnBridgeError("invalid_file_type")
     try:
         content = (
-            _windows_read(root, parts, max_bytes)
+            _windows_read(root, parts, max_bytes, check_active, check_identity)
             if os.name == "nt"
-            else _posix_read(root, parts, max_bytes)
+            else _posix_read(root, parts, max_bytes, check_active, check_identity)
         )
+    except ReturnBridgeError:
+        raise
     except (OSError, ValueError):
         raise ReturnBridgeError("file_unavailable") from None
+    return task_file_from_bytes(reference, filename, kind, content)
+
+
+def task_file_from_bytes(reference, filename, kind, content):
+    """One MIME contract for generated and byte-preserving inbound files."""
     if (
         kind == "file"
         and filename.lower().endswith(".pdf")
@@ -109,13 +118,17 @@ def read_task_file(
     return TaskFile(reference, filename, kind, mime, content)
 
 
-def _read_descriptor(fd: int, limit: int) -> bytes:
+def _read_descriptor(fd: int, limit: int, check_active=None) -> bytes:
+    if check_active is not None:
+        check_active()
     before = os.fstat(fd)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= limit:
         raise ValueError()
     chunks = []
     total = 0
     while True:
+        if check_active is not None:
+            check_active()
         chunk = os.read(fd, min(65536, limit + 1 - total))
         if not chunk:
             break
@@ -123,6 +136,8 @@ def _read_descriptor(fd: int, limit: int) -> bytes:
         total += len(chunk)
         if total > limit:
             raise ValueError()
+    if check_active is not None:
+        check_active()
     after = os.fstat(fd)
     if (
         before.st_dev,
@@ -143,7 +158,9 @@ def _read_descriptor(fd: int, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def _posix_read(root: Path, parts: tuple[str, ...], limit: int) -> bytes:
+def _posix_read(
+    root: Path, parts: tuple[str, ...], limit: int, check_active=None, check_identity=None
+) -> bytes:
     root = Path(os.path.abspath(root))
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     with ExitStack() as stack:
@@ -157,7 +174,10 @@ def _posix_read(root: Path, parts: tuple[str, ...], limit: int) -> bytes:
             parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
         )
         stack.callback(os.close, descriptor)
-        content = _read_descriptor(descriptor, limit)
+        if check_identity is not None:
+            opened = os.fstat(descriptor)
+            check_identity((opened.st_dev, opened.st_ino))
+        content = _read_descriptor(descriptor, limit, check_active)
         opened = os.fstat(descriptor)
         named = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
@@ -165,7 +185,9 @@ def _posix_read(root: Path, parts: tuple[str, ...], limit: int) -> bytes:
         return content
 
 
-def _windows_read(root: Path, parts: tuple[str, ...], limit: int) -> bytes:
+def _windows_read(
+    root: Path, parts: tuple[str, ...], limit: int, check_active=None, check_identity=None
+) -> bytes:
     import ctypes
     import msvcrt
     from ctypes import wintypes
@@ -244,4 +266,7 @@ def _windows_read(root: Path, parts: tuple[str, ...], limit: int) -> bytes:
             close(handle)
             raise
         stack.callback(os.close, descriptor)
-        return _read_descriptor(descriptor, limit)
+        if check_identity is not None:
+            opened = os.fstat(descriptor)
+            check_identity((opened.st_dev, opened.st_ino))
+        return _read_descriptor(descriptor, limit, check_active)

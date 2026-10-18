@@ -1,0 +1,99 @@
+name: Isolated official Hermes inbound file return
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/hermes-file-return.yml"
+      - "tests/hermes_file_return_probe/**"
+      - "tests/test_hermes_file_return_probe.py"
+      - "src/cf_agent_gateway/hermes/**"
+      - "src/cf_agent_gateway/artifacts/**"
+      - "src/cf_agent_gateway/inbound_media/**"
+      - "src/cf_agent_gateway/channels/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+    inputs:
+      filebridge_commit:
+        description: Exact reviewed FileBridge commit (40 lowercase hex characters)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux-full-chain:
+    name: Linux real Gateway PDF, follow-up text, PNG return chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require immutable cross-repository input
+        id: sources
+        env:
+          INPUT_COMMIT: ${{ inputs.filebridge_commit }}
+        run: |
+          FILEBRIDGE_COMMIT="${INPUT_COMMIT:-$(cat tests/hermes_file_return_probe/filebridge-commit.txt)}"
+          [[ "$FILEBRIDGE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
+          echo "filebridge_commit=$FILEBRIDGE_COMMIT" >> "$GITHUB_OUTPUT"
+          git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          repository: Tangbohu09527/CF_filebrowser-enterprise
+          ref: ${{ steps.sources.outputs.filebridge_commit }}
+          path: .pytest_cache/file-return/filebridge
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 427d605d4985c2d49a795493ef6c5d66413057d1
+          path: .pytest_cache/file-return/hermes
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.7"
+          cache-dependency-path: .pytest_cache/file-return/filebridge/tools/filebrowser-agentctl/go.sum
+      - name: Build source-bound native downloader
+        working-directory: .pytest_cache/file-return/filebridge/tools/filebrowser-agentctl
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -mod=readonly -o "$GITHUB_WORKSPACE/.pytest_cache/file-return/filebridge-inbound" ./cmd/filebridge-inbound
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Isolated Gateway dependency runtime
+        run: |
+          python -m venv .pytest_cache/file-return/gateway-venv
+          .pytest_cache/file-return/gateway-venv/bin/python -m pip install -e '.[dev]'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+      - name: Isolated official Hermes and byte parser dependencies
+        run: |
+          python -m venv .pytest_cache/file-return/hermes-venv
+          .pytest_cache/file-return/hermes-venv/bin/python -m pip install -r tests/hermes_return_probe/requirements.txt
+          .pytest_cache/file-return/hermes-venv/bin/python -m pip install --no-deps --require-hashes --only-binary=:all: -r .pytest_cache/file-return/filebridge/integrations/hermes-filebridge/requirements-inbound-pdf-png.txt
+      - name: Real inbound, official tools, Artifact and Delivery (synthetic model/WeChat only)
+        env:
+          FILEBRIDGE_COMMIT: ${{ steps.sources.outputs.filebridge_commit }}
+        run: |
+          .pytest_cache/file-return/gateway-venv/bin/python -I -B tests/hermes_file_return_probe/probe.py \
+            --filebridge-source .pytest_cache/file-return/filebridge --filebridge-commit "$FILEBRIDGE_COMMIT" \
+            --hermes-source .pytest_cache/file-return/hermes \
+            --hermes-python .pytest_cache/file-return/hermes-venv/bin/python \
+            --worker .pytest_cache/file-return/filebridge-inbound \
+            --output .pytest_cache/file-return/evidence
+      - name: Preserve safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-file-return-${{ github.sha }}
+          path: |
+            .pytest_cache/file-return/evidence/safe-summary.json
+            .pytest_cache/file-return/evidence/host-failure.json
+            .pytest_cache/file-return/evidence/host-ended.json
+            .pytest_cache/file-return/evidence/source-proof.json
+          if-no-files-found: error
+          retention-days: 14

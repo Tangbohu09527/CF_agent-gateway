@@ -40,7 +40,9 @@ from cf_agent_gateway.hermes.tls import stdlib_ssl_context
 
 _execution = contextvars.ContextVar("cf_return_execution", default=None)
 _tool_execution = contextvars.ContextVar("cf_return_tool_execution", default=None)
+_INBOUND_READ_TOOL = "filebrowser_read_inbound"
 _APP_KEY = "cf_artifact_return_bridge"
+_BRIDGE_VERSION = "inbound-staging-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -338,18 +340,22 @@ def pre_llm_call(*, session_id="", task_id="", turn_id="", **_kwargs):
 def tool_execution(
     *, tool_name, args, next_call, session_id="", task_id="", turn_id="", tool_call_id="", **_kwargs
 ):
-    if tool_name != TOOL_NAME:
+    if tool_name not in {TOOL_NAME, _INBOUND_READ_TOOL}:
+        return next_call(args)
+    # Ordinary FileBridge reads keep their existing authorization when this
+    # request has no return capability. Preparing a return still denies below.
+    if tool_name == _INBOUND_READ_TOOL and _execution.get() is None:
         return next_call(args)
     current = _execution.get()
     try:
         if current is None or not tool_call_id:
             raise ReturnBridgeError("return_execution_unavailable")
         current.check(session_id, task_id, turn_id)
-        marker = _tool_execution.set((current, tool_call_id))
+        marker = _tool_execution.set((current, tool_call_id, tool_name))
         try:
             current.event(
                 "tool_start",
-                tool=TOOL_NAME,
+                tool=tool_name,
                 tool_call_id=tool_call_id,
                 session_id=session_id,
                 task_id=task_id,
@@ -363,16 +369,54 @@ def tool_execution(
         return json.dumps({"success": False, "error": error.code})
 
 
+def prepare_inbound_return(
+    *, attachment_id, binding, stream, size_bytes, sha256, filename, check_active
+):
+    """Trusted FileBridge adapter seam, never a model tool or a scope lookup.
+
+    FileBridge supplies its already-verified binding and a closure over the
+    original lease. Only the native read tool's current official turn can stage.
+    The closure remains attached to the publication; this call cannot renew it.
+    """
+    current = _execution.get()
+    marker = _tool_execution.get()
+    if (
+        current is None
+        or marker is None
+        or marker[0] is not current
+        or marker[2] != _INBOUND_READ_TOOL
+    ):
+        raise ReturnBridgeError("return_execution_unavailable")
+    if not isinstance(binding, dict):
+        raise ReturnBridgeError("inbound_return_binding_mismatch")
+    try:
+        current.check(binding["session_id"], binding["task_id"], binding["turn_id"])
+    except (ReturnBridgeError, KeyError):
+        raise ReturnBridgeError("inbound_return_binding_mismatch") from None
+    result = current.scope.prepare_inbound(
+        attachment_id=attachment_id,
+        binding=binding,
+        stream=stream,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        filename=filename,
+        check_active=check_active,
+    )
+    _capability_event("inbound_prepared")
+    return result
+
+
 def handle_return(args, **_kwargs):
     current = _execution.get()
     marker = _tool_execution.get()
     try:
-        if current is None or marker is None or marker[0] is not current:
+        if current is None or marker is None or marker[0] is not current or marker[2] != TOOL_NAME:
             raise ReturnBridgeError("return_execution_unavailable")
         if not isinstance(args, dict) or set(args) - {"file_ref", "kind", "filename"}:
             raise ReturnBridgeError("invalid_return_arguments")
         if not {"file_ref", "kind"} <= set(args):
             raise ReturnBridgeError("invalid_return_arguments")
+        _capability_event("return_handler")
         result = current.scope.return_file(**args)
         current.event("tool_result", tool=TOOL_NAME, tool_call_id=marker[1], result=result)
     except ReturnBridgeError as error:
@@ -390,13 +434,36 @@ TOOL_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "file_ref": {"type": "string", "description": "本次授权工作目录内相对文件路径"},
+            "file_ref": {
+                "type": "string",
+                "description": (
+                    "Relative reference in this task only. For an inbound attachment, first call "
+                    "filebrowser_read_inbound with prepare_return=true and use its file_ref. "
+                    "Never pass an opaque inbound handle, attachment ID, enterprise source/path, "
+                    "or a guessed host path."
+                ),
+            },
             "kind": {"type": "string", "enum": ["file", "image"]},
             "filename": {"type": "string", "description": "可选安全文件名，不含目录"},
         },
         "required": ["file_ref", "kind"],
     },
 }
+
+
+def _capability_event(event):
+    if event not in {"registered", "inbound_prepared", "return_handler"}:
+        raise ValueError("invalid capability event")
+    logger.info(
+        "Artifact return capability version=%s event=%s schema_sha256=%s",
+        _BRIDGE_VERSION,
+        event,
+        hashlib.sha256(
+            json.dumps(
+                TOOL_SCHEMA, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest(),
+    )
 
 
 def configure_app(native, adapter, settings, *, prepare_scope=None, observer=None):
@@ -647,3 +714,6 @@ def setup(ctx, *, prepare_scope=None, observer=None):
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_middleware("tool_execution", tool_execution)
     ctx.register_tool(name=TOOL_NAME, toolset=TOOLSET, schema=TOOL_SCHEMA, handler=handle_return)
+    # Registration is not proof of the tool definitions sent to a model. The
+    # official 427 pre_llm_call hook does not expose final tool schemas.
+    _capability_event("registered")
