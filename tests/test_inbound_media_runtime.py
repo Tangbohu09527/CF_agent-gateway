@@ -32,7 +32,12 @@ def test_background_intake_recovers_cycle_failure_and_drains_on_exit(monkeypatch
         runtime, "check_database_migrations", lambda _engine: events.append("check")
     )
     monkeypatch.setattr(runtime, "create_database_session_factory", lambda _engine: sessions)
-    monkeypatch.setattr(runtime, "InboundMediaHTTPClient", lambda _url, _token: client)
+
+    def media_client(_url, _token, *, max_bytes):
+        assert max_bytes == settings.inbound_media.max_bytes
+        return client
+
+    monkeypatch.setattr(runtime, "InboundMediaHTTPClient", media_client)
 
     class Intake:
         def __init__(self, candidate_sessions, candidate_client, candidate_staging):
