@@ -331,3 +331,43 @@ def test_original_followup_cannot_import_generated_zip(rig, monkeypatch):
     assert (
         rig.client.post(endpoint(rig), headers=headers, json=descriptor(content)).status_code == 403
     )
+
+
+@pytest.mark.parametrize("prefix", ["/other", "/approved/nested", "/approved/../other"])
+def test_reader_scope_must_equal_fixed_export_root(prefix):
+    with pytest.raises(ValueError):
+        EnterpriseExportSettings(
+            enabled=True,
+            base_url="https://files.invalid",
+            source="products",
+            root="/approved",
+            download_scope_prefix=prefix,
+            allowed_bindings=(("account", "chat", "identity"),),
+        )
+
+
+def test_narrow_reader_scope_import_retains_producer_authority(rig, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    content, requests = zipped(), []
+    with file_service(content, requests) as origin:
+        headers = enable(rig, monkeypatch, origin)
+        settings = replace(
+            rig.settings,
+            enterprise_exports=replace(
+                rig.settings.enterprise_exports, download_scope_prefix="/approved"
+            ),
+        )
+        rig.app.state.settings = settings
+        response = rig.client.post(endpoint(rig), headers=headers, json=descriptor(content))
+        assert response.status_code == 200, response.text
+        assert len(requests) == 1
+        assert parse_qs(urlsplit(requests[0]).query) == {
+            "source": ["products"],
+            "file": ["/exports/测试 (1).zip"],
+        }
+        outside = {**descriptor(content), "path": "/approved-other/exports/测试 (1).zip"}
+        assert rig.client.post(
+            endpoint(rig).replace("/0/", "/1/"), headers=headers, json=outside
+        ).status_code in {409, 422}
+        assert len(requests) == 1

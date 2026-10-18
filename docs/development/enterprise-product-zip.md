@@ -25,6 +25,7 @@ Gateway requires a new fixed image and the complete return-plugin bundle, includ
 - `base_url`: verified FileBrowser HTTPS origin, with `ca_file` where needed. Plain HTTP is accepted only for loopback fixtures.
 - `token_env`: separate scoped read token environment-variable name, default `CF_GATEWAY_ENTERPRISE_EXPORT_TOKEN`. No Gateway, Hermes, WeChat or signing credential is reused.
 - `source`, `root`: exact approved source and canonical directory prefix.
+- `download_scope_prefix`: optionally the same exact `root` when the separate read-only FileBrowser account is scoped there. Only that verified prefix is stripped from the API request; authorization and the signed export descriptor retain the producer path. The default empty prefix preserves a reader already scoped at the source root.
 - `allowed_bindings`: exact `[account, private_chat, enterprise_identity]` rows.
 - `max_bytes`: at most 134217728; `timeout_seconds`: 1–300, default 120.
 

@@ -27,6 +27,7 @@ class EnterpriseExportSettings:
     ca_file: str | None = None
     source: str = ""
     root: str = ""
+    download_scope_prefix: str = ""
     allowed_bindings: tuple = ()
     max_bytes: int = MAX_ZIP_BYTES
     timeout_seconds: int = 120
@@ -58,6 +59,10 @@ class EnterpriseExportSettings:
             ):
                 raise ValueError("invalid enterprise_exports origin or source")
             normalized_path(self.root)
+            if self.download_scope_prefix:
+                normalized_path(self.download_scope_prefix)
+                if self.download_scope_prefix != self.root:
+                    raise ValueError("enterprise reader scope must equal export root")
             if not self.allowed_bindings or any(
                 not isinstance(binding, (tuple, list))
                 or len(binding) != 3
@@ -77,6 +82,18 @@ def permitted(settings, export, *, account, chat, identity):
         or export["size_bytes"] > settings.max_bytes
     ):
         raise ValueError("enterprise export unavailable")
+
+
+def download_path(settings, export):
+    """Translate an approved producer path to the reader account scope exactly once."""
+    path = normalized_path(export["path"])
+    prefix = settings.download_scope_prefix
+    if not prefix:
+        return path
+    if not path.startswith(prefix.rstrip("/") + "/"):
+        raise ValueError("enterprise reader scope mismatch")
+    relative = path[len(prefix.rstrip("/")) :]
+    return normalized_path(relative)
 
 
 def fetch_verified(settings, export, *, check_active):
@@ -104,7 +121,7 @@ def fetch_verified(settings, export, *, check_active):
             with client.stream(
                 "GET",
                 settings.base_url.rstrip("/") + "/api/resources/download",
-                params={"source": export["source"], "file": export["path"]},
+                params={"source": export["source"], "file": download_path(settings, export)},
                 headers={"Authorization": "Bearer " + token, "Accept-Encoding": "identity"},
             ) as response:
                 if response.status_code != 200 or response.headers.get("content-encoding"):
