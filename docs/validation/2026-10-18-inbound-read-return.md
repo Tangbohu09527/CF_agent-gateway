@@ -91,10 +91,11 @@ lease_seconds=30.0。未采集响应头、正文或授权，无法恢复历史�
 
 绑定租约截止05:12:16.350206Z；本机只读SQLite中精确关联的失败工具结果记录
 时间05:11:45.592155Z，差30.758051秒。旧客户端把服务器绝对截止减本机wall time，
-要求结果不超过30.5秒。工具结果在失败之后才持久化，因此这项条件即使到达也
-无法满足。冻结旧源码的离线重现确认该数值在创建任务目录前拒绝；30和30.5
-通过、30.500001拒绝。**这是确定存在的跨主机时基缺陷；历史最先触发的异常
-分支未记录，仍不能由上述证据直接证明。** 当前没有新的生产修复或成功PDF。
+要求结果不超过30.5秒。冻结旧源码的离线重现确认
+该数值在创建任务目录前拒绝；30和30.5通过、30.500001拒绝。失败结果的时间
+戳晚于工具调用，但当时校验瞬间的time.time及期间墙钟变化未记录，因此不能
+把差值推导写成历史分支日志。**跨主机时基缺陷已复现；历史首次异常和实际
+采样值仍未知。** 当前没有新的生产修复或成功PDF。
 
 候选改为严格resolve/v2：服务端返回同次时基server_now，客户端验证原30秒上限，
 从本地monotonic请求开始计时；请求/处理耗时计入预算，不用调大阈值。旧v1响应
@@ -108,10 +109,48 @@ lease_seconds=30.0。未采集响应头、正文或授权，无法恢复历史�
 序列化后的普通Admin完整PDF组件在服务器偏移−2、−0.8、+0.8、+2秒均通过，
 每次严格一次v2解析、一次原生下载、读取及原字节回传，30秒原上限未变。
 证据SHA256 `843463402fdbb97e7670ff0bc5f8d1f6230da452300f8ee9a9a9e7839d7ad03e`。
-该Windows组件的Gateway为协议替身；新固定双仓库Linux真实Gateway完整链
-仍待完成，不能以此前v1链路通过替代。
+该Windows组件的Gateway为协议替身。新固定双仓库Linux真实Gateway完整链
+已通过：[run39102290952](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39102290952)，
+head `1a8ce964`，实际PR合并源 `ddb098006cbeb10bd9026ea9f39fe07ffe88b397`；
+187个Gateway源码文件与候选Git字节逐一相同，两个源码树清洁。固定FileBridge
+`f3a63895`，PDF正文、Artifact/Response/Delivery、同一执行会话后续文字及PNG
+均通过，微信/模型仍为替身。source-proof SHA256
+`8bb8c33dfb9482b89d5ac24f92060bbab1b76142a3690b56d15c9baa969a103a`。
 
 05:48:51 UTC最新只读现场仍为原Gateway/Hermes版本，Poll/Delivery关闭，无在途
 Dispatch或媒体任务；任务公钥数量0、限定sudoers不存在、撤权记录在。仅为两次
 只读审计重新收取的DPAPI临时密码仍受原12小时存储上限约束，需在接续不再需要
 时删除。新Gateway镜像和客户端组合须完成候选验证并取得集中生产授权后才切换。
+
+## 固定候选检查与待批准的生产边界
+
+应用候选 `1a8ce964246c896d6d72dee8a037f962c58447a0` 的主CI
+[run39102287582](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39102287582)
+已成功：2719通过、6跳过；迁移47、PostgreSQL1、V2场景6通过，实际schema
+仍为20261016_01。Quality、真实Compose容器和旧/当前Hermes兼容检查通过。
+
+FileBridge的后续 `8d12d21e59619c10a794d997edc895a912b58cb5` 仅更新两项CI
+固定依赖，产品源码仍与f3a63895一致。原联合测试固定Gateway0ec54bf（只支持v1），
+因此新版客户端按设计拒绝；更新为1a8及精确ZIP/源码摘要，未改变业务断言。
+[run39102930587](https://github.com/Tangbohu09527/CF_filebrowser-enterprise/actions/runs/39102930587)
+两个Linux客户端/官方Hermes联合检查已实际成功。Windows旧恢复步骤仍因artifact
+11075196992过期返回HTTP410而失败，另有未修改backend lint问题；不称整个
+FileBridge仓库CI绿色。
+
+Windows后续候选只替换inbound_control.py与inbound_host.py，另外11目标、
+142个既有解析器文件、原生worker、配置及返回插件只验证。manifest SHA256
+`452fde3688793ffcdff869fcd6d49c2e59ccae503392aa359db998ac58b520d5`。
+7个PS5.1脚本解析无误，17个生命周期模拟及4个真实原SDDL事务隔离场景通过。
+06:10:50 UTC普通Admin只读核验仍为Hermes427、既有配置/返回插件，活动任务0、
+指定双监听正常；目标摘要和原SDDL均一致。该检查没有停止服务或写生产文件。
+
+新的Gateway镜像尚未构建或部署；固定候选源归档SHA256
+`47d735f37dd58d1cf06cdf5d550c67ac23ce9e41708cd3ae525c13a49b7e30de`。
+待审切换须先核当前版本/保护记录/配置挂载/队列与可用备份，从固定旧镜像离线
+构建新应用并严格验证依赖、源码和六服务镜像选择，再只切换正式Compose的六个
+image字段。配置、外部env、schema、历史任务及checkpoint不改；旧记录原样保留。
+新Gateway先兼容v1/v2，再安装上述两个Windows文件并官方同版本重启。Gate全程
+关闭，未知漂移或部分失败保留证据、按实际阶段收口，不自动全量回退。
+
+这项Gateway镜像变更超出用户最近固定e742镜像的生产边界，必须取得一次明确
+批准。生产PDF没有成功，不能用这些隔离和候选证明替代；也未发送PNG或重派48。
