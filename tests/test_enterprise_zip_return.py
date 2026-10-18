@@ -371,3 +371,87 @@ def test_narrow_reader_scope_import_retains_producer_authority(rig, monkeypatch)
             endpoint(rig).replace("/0/", "/1/"), headers=headers, json=outside
         ).status_code in {409, 422}
         assert len(requests) == 1
+
+
+@pytest.mark.parametrize("limit", ["enterprise", "return", "wechat"])
+def test_import_rejects_output_limit_before_fetch_and_artifact(rig, monkeypatch, limit):
+    content, requests = zipped(content=b"bounded image" * 128), []
+    with file_service(content, requests) as origin:
+        headers = enable(rig, monkeypatch, origin)
+        maximum = len(content) - 1
+        settings = rig.settings
+        if limit == "enterprise":
+            settings = replace(
+                settings, enterprise_exports=replace(settings.enterprise_exports, max_bytes=maximum)
+            )
+        elif limit == "return":
+            # Config validation requires the enterprise ceiling to fit the return ceiling.
+            settings = replace(
+                settings,
+                enterprise_exports=replace(settings.enterprise_exports, max_bytes=maximum),
+                artifact_return=replace(settings.artifact_return, max_bytes=maximum),
+            )
+        else:
+            settings = replace(settings, wechat=replace(settings.wechat, max_media_bytes=maximum))
+        rig.app.state.settings = settings
+        with rig.factory() as session:
+            record = session.get(HermesDispatchRecord, rig.dispatch_id)
+            current = issue_context(
+                session, record, settings.artifact_return, session_id="synthetic-session"
+            )
+            session.commit()
+        headers["Authorization"] = current["authorization"]
+        for _ in range(2):
+            result = rig.client.post(endpoint(rig), headers=headers, json=descriptor(content))
+            assert result.status_code == 413
+            assert result.json()["detail"] == "enterprise export too large"
+        assert requests == []
+        with rig.factory() as session:
+            assert list(session.scalars(select(Artifact))) == []
+
+
+def test_enterprise_output_too_large_is_terminal_clear_tool_result(rig, monkeypatch, tmp_path):
+    enable(rig, monkeypatch, "http://127.0.0.1:1")
+    scope = ReturnScope(
+        return_url=rig.context["url"],
+        authorization=rig.context["authorization"],
+        gateway_origin="https://gateway.invalid",
+        request_id="synthetic-limit",
+        work_root=tmp_path,
+        session_id="synthetic-session",
+    )
+    calls = []
+
+    async def rejected(self, scope, item, method, headers, remaining):
+        calls.append(method)
+        return 413, "0", None
+
+    monkeypatch.setattr(transport.UploadTransport, "_exchange", rejected)
+    with activate_scope(scope):
+        binding, active = trusted_enterprise_context()
+        ref = prepare_enterprise_return(
+            export=descriptor(zipped()), binding=binding, check_active=active
+        )
+        execution = plugin.Execution(scope, "synthetic-session", None)
+        token = plugin._execution.set(execution)
+        try:
+            plugin.pre_llm_call(session_id="synthetic-session", task_id="task", turn_id="turn")
+            results = [
+                json.loads(
+                    plugin.tool_execution(
+                        tool_name=plugin.TOOL_NAME,
+                        args={"file_ref": ref["file_ref"], "kind": "file"},
+                        next_call=plugin.handle_return,
+                        session_id="synthetic-session",
+                        task_id="task",
+                        turn_id="turn",
+                        tool_call_id=f"limit-{attempt}",
+                    )
+                )
+                for attempt in range(2)
+            ]
+        finally:
+            plugin._execution.reset(token)
+        assert results[0] == {"success": False, "error": "return_too_large"}
+        assert results[1]["success"] is False
+        assert calls == ["POST"]

@@ -147,6 +147,8 @@ class UploadTransport:
                 # original slot within the same finite budget.
                 continue
             item.terminal = True
+            if status == 413:
+                raise ReturnBridgeError("return_too_large")
             raise ReturnBridgeError("gateway_rejected_return")
         raise ReturnBridgeError("return_receipt_uncertain")
 

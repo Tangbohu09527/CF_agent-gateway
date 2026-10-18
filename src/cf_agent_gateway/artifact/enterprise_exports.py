@@ -72,6 +72,10 @@ class EnterpriseExportSettings:
                 raise ValueError("enterprise_exports requires exact account/chat/identity bindings")
 
 
+class EnterpriseExportTooLarge(ValueError):
+    """Authorized export exceeds a configured bounded output limit."""
+
+
 def permitted(settings, export, *, account, chat, identity):
     export_metadata(export)
     if (
@@ -79,9 +83,10 @@ def permitted(settings, export, *, account, chat, identity):
         or (account, chat, identity) not in {tuple(b) for b in settings.allowed_bindings}
         or export["source"] != settings.source
         or not export["path"].startswith(settings.root.rstrip("/") + "/")
-        or export["size_bytes"] > settings.max_bytes
     ):
         raise ValueError("enterprise export unavailable")
+    if export["size_bytes"] > settings.max_bytes:
+        raise EnterpriseExportTooLarge()
 
 
 def download_path(settings, export):

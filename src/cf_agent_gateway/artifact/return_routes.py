@@ -12,7 +12,12 @@ from sqlalchemy.exc import OperationalError
 
 from cf_agent_gateway.adapters.wechat.inbound_media_http import MediaFetchError
 from cf_agent_gateway.adapters.wechat.media_http import _filename as validate_media_filename
-from cf_agent_gateway.artifact.enterprise_exports import export_metadata, fetch_verified, permitted
+from cf_agent_gateway.artifact.enterprise_exports import (
+    EnterpriseExportTooLarge,
+    export_metadata,
+    fetch_verified,
+    permitted,
+)
 from cf_agent_gateway.artifact.errors import (
     ArtifactError,
     ArtifactIntegrityError,
@@ -240,8 +245,10 @@ def _import_enterprise(request, settings, dispatch_id, slot, export):
                 chat=message.conversation_id,
                 identity=record.enterprise_identity_id,
             )
-            if export["size_bytes"] > settings.max_bytes:
-                raise ReturnDenied()
+            if export["size_bytes"] > min(
+                settings.max_bytes, request.app.state.settings.wechat.max_media_bytes
+            ):
+                raise EnterpriseExportTooLarge()
             expected = (
                 response_id,
                 export["name"],
@@ -291,6 +298,9 @@ def _import_enterprise(request, settings, dispatch_id, slot, export):
         except (ReturnDenied, MediaFetchError):
             session.rollback()
             raise _error(403) from None
+        except EnterpriseExportTooLarge:
+            session.rollback()
+            raise _error(413, "enterprise export too large") from None
         except (ValueError, TypeError, KeyError, ArtifactError):
             session.rollback()
             raise _error(409, "enterprise export unavailable or changed") from None
