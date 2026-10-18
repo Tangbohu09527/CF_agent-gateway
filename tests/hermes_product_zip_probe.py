@@ -509,8 +509,9 @@ async def run(args, case, model, certs, keys, file_config):
                 assert job.state == "ready" and job.attempt_count == 1
                 assert (
                     binding is not None
-                    and binding.state == "revoked"
-                    and binding.reason == "completed"
+                    and binding.state == "closed"
+                    and binding.reason == "host_closed"
+                    and binding.closed_at is not None
                     and binding.grant_ciphertext is None
                 )
                 inbound = {
@@ -518,6 +519,7 @@ async def run(args, case, model, certs, keys, file_config):
                     "job": job.id,
                     "attempts": job.attempt_count,
                     "host_closed": True,
+                    "closed_reason": binding.reason,
                     "model_invoked_ingest": model.planner.actions[0] == "ingest",
                 }
             # The protocol's actual file envelope nests data/name under "file".
