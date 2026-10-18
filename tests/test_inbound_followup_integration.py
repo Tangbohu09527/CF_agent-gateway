@@ -1,12 +1,15 @@
 """Real Gateway SQL/HTTP/claim/Delivery flow; Hermes/WeChat remain explicit doubles."""
 
+import hashlib
 from dataclasses import replace
 
+import pytest
 import test_inbound_execution_continuation as continuation_tests
 from sqlalchemy import select
 from test_hermes_dispatch_ingestion import normalized_message
-from test_inbound_execution_continuation import PDF, first_managed_attachment
+from test_inbound_execution_continuation import PDF, PNG, first_managed_attachment
 
+from cf_agent_gateway.artifact.models import Artifact
 from cf_agent_gateway.inbound import followup
 from cf_agent_gateway.inbound.models import InboundMediaJob
 from cf_agent_gateway.ingestion import MessageAdmissionService
@@ -31,13 +34,22 @@ def admit_operation(h, index, attachment_id, action="read-return"):
         )
 
 
+@pytest.mark.parametrize(
+    "kind,expected,return_kind,mime",
+    [("pdf", PDF, "file", "application/pdf"), ("png", PNG, "image", "image/png")],
+)
 def test_original_then_new_operation_then_gateway_restart_reuses_bytes_not_old_lease(
-    continuation, monkeypatch
+    continuation, monkeypatch, kind, expected, return_kind, mime
 ):
     h = continuation
-    _, _, prior = first_managed_attachment(h)
+    initial = continuation_tests.establish_text(h)
+    continuation_tests.establish_text(h, 2, "Read and return the next original attachment.")
+    h.configure(fresh_session_thread_ids=(initial.ai_thread_id,))
+    prior = h.admit(3, kind=kind)
+    assert h.run().status.value == "success"
     h.deliver_all()
     old_record = h.snapshot(prior.dispatch_record_id)
+    old_artifact_id = h.host.uploads[-1][3]["artifact_id"]
     with h.rig.sessions() as session:
         old = session.scalar(
             select(InboundMediaJob).where(InboundMediaJob.message_id == prior.message_id)
@@ -53,7 +65,7 @@ def test_original_then_new_operation_then_gateway_restart_reuses_bytes_not_old_l
     )
     h.client.app.state.settings = h.settings
     monkeypatch.setattr(followup, "InboundMediaStaging", lambda _root: h.rig.staging)
-    grants = []
+    grants, new_artifact_ids = [], []
     for index in (4, 5):
         before_tip = h.tip(prior.ai_thread_id)
         outcome = admit_operation(h, index, aid)
@@ -64,10 +76,24 @@ def test_original_then_new_operation_then_gateway_restart_reuses_bytes_not_old_l
         assert grant["attachments"][0]["message_id"] == outcome.message_id
         assert grant["attachments"][0]["attachment_id"] == aid
         assert h.host.preparations[-1][1] == before_tip
-        assert h.host.uploads[-1][2] == PDF
-        assert h.sender.media[-1][2] == PDF
+        assert h.host.uploads[-1][2] == expected
+        assert h.host.uploads[-1][1]["X-CF-Artifact-Kind"] == return_kind
+        assert h.host.uploads[-1][1]["Content-Type"] == mime
+        # This is the real Delivery worker's route selection, not the model's label.
+        assert h.sender.media[-1][1:4] == (return_kind, expected, mime)
         assert h.snapshot(prior.dispatch_record_id) == old_record
         with h.rig.sessions() as session:
+            artifact_id = h.host.uploads[-1][3]["artifact_id"]
+            new_artifact_ids.append(artifact_id)
+            artifact = session.get(Artifact, artifact_id)
+            assert artifact_id != old_artifact_id
+            assert (artifact.kind.value, artifact.mime_type, artifact.size, artifact.sha256) == (
+                return_kind,
+                mime,
+                len(expected),
+                hashlib.sha256(expected).hexdigest(),
+            )
+            assert artifact.status.value == "ready"
             old = session.get(InboundMediaJob, old_jid)
             assert {
                 column.name: getattr(old, column.name) for column in old.__table__.columns
@@ -83,6 +109,7 @@ def test_original_then_new_operation_then_gateway_restart_reuses_bytes_not_old_l
             assert session.get(HermesDispatchRecord, outcome.dispatch_record_id).attempt_count == 1
         h.restart()
     assert grants[0][0] != grants[1][0] and grants[0][1] != grants[1][1]
+    assert len(set(new_artifact_ids)) == 2
 
 
 def test_read_only_operation_has_no_return_context_and_delivers_text(continuation, monkeypatch):

@@ -73,3 +73,17 @@
 此前 PDF、明确说明后 PNG 的真实验收及其边界见[固定现场报告](https://github.com/Tangbohu09527/CF_agent-gateway/blob/acd756da6ff401cb1267b184faf0730d23977d21/docs/validation/2026-10-18-inbound-read-return.md)。这些是既有入站读取/返回链的现场结果，不是本候选附件续办的生产验收。
 
 文件名保留独立于本功能，见 [WeChat Draft PR #9](https://github.com/Tangbohu09527/CF_agent-wechat/pull/9) 及[固定文件名候选报告](https://github.com/Tangbohu09527/CF_agent-wechat/blob/a500a4cd29612e910df679e31c34638bef7ca43e/docs/validation/2026-10-18-return-filename-candidate.md)。本候选不合并该协议修改，也不把其隔离证据当作现场部署结果。
+
+## 固定候选的验证记录（2026-10-18）
+
+以下已完成 CI 记录针对产品候选 `9abfb30248952babf8624a7c04896258ba479f61`。本次收尾另包含下述 PDF/PNG 测试参数化及证据文档；产品源码没有变化，但新提交仍须由其自身 CI 验证，不能用旧 head 成功替代。
+
+[官方完整隔离链 run 39113515669](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39113515669) 已成功，实际执行 PR merge `dc68a45210c4d66d2455851be7117e9a5a1727cd`（父提交为 base `7f022fd4f28f756e1f21812ba97fc7417308281a` 和上述候选）。下载的 source-proof 中 189 个 Gateway 源文件摘要逐一匹配候选 Git blob；固定 FileBridge 为 `f3a63895e33958dda2bbc4f3413c5619bdfabdff`，Hermes 为 `427d605d4985c2d49a795493ef6c5d66413057d1`。
+
+安全回执 `safe-summary.json`（SHA-256 `a9a3c53bc0ba45e82f87381ab61e5a30d55f61dcbaebe03f29b2a4b6214cc673`）证明：两次显式 read-return 均创建新的 Dispatch、task/session 和 Artifact，仍引用同一原附件，原 completed job/lease 保持不变；原件字节和含中文、空格、括号的 PDF 文件名在实际 Gateway 出站 HTTP JSON 中精确相等。第二次操作发生在同一隔离 HOME 的真实 Hermes 子进程退出、重启后。第三次 read 生成新任务并交付文本，未获得返回 context、未创建 Artifact。过期会话引用与无关附件均被拒绝；credential leak file count 为 0。
+
+该链运行真实 Gateway HTTP/数据库、官方 Hermes 和 FileBridge，模型及微信仍为确定性 loopback 替身。Gateway 只重建 session factory，没有重启 Gateway 进程；PNG 检查的是图片字节，并不证明文件消息显示或原名保留。上述结果不是生产附件续办验收，也不证明自然语言引用或真实微信 quote 协议。
+
+本地定向结果为：80 项新续办业务/SQL/HTTP/迁移安全检查、35 项官方探针合同检查、35 项既有正常媒体/访问/schema 检查、68 项既有返回 HTTP/集成检查通过；ruff、format、diff check 通过。 随后仅参数化现有正向集成用例，补充已登记 PNG 的两次新 read-return：PDF/PNG 两参数实际重跑 2 passed，真实 SQL/HTTP/Delivery 核对新 image Artifact、image 路由、大小/摘要/原字节和原任务历史不变。该补充使用明确的 Hermes/微信替身；它补齐 PNG 续办正向边界，不能把此前官方链的 PDF 续办误称为原生 PNG 续办通过。固定候选 25 项检查均已成功；[PR CI run 39113515681](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39113515681) 于 2026-10-18 09:16:05 UTC 完成，完整套件为 2804 passed、6 skipped，迁移 fixture 为 47 passed，V2 为 6 passed，PostgreSQL 核验单一 schema head `20261018_01`。[push CI run 39113512989](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39113512989) 也成功。新参数化提交的准确 SHA 与实时检查可在 PR #20 查看，尚未完成的检查不计为通过。旧 head `89bf362` 的重复 CI `39113475085`、Hermes `39113475093` 已取消，被最终 head 检查替代，不能计为成功。
+
+文件名协议仍属独立 B 候选。其固定 `a500a4cd29612e910df679e31c34638bef7ca43e` 的 19 项检查及[专用 Rust/Qt run 39112588669](https://github.com/Tangbohu09527/CF_agent-wechat/actions/runs/39112588669) 已成功；该协议候选未实际部署，不能把本链的 Gateway 出站 filename 相等当作真实微信协议端已经保留原名。
