@@ -498,7 +498,7 @@ def test_partial_failures_recover_same_slot_without_duplicate_artifacts(rig, mon
     [
         {"public_base_url": "http://untrusted.invalid"},
         {"public_base_url": "https://gateway.invalid/path"},
-        {"max_bytes": 1_048_577},
+        {"max_bytes": 128 * 1024 * 1024 + 1},
         {"max_artifacts": 9},
         {"ttl_seconds": 3601},
         {"host_contract_confirmed": False},

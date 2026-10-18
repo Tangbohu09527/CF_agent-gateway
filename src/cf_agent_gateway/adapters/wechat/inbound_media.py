@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-MAX_MEDIA_BYTES = 10 * 1024 * 1024
+MAX_MEDIA_BYTES = 128 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _QUALITIES = frozenset({"full", "standard", "thumbnail"})
 
@@ -107,13 +107,15 @@ def _signature(data: bytes) -> str:
         return "jpeg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
+    if data.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+        return "zip"
     return "other"
 
 
 def parse_inbound_media(
     payload: object,
     *,
-    max_bytes: int = MAX_MEDIA_BYTES,
+    max_bytes: int = 10 * 1024 * 1024,
     expected: ExpectedOriginal | None = None,
 ) -> InboundMediaResult:
     """Parse the observed JSON response without I/O or automatic retry.

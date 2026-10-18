@@ -186,6 +186,43 @@ class ResponseStore:
         )
         return existing
 
+    def save_captured(self, outcome: HermesDispatchOutcome) -> tuple[ResponseRecord, bool]:
+        """Explicit controlled-source response: persist, never enqueue channel delivery."""
+        from cf_agent_gateway.controlled_test import SOURCE
+        from cf_agent_gateway.message.models import Message
+
+        message = self._session.get(Message, outcome.message_id)
+        if message is None or message.source != SOURCE:
+            raise ResponseValidationError("capture_requires_controlled_source")
+        existing = self.verify_generated(outcome)
+        if existing is not None:
+            return existing, False
+        envelope = _response_envelope(outcome)
+        response = ResponseRecord(
+            response_id=envelope.response_id,
+            idempotency_key=build_response_idempotency_key(outcome.message_id),
+            message_id=outcome.message_id,
+            workspace_id=outcome.workspace_id,
+            ai_thread_id=outcome.ai_thread_id,
+            content_sha256=_content_sha256(envelope),
+            part_count=len(envelope.parts),
+            status=ResponseStatus.GENERATED,
+            generated_at=datetime.now(UTC),
+        )
+        response.parts = [
+            _part_record(envelope.response_id, i, part) for i, part in enumerate(envelope.parts)
+        ]
+        self._session.add(response)
+        try:
+            self._session.commit()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self.verify_generated(outcome)
+            if existing is None:
+                raise
+            return existing, False
+        return self.get_required(response.response_id), True
+
     def save(
         self,
         outcome: HermesDispatchOutcome,

@@ -401,7 +401,7 @@ def test_url_rejects_other_origins_plaintext_and_userinfo(tmp_path, url):
     [
         {"session": "old-session"},
         {"expires": int(time.time()) - 1},
-        {"max_bytes": 1_048_577},
+        {"max_bytes": 128 * 1024 * 1024 + 1},
         {"max_artifacts": 9},
         {"dispatch_id": True},
         {"claim": "bad"},

@@ -13,7 +13,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-MAX_BYTES = 1_048_576
+MAX_BYTES = 128 * 1024 * 1024
 
 
 class ReturnBridgeError(ValueError):
@@ -74,7 +74,7 @@ def read_task_file(
     kind: str,
     filename: str | None = None,
     *,
-    max_bytes: int = MAX_BYTES,
+    max_bytes: int = 1_048_576,
     check_active=None,
     check_identity=None,
 ) -> TaskFile:
@@ -113,6 +113,16 @@ def task_file_from_bytes(reference, filename, kind, content):
         and content.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")
     ):
         mime = "image/png"
+    elif kind == "file" and filename.lower().endswith(".zip"):
+        from io import BytesIO
+
+        from cf_agent_gateway.hermes.return_bridge.zip_contract import verify_zip
+
+        try:
+            verify_zip(BytesIO(content))
+        except ValueError:
+            raise ReturnBridgeError("invalid_file_type") from None
+        mime = "application/zip"
     else:
         raise ReturnBridgeError("invalid_file_type")
     return TaskFile(reference, filename, kind, mime, content)

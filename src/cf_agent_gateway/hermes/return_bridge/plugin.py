@@ -331,7 +331,8 @@ def pre_llm_call(*, session_id="", task_id="", turn_id="", **_kwargs):
         "context": (
             f"本次文件返回工具的授权工作目录是 {current.scope.work_root}。"
             f"仅在用户明确要求把文件或图片发回当前聊天时调用 {TOOL_NAME}，"
-            "file_ref 使用该目录内的相对路径；普通读取不要调用。"
+            "入站读取或企业商品导出返回 file_ref 时，请原样使用该引用；"
+            "不要把附件句柄、企业 source/path 或猜测的宿主路径当作 file_ref。普通读取不要调用。"
             "工具成功只表示交给 Gateway，仍等待任务最终成功及投递，不表示微信已实收。"
         )
     }
@@ -340,7 +341,12 @@ def pre_llm_call(*, session_id="", task_id="", turn_id="", **_kwargs):
 def tool_execution(
     *, tool_name, args, next_call, session_id="", task_id="", turn_id="", tool_call_id="", **_kwargs
 ):
-    if tool_name not in {TOOL_NAME, _INBOUND_READ_TOOL}:
+    if tool_name not in {
+        TOOL_NAME,
+        _INBOUND_READ_TOOL,
+        "filebrowser_product_materials",
+        "filebrowser_ingest_product_zip",
+    }:
         return next_call(args)
     # Ordinary FileBridge reads keep their existing authorization when this
     # request has no return capability. Preparing a return still denies below.
@@ -367,6 +373,42 @@ def tool_execution(
     except ReturnBridgeError as error:
         # Hermes skips middleware that raises; deny with a terminal safe result.
         return json.dumps({"success": False, "error": error.code})
+
+
+def _enterprise_execution(*, returning=False):
+    current, marker = _execution.get(), _tool_execution.get()
+    tools = {"filebrowser_product_materials"}
+    if not returning:
+        tools.add("filebrowser_ingest_product_zip")
+    if (
+        current is None
+        or marker is None
+        or marker[0] is not current
+        or marker[2] not in tools
+        or current.turn is None
+    ):
+        raise ReturnBridgeError("enterprise_execution_unavailable")
+    current.check(*current.turn)
+    return current
+
+
+def trusted_enterprise_context():
+    """Internal bridge only during the official product-tool middleware call."""
+    current = _enterprise_execution()
+    binding, source_active = current.scope.enterprise_context()
+
+    def active():
+        source_active()
+        current.check(*current.turn)
+
+    return binding, active
+
+
+def prepare_enterprise_return(*, export, binding, check_active):
+    current = _enterprise_execution(returning=True)
+    return current.scope.prepare_enterprise(
+        export=export, binding=binding, check_active=check_active
+    )
 
 
 def prepare_inbound_return(
@@ -428,7 +470,7 @@ def handle_return(args, **_kwargs):
 
 TOOL_SCHEMA = {
     "name": TOOL_NAME,
-    "description": "将本次授权工作目录中的 PDF 文件或 PNG 图片交给 Gateway 返回原聊天。"
+    "description": "将本次授权的 PDF、PNG 图片或企业商品 ZIP 交给 Gateway 返回原聊天。"
     "仅用于明确的返回请求；成功仅表示已交接，等待最终任务成功和投递。",
     "parameters": {
         "type": "object",
@@ -439,6 +481,8 @@ TOOL_SCHEMA = {
                 "description": (
                     "Relative reference in this task only. For an inbound attachment, first call "
                     "filebrowser_read_inbound with prepare_return=true and use its file_ref. "
+                    "For an enterprise product ZIP use the file_ref returned by "
+                    "the trusted product export tool. "
                     "Never pass an opaque inbound handle, attachment ID, enterprise source/path, "
                     "or a guessed host path."
                 ),

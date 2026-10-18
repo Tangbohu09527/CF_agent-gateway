@@ -23,7 +23,7 @@ from cf_agent_gateway.adapters.wechat.outbound_http import (
     WechatHttpMessageSender,
 )
 
-MAX_MEDIA_BYTES = 25 * 1024 * 1024
+MAX_MEDIA_BYTES = 128 * 1024 * 1024
 IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png"})
 
 _MIME_TYPE_PATTERN = re.compile(
@@ -75,7 +75,7 @@ class WechatHttpMediaSender(WechatHttpMessageSender):
         base_url: str,
         token_env: str,
         *,
-        max_media_bytes: int = MAX_MEDIA_BYTES,
+        max_media_bytes: int = 25 * 1024 * 1024,
         timeout: httpx.Timeout | float = DEFAULT_TIMEOUT,
         transport: httpx.BaseTransport | None = None,
         environment_reader: Callable[[str], str | None] = os.getenv,

@@ -162,7 +162,7 @@ def event(kind, payload):
         output.write(encoded + "\n")
 
 
-def install_host_audit(case, sources, worker, support):
+def install_host_audit(case, sources, worker, support, *, product_config=None):
     """Narrow test I/O guard, with byte-host normalization used by httpcore.
 
     The subprocess allowance is the existing FileBridge worker/parser contract.
@@ -243,6 +243,28 @@ def install_host_audit(case, sources, worker, support):
             spawn_ticket.value = None
             expected = subprocess.list2cmdline([str(worker)]) if os.name == "nt" else [str(worker)]
             native = command == expected and executable in (None, str(worker))
+            if product_config is not None:
+                for verb in (
+                    "list",
+                    "search",
+                    "stat",
+                    "mkdir",
+                    "upload-stream",
+                    "product-inspect",
+                    "product-preview",
+                    "product-import",
+                    "product-export",
+                ):
+                    argv = [str(worker), "--config", str(product_config), "--input", "-"]
+                    if verb in {"mkdir", "upload-stream", "product-import", "product-export"}:
+                        argv.append("--apply")
+                    argv.append(verb)
+                    expected_product = subprocess.list2cmdline(argv) if os.name == "nt" else argv
+                    native = native or (
+                        command == expected_product
+                        and executable in (None, str(worker))
+                        and Path(cwd).resolve() == product_config.parent.resolve()
+                    )
             parser = support.content_parser_launch_allowed(case, executable, command, cwd, env)
             denied = not (native or parser)
             if not denied and isinstance(command, (list, tuple)) and isinstance(env, dict):
@@ -314,8 +336,13 @@ async def host():
                 raise FileNotFoundError("isolated optional git unavailable")
 
     sys.addaudithook(deny_optional_git)
+    product = _HOST_PAYLOAD.get("product_settings")
     violations, optional_metadata_denials = install_host_audit(
-        case, (source, REPO, fb), Path(_HOST_PAYLOAD["worker"]), support
+        case,
+        (source, REPO, fb),
+        Path(_HOST_PAYLOAD["worker"]),
+        support,
+        product_config=Path(product["product_config_path"]) if product else None,
     )
     from agent.secret_scope import reset_secret_scope, set_secret_scope
     from gateway.config import PlatformConfig
@@ -333,9 +360,9 @@ async def host():
         getattr(callback, "__self__", None)
         for callback in manager._middleware.get("tool_execution", [])
     ]
-    assert sum(type(owner).__name__ == "HostAdapter" for owner in host_adapters) == 1, (
-        "FileBridge host wiring absent"
-    )
+    assert sum(type(owner).__name__ == "HostAdapter" for owner in host_adapters) == (
+        0 if product else 1
+    ), "FileBridge host wiring absent"
     adapter = APIServerAdapter(
         PlatformConfig(
             enabled=True,
@@ -411,7 +438,9 @@ def unused_port():
 
 
 @contextmanager
-def official_host(args, case, model, origin, certificates, keys, *, generation=0):
+def official_host(
+    args, case, model, origin, certificates, keys, *, generation=0, product_settings=None
+):
     original = load("cf_return_original_env", REPO / "tests/hermes_return_probe/probe.py")
     fb_plugin = args.filebridge_source / "integrations/hermes-filebridge/plugin"
     home = case / "profile"
@@ -498,6 +527,13 @@ def official_host(args, case, model, origin, certificates, keys, *, generation=0
         "fallback_provider_models": [],
         "checkpoints": {"enabled": False},
     }
+    if product_settings is not None:
+        config["plugins"]["entries"]["cf-filebridge"]["settings"] = product_settings
+        config["platform_toolsets"]["api_server"] = [
+            "cf_artifact_return",
+            "cf_filebridge_products",
+        ]
+        config["agent"]["max_iterations"] = 24
     if generation == 0:
         save(home / "config.yaml", config)
     else:
@@ -514,6 +550,7 @@ def official_host(args, case, model, origin, certificates, keys, *, generation=0
         "host_key": keys["host"],
         "origin": f"https://localhost:{port}",
         "generation": generation,
+        "product_settings": product_settings,
     }
     ready_path = host_record(case, "ready.json", generation)
     assert not ready_path.exists()

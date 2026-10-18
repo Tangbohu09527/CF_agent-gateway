@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
+from cf_agent_gateway.hermes.return_bridge.enterprise_files import EnterpriseFile
 from cf_agent_gateway.hermes.return_bridge.files import ReturnBridgeError, TaskFile
 from cf_agent_gateway.hermes.tls import verified_ssl_context
 
@@ -26,7 +27,7 @@ RETURN_BUDGET_SECONDS = 30.0
 @dataclass(slots=True)
 class Publication:
     slot: int
-    file: TaskFile
+    file: TaskFile | EnterpriseFile
     expected: dict
     attempts: int = 0
     deadline: float = 0.0
@@ -49,8 +50,10 @@ def expected_receipt(file: TaskFile, *, artifact_id: str, response_id: str) -> d
         "filename": file.filename,
         "kind": file.kind,
         "mime_type": file.mime_type,
-        "size": len(file.content),
-        "sha256": hashlib.sha256(file.content).hexdigest(),
+        "size": file.size if isinstance(file, EnterpriseFile) else len(file.content),
+        "sha256": file.sha256
+        if isinstance(file, EnterpriseFile)
+        else hashlib.sha256(file.content).hexdigest(),
     }
 
 
@@ -72,11 +75,15 @@ class UploadTransport:
             item.check_active(scope)
             return _projection(item.receipt)
         if not item.deadline:
-            item.deadline = time.monotonic() + RETURN_BUDGET_SECONDS
+            item.deadline = time.monotonic() + (
+                150 if isinstance(item.file, EnterpriseFile) else RETURN_BUDGET_SECONDS
+            )
         while item.attempts < 3 and time.monotonic() < item.deadline:
             item.check_active(scope)
             headers = {"Authorization": scope._authorization_for_transport()}
             method = item.next_method
+            if method == "POST":
+                headers["X-CF-Return-Intent"] = "current-chat"
             if method == "PUT":
                 headers.update(
                     {
@@ -126,7 +133,7 @@ class UploadTransport:
                 item.receipt = receipt
                 return _projection(receipt)
             if status == 404 and method == "GET":
-                item.next_method = "PUT"
+                item.next_method = "POST" if isinstance(item.file, EnterpriseFile) else "PUT"
                 continue
             if status in {429, 503}:
                 try:
@@ -151,7 +158,7 @@ class UploadTransport:
                 verify=self._ssl_context,
                 trust_env=False,
                 follow_redirects=False,
-                timeout=min(5.0, remaining),
+                timeout=min(150.0 if isinstance(item.file, EnterpriseFile) else 5.0, remaining),
             ) as client:
                 transfer = asyncio.create_task(self._request(client, scope, item, method, headers))
                 revoked = asyncio.create_task(self._watch_revocation(scope, item))
@@ -182,9 +189,10 @@ class UploadTransport:
         item.check_active(scope)
         async with client.stream(
             method,
-            scope._slot_url(item.slot),
+            scope._slot_url(item.slot) + ("/enterprise-import" if method == "POST" else ""),
             headers=headers,
             content=item.file.content if method == "PUT" else None,
+            json=item.file.export if method == "POST" else None,
         ) as response:
             status = response.status_code
             receipt = (

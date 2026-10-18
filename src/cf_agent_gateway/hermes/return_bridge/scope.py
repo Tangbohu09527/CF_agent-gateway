@@ -22,6 +22,7 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from cf_agent_gateway.hermes.return_bridge.enterprise_files import EnterpriseFile, export_metadata
 from cf_agent_gateway.hermes.return_bridge.files import ReturnBridgeError, TaskFile, read_task_file
 from cf_agent_gateway.hermes.return_bridge.staging import (
     inbound_bytes,
@@ -88,6 +89,13 @@ class ReturnScope:
         self._authorization = authorization
         self._ack = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
         self._binding = MappingProxyType({k: claims.get(v) for k, v in _BINDING_CLAIMS.items()})
+        self._enterprise_binding = {
+            **dict(self._binding),
+            "account_id": claims.get("account_id"),
+            "conversation_id": claims.get("conversation_id"),
+            "conversation_type": claims.get("conversation_type"),
+        }
+        self._enterprise_allowed = "original_attachment_constraint" not in claims
         self._expires = claims["expires"]
         self._max_bytes = claims["max_bytes"]
         self._max_artifacts = claims["max_artifacts"]
@@ -107,6 +115,7 @@ class ReturnScope:
         self._inbound_refs: dict[str, _Inbound] = {}
         self._inbound_objects: dict[tuple[int, int], _Inbound] = {}
         self._staging_attempts: dict[int, _Inbound] = {}
+        self._enterprise_files: dict[str, tuple[EnterpriseFile, Callable]] = {}
 
     def __repr__(self):
         return "<ReturnScope active>" if not self._cancelled.is_set() else "<ReturnScope closed>"
@@ -139,6 +148,58 @@ class ReturnScope:
 
     def _slot_url(self, slot):
         return f"{self._url}/artifacts/{slot}"
+
+    def enterprise_context(self):
+        self.check_active()
+        if (
+            not self._enterprise_allowed
+            or self._enterprise_binding.get("conversation_type") != "private"
+            or any(value is None or value == "" for value in self._enterprise_binding.values())
+        ):
+            raise ReturnBridgeError("enterprise_context_unavailable")
+        return dict(self._enterprise_binding), self.check_active
+
+    def prepare_enterprise(self, *, export, binding, check_active):
+        """Only trusted FileBridge code calls this; not a model tool parameter."""
+        expected, _ = self.enterprise_context()
+        if binding != expected or any(type(binding[k]) is not type(v) for k, v in expected.items()):
+            raise ReturnBridgeError("enterprise_return_binding_mismatch")
+        if not callable(check_active):
+            raise ReturnBridgeError("enterprise_return_binding_mismatch")
+        try:
+            export = json.loads(json.dumps(export_metadata(export), ensure_ascii=False))
+        except (ValueError, TypeError):
+            raise ReturnBridgeError("enterprise_export_invalid") from None
+        if export["size_bytes"] > self._max_bytes:
+            raise ReturnBridgeError("enterprise_export_too_large")
+
+        def guard():
+            self.check_active()
+            if check_active() is False:
+                raise ReturnBridgeError("enterprise_context_unavailable")
+
+        guard()
+        signature = hashlib.sha256(json.dumps(export, sort_keys=True).encode()).hexdigest()
+        reference = "enterprise-" + str(uuid5(NAMESPACE_URL, self._response_id + signature))
+        file = EnterpriseFile(
+            reference, export["name"], export["size_bytes"], export["sha256"], export
+        )
+        if not self._operation_lock.acquire(timeout=30):
+            raise ReturnBridgeError("return_busy")
+        try:
+            guard()
+            old = self._enterprise_files.get(reference)
+            if old is not None:
+                old[1]()
+                if old[0] != file:
+                    raise ReturnBridgeError("return_slot_conflict")
+            else:
+                if len(self._enterprise_files) >= self._max_artifacts:
+                    raise ReturnBridgeError("return_slot_limit")
+                self._enterprise_files[reference] = file, guard
+            return file.projection()
+        finally:
+            self._operation_lock.release()
 
     def prepare_inbound(
         self, *, attachment_id, binding, stream, size_bytes, sha256, filename, check_active
@@ -264,6 +325,30 @@ class ReturnScope:
             raise ReturnBridgeError("return_busy")
         try:
             self.check_active()
+            remote = self._enterprise_files.get(file_ref) if isinstance(file_ref, str) else None
+            if remote is not None:
+                file, guard = remote
+                guard()
+                if kind != file.kind or filename not in {None, file.filename}:
+                    raise ReturnBridgeError("enterprise_return_conflict")
+                key = (file.reference, file.kind, file.filename)
+                item = self._publications.get(key)
+                if item is None:
+                    slot = len(self._publications)
+                    if slot >= self._max_artifacts:
+                        raise ReturnBridgeError("return_slot_limit")
+                    artifact_id = str(uuid5(NAMESPACE_URL, f"{SCHEMA}/{self._response_id}/{slot}"))
+                    item = Publication(
+                        slot,
+                        file,
+                        expected_receipt(
+                            file, artifact_id=artifact_id, response_id=self._response_id
+                        ),
+                        next_method="POST",
+                        check_source=guard,
+                    )
+                    self._publications[key] = item
+                return self._transport.publish(self, item)
             inbound = self._inbound_refs.get(file_ref) if isinstance(file_ref, str) else None
             guard = self.check_active if inbound is None else inbound.check_active
             guard()
@@ -351,6 +436,21 @@ def return_current_chat(file_ref: str, kind: str, filename: str | None = None) -
         return {"success": False, "error": "return_unavailable"}
 
 
+def trusted_enterprise_context():
+    """Internal trusted plugin bridge, intentionally absent from model schema."""
+    scope = _current.get()
+    if scope is None:
+        raise ReturnBridgeError("enterprise_context_unavailable")
+    return scope.enterprise_context()
+
+
+def prepare_enterprise_return(*, export, binding, check_active):
+    scope = _current.get()
+    if scope is None:
+        raise ReturnBridgeError("enterprise_context_unavailable")
+    return scope.prepare_enterprise(export=export, binding=binding, check_active=check_active)
+
+
 def _return_url(value, origin, dispatch_id):
     try:
         if not isinstance(value, str) or not isinstance(origin, str):
@@ -408,7 +508,7 @@ def _claims(authorization, session_id):
         for field, lower, upper in (
             ("dispatch_id", 1, 2**63 - 1),
             ("expires", int(time.time()) + 1, 2**63 - 1),
-            ("max_bytes", 1, 1_048_576),
+            ("max_bytes", 1, 128 * 1024 * 1024),
             ("max_artifacts", 1, 8),
         ):
             if type(claims[field]) is not int or not lower <= claims[field] <= upper:

@@ -41,7 +41,9 @@ def media_intake_runtime(settings, *, enabled=True):
             initialize_database(engine)
         worker = InboundMediaWorker(
             create_database_session_factory(engine),
-            InboundMediaHTTPClient(settings.wechat.base_url, token),
+            InboundMediaHTTPClient(
+                settings.wechat.base_url, token, max_bytes=settings.inbound_media.max_bytes
+            ),
             staging,
         )
 

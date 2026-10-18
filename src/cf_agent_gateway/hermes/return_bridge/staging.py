@@ -57,7 +57,9 @@ def inbound_bytes(stream, size_bytes, sha256, limit, check_active):
 def inbound_file(filename, content):
     filename = safe_filename(filename)
     kind = "image" if filename.lower().endswith(".png") else "file"
-    extension = ".png" if kind == "image" else ".pdf"
+    extension = (
+        ".png" if kind == "image" else ".zip" if filename.lower().endswith(".zip") else ".pdf"
+    )
     reference = f"inbound-{uuid4().hex}{extension}"
     return task_file_from_bytes(reference, filename, kind, content)
 

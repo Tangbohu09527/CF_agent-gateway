@@ -151,8 +151,15 @@ def _followup_binding(session, record, settings, session_id):
 
 def _snapshot(session, record, settings, *, session_id=None):
     message = session.get(Message, record.message_id, populate_existing=True)
-    if message is None or message.source != "wechat" or message.is_self:
+    if message is None or message.is_self:
         raise ReturnDenied()
+    if message.source != "wechat":
+        from cf_agent_gateway.controlled_test import validate_controlled_message
+
+        try:
+            validate_controlled_message(session, message, settings.controlled_test_bindings)
+        except ValueError:
+            raise ReturnDenied() from None
     authorized_dispatch_source(
         session,
         message_id=record.message_id,
@@ -204,6 +211,9 @@ def _snapshot(session, record, settings, *, session_id=None):
         "thread_policy": thread.thread_policy,
         "agent_profile_id": thread.agent_profile_id,
         "source": fingerprint,
+        "account_id": message.source_account_id,
+        "conversation_id": message.conversation_id,
+        "conversation_type": message.conversation_type,
         "profile": settings.profile_reference,
         "revision": settings.profile_revision,
         "expires": int(
