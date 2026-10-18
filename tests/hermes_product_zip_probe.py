@@ -43,6 +43,11 @@ PRODUCT, RETURN = "filebrowser_product_materials", "cf_return_current_chat"
 INGEST = "filebrowser_ingest_product_zip"
 
 
+def new_grant_key():
+    """Host binding stores a standard Base64 AES-256 key, not Base64url."""
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
 class Planner:
     def __init__(self, archive, case):
         self.archive = archive
@@ -644,7 +649,7 @@ def main():
             "CF_FILE_RETURN_SIGNING": keys["signing"],
             "CF_GATEWAY_API_TOKEN": keys["api"],
             "CF_PRODUCT_FIXTURE_TOKEN": token,
-            "CF_FILE_RETURN_GRANT": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
+            "CF_FILE_RETURN_GRANT": new_grant_key(),
         }
     )
     sys.path[:0] = [str(REPO / "src"), str(REPO / "tests")]

@@ -100,3 +100,13 @@ def test_ingest_stops_before_creating_case_on_windows(monkeypatch, tmp_path):
     with pytest.raises(AssertionError, match="POSIX"):
         probe.main()
     assert not target.exists()
+
+
+def test_grant_key_matches_strict_standard_base64_contract(monkeypatch):
+    import base64
+
+    raw = bytes([255]) * 32
+    monkeypatch.setattr(probe.secrets, "token_bytes", lambda size: raw if size == 32 else None)
+    encoded = probe.new_grant_key()
+    assert "/" in encoded and "_" not in encoded
+    assert base64.b64decode(encoded, validate=True) == raw
