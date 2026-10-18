@@ -25,7 +25,8 @@ Gateway 运行代码提交：`dd7446040fe0c1ef4968c5f387561e6041fd3cd0`；后续
 | Gateway 最终代码相关回归 | 216 通过、1 跳过 | Windows 创建符号链接权限不足的用例跳过；junction/8.3 场景已覆盖 |
 | Windows 普通 Admin + 官方427加载/API/middleware | 通过 | 真实 worker/解析器/工具 schema；Gateway HTTPS 是协议替身，不包含真实 Artifact DB/Delivery |
 | Linux 真实 Gateway + 官方427 + 两插件 | 通过 | 真实准入、取件、POSIX staging、Artifact DB、Response/Delivery；模型和微信端为本地替身 |
-| 生产 PDF/后续文字/PNG | 尚未执行 | 不将隔离结果记为真实微信实收 |
+| 生产 PDF | 业务失败 | Message4309 / Dispatch48；仅投递失败说明，没有正文读取或 Artifact |
+| 生产后续文字/PNG | 未执行 | PDF 未通过，未继续发送 |
 
 完整链路 CI：[run39097442654](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39097442654)，head `bc365c7`、实际 PR merge 源 `039f632`，固定 FileBridge `218847bd` 与官方 Hermes427，源码清洁。安全摘要 SHA256：`6e18fea26c9f50adcfce91a37c18d98fa8334914de322af925ddad33921f9f54`。
 
@@ -60,4 +61,19 @@ Gateway `7ac5f05` 的全部七个 CI 事件成功：主 Python 测试 2703 通�
 
 此前维护失败证据保留：首次官方drain后，过宽的停止检查拒绝无关CLI进程，生产目标未变并已恢复原服务；下一次候选因误复制旧隔离回执，在drain前安全停止。最终干净候选按白名单装配并检查所有固定输出不存在后成功。未强杀无关进程、删除失败证据或盲目重跑。
 
-以上为现场部署及加载通过，不代表 PDF/PNG 微信验收已通过。收发仍关闭，等待用户确认立即发送新PDF后才开有限窗口。
+以上为现场部署及返回插件注册通过。FileBridge 工具目录可见不证明其主机 middleware 已注册；本次真实 PDF 未通过，详见下节。
+## 真实 PDF 的失败与安全收口
+
+用户在原私聊发送新 PDF 后，正常产生 Message4309 / Dispatch48 / attachment3 / inbound_job3（local11）。本次原件文件名有 `(1)` 后缀；Gateway 已取到 79,083 字节，SHA256 `ed8bcf88549b664f456b83891b7435c4e3963323f411fc74a21b36ece441ef44` 与原样本一致。准入 allowed，沿已建立的执行会话正常 fork；未复用旧附件授权或重派历史任务。
+
+实际 Hermes SQLite 的精确会话、时间和工具调用关联记录表明：仅一次 `filebrowser_download_inbound(attachment_id=3)`，返回固定错误 `trusted_context_unavailable`、不可重试。`filebrowser_read_inbound` 与 `cf_return_current_chat` 均未调用。Dispatch48 的一次 HTTP 请求完成，只代表传输完成；Response `legacy-response:message:4309` 仅含失败说明文字，没有 Artifact。Delivery43/attempt43 有一次文字投递回执，用户截图确认收到同一失败说明；没有实际 PDF 回传。返回协议 ACK 仅能由固定 Dispatch 路径推断，未记录直接响应头证据。
+
+Guardian 于05:12:20 UTC关闭 Poll/Delivery，05:13:05及05:17:28再次核验关闭。无同私聊非终态 Dispatch、无 pending/claimed 媒体任务；历史42/43/46的 dead 状态及47的文字结果保留。checkpoint 自正常 Poll 前进到 local11/gen7，未人工修改。
+
+本次临时权限实际起止为2026-10-18 05:06:16至2026-10-19 05:06:16 UTC（北京时间10月18日13:06:16至10月19日13:06:16），但已于10月18日05:17:28前提前撤销。随后一次指定密钥检查返回 public-key denied，DPAPI 临时密码文件已删除。没有开启 PNG 或追加文字测试。
+
+## 后续只读诊断的证据边界
+
+普通 Admin 的固定 PID/启动时间探针已证明当前 host token 在进程中存在、格式合法且与 HOME `.env` 一致；仅保存布尔，不输出值。独立无网络、无 worker、无插件注册、无生产写入探针，使用官方427的 PluginContext 和配置读取逻辑，成功构造实际 HostConfig 与 ControlClient；worker/CA 路径和摘要、TLS 构造均通过。官方配置加载器的建目录和备份写操作仅在一次性探针中替换为只读检查，现场程序未修改。
+
+这些结果排除当前配置构造失败，不能证明实际服务启动时注册成功。现实现将未绑定 handler、middleware 的上下文/控制链异常汇合为同一错误；初始化注册异常还被静默吞掉。现有证据不足以选择其中某一根因。下一步核对 Dispatch48 的只读主机绑定持久记录，并补充固定枚举诊断与模型先调用 download 的隔离顺序回归；不得将缺少细分日志解释成新 ACL 故障。
