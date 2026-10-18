@@ -398,11 +398,55 @@ async def run(args, case, model, certs, keys, file_config):
                 }
             ],
         }
+
+        class ObservedHermesClient(HermesClient):
+            def _request(self, *positional, **kwargs):
+                response = super()._request(*positional, **kwargs)
+                try:
+                    value = response.json()
+                except ValueError:
+                    value = None
+                base.save(
+                    case / "response-shape.json",
+                    {
+                        "status": response.status_code,
+                        "operation": kwargs.get("operation"),
+                        "keys": sorted(value) if isinstance(value, dict) else [],
+                        "choices": [
+                            {
+                                "finish_reason": item.get("finish_reason"),
+                                "content_present": bool(item.get("message", {}).get("content")),
+                                "tool_call_count": len(
+                                    item.get("message", {}).get("tool_calls") or []
+                                ),
+                            }
+                            for item in value.get("choices", [])
+                        ]
+                        if isinstance(value, dict)
+                        else [],
+                        "model_actions": model.planner.actions,
+                    },
+                )
+                return response
+
+            def chat(self, *positional, **kwargs):
+                try:
+                    return super().chat(*positional, **kwargs)
+                except Exception as error:
+                    base.save(
+                        case / "client-failure.json",
+                        {
+                            "type": type(error).__name__,
+                            "operation": getattr(error, "operation", None),
+                        },
+                    )
+                    raise
+
         with (
             base.official_host(
                 args, case, model, origin, certs, keys, product_settings=product_settings
             ) as host,
-            HermesClient(
+            ObservedHermesClient(
                 host,
                 keys["hermes"],
                 model.config["default"],
@@ -611,6 +655,27 @@ def main():
             "ok": False,
             "class": type(error).__name__,
             "model_errors": model.errors,
+            "model_actions": model.planner.actions,
+            "diagnostics": {
+                name: json.loads((case / name).read_text())
+                for name in (
+                    "response-shape.json",
+                    "client-failure.json",
+                    "planner-failure.json",
+                    "tool-failure-codes.json",
+                )
+                if (case / name).exists()
+            },
+            "host_events": [
+                {
+                    k: v
+                    for k, v in json.loads(line).items()
+                    if k in {"kind", "stage", "reason", "status", "tool_name"}
+                }
+                for line in (case / "events.jsonl").read_text().splitlines()
+            ]
+            if (case / "events.jsonl").exists()
+            else [],
             "frames": [
                 {"file": Path(f.filename).name, "line": f.lineno}
                 for f in traceback.extract_tb(error.__traceback__)
