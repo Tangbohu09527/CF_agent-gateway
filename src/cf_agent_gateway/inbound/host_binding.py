@@ -23,6 +23,7 @@ from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispa
 from cf_agent_gateway.workspace.models import AIThread
 
 SCHEMA = "cf-inbound-host-binding/v1"
+RESOLVE_SCHEMA_V2 = "cf-inbound-host-binding/resolve/v2"
 
 
 class HostBindingError(RuntimeError):
@@ -257,9 +258,13 @@ def _owner(binding, *, task_id, host_instance_id, host_nonce, claim_epoch=None):
         raise HostBindingError()
 
 
-def resolve_binding(session, settings, *, session_id, task_id, host_instance_id, host_nonce):
+def resolve_binding(
+    session, settings, *, session_id, task_id, host_instance_id, host_nonce, resolve_schema=SCHEMA
+):
     from cf_agent_gateway.inbound.access import _authorized_manifest
 
+    if resolve_schema not in (SCHEMA, RESOLVE_SCHEMA_V2):
+        raise HostBindingError()
     binding = session.scalar(
         select(InboundHostBinding).where(InboundHostBinding.session_id == session_id)
     )
@@ -291,7 +296,7 @@ def resolve_binding(session, settings, *, session_id, task_id, host_instance_id,
     else:
         _owner(binding, task_id=task_id, host_instance_id=host_instance_id, host_nonce=host_nonce)
     result = {
-        "schema": SCHEMA,
+        "schema": resolve_schema,
         "binding_id": binding.id,
         "session_id": binding.session_id,
         "task_id": binding.task_id,
@@ -310,6 +315,11 @@ def resolve_binding(session, settings, *, session_id, task_id, host_instance_id,
         "attachments": [descriptor],
         "event_sequence": binding.sequence,
     }
+    if resolve_schema == RESOLVE_SCHEMA_V2:
+        # Use the same server clock sample that checked the original lease.
+        # Clients anchor this duration at request start, deducting transit and
+        # processing time. Neither repeated resolve nor v2 renews the lease.
+        result["server_now"] = now.isoformat()
     session.commit()
     return result
 

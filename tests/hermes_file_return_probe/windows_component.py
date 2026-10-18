@@ -18,6 +18,7 @@ import shutil
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 from uuid import NAMESPACE_URL, uuid5
@@ -71,6 +72,11 @@ async def run(args, evidence):
     fixture.make_adapter = False
     fixture.setUp()
     fixture.lease_seconds = 30
+    clock_offset = getattr(args, "server_clock_offset_seconds", 0.0)
+    if clock_offset:
+        assert getattr(args, "download_first_pdf", False)
+        assert callable(getattr(fixture, "server_now", None)), "versioned fixture clock absent"
+        fixture.server_clock_offset_seconds = clock_offset
     case = fixture.root
     for name in (
         "profile",
@@ -94,6 +100,7 @@ async def run(args, evidence):
     thread.start()
     keys = {"hermes": "synthetic-component-hermes-" + os.urandom(16).hex(), "host": SERVICE_SECRET}
     records, uploads, expected = {}, [], {}
+    resolve_clocks = []
     handler = fixture.server.RequestHandlerClass
     original_get = handler.do_GET
 
@@ -139,6 +146,14 @@ async def run(args, evidence):
     handler.do_PUT, handler.do_GET = put, get
 
     def transform(value):
+        if clock_offset:
+            assert value["schema"] == "cf-inbound-host-binding/resolve/v2"
+            duration = (
+                datetime.fromisoformat(value["lease_valid_until"])
+                - datetime.fromisoformat(value["server_now"])
+            ).total_seconds()
+            assert 0 < duration <= 30
+            resolve_clocks.append({"schema": value["schema"], "duration_seconds": duration})
         value["profile_reference"] = "default"
         value["attachments"][0]["filename"] = (
             "original.png" if fixture.mime == "image/png" else "original.pdf"
@@ -287,6 +302,13 @@ async def run(args, evidence):
             }
             assert len(uploads) == 1 and uploads[0]["case"] == "pdf"
             assert fixture.download_calls == 1, "repeat read must reuse the verified download"
+            if clock_offset:
+                assert resolve_clocks == [
+                    {
+                        "schema": "cf-inbound-host-binding/resolve/v2",
+                        "duration_seconds": 30.0,
+                    }
+                ], "clock exercise must not resolve again or refresh its original lease"
         report = {
             "ok": True,
             "chain": "windows-official-hermes-two-plugins-protocol-gateway",
@@ -307,6 +329,8 @@ async def run(args, evidence):
             "download_first_pdf": single_pdf,
             "model_download_verified": model.planner.download_verified,
             "model_business_tool_sequence": model.planner.download_first_steps,
+            "server_clock_offset_seconds": clock_offset,
+            "resolve_clock_observations": resolve_clocks,
         }
         probe.save(evidence / "safe-summary.json", report)
         return report
@@ -335,7 +359,16 @@ def main():
         action="store_true",
         help="Run only one PDF: actual download tool, read/prepare, return",
     )
+    parser.add_argument(
+        "--server-clock-offset-seconds",
+        type=float,
+        default=0.0,
+        choices=(-2.0, -0.8, 0.0, 0.8, 2.0),
+        help="Download-first only: offset the synthetic server absolute clock",
+    )
     args = parser.parse_args()
+    if args.server_clock_offset_seconds and not args.download_first_pdf:
+        parser.error("clock offset requires --download-first-pdf")
     assert os.name == "nt" and probe.ordinary_windows() is True
     for name in ("hermes_source", "hermes_python", "filebridge_source", "worker", "output"):
         setattr(args, name, getattr(args, name).absolute())

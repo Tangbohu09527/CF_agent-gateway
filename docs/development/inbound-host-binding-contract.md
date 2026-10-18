@@ -141,6 +141,24 @@ Dispatch/message/thread/identity, opaque `claim_epoch`, exact Profile,
 existing `cf-inbound-read/v1` descriptors. This response is private background
 handoff; **never append it to model history**.
 
+### Resolve-only v2 clock handshake
+
+The same resolve route additionally accepts schema
+`cf-inbound-host-binding/resolve/v2`. Its five request fields and all ownership
+checks are unchanged. A successful v2 response has the original 18 fields plus
+`server_now`, and echoes the v2 schema. Both `server_now` and the newly assigned
+lease use the same server time sample. A repeated resolve reports current server
+time while retaining the original lease; it cannot renew it. V1 responses keep
+exactly their original fields.
+
+The v2 client must require `0 < lease_valid_until - server_now <= 30` seconds and
+anchor that duration at local monotonic request **start**, not response arrival.
+The consumed request time is never added back. Reject malformed/unsupported
+responses without fallback or a new owner. Events and closed retain v1, including
+exact original server lease comparison; this change grants no additional scope
+and requires no schema migration. See the [read/return integration](inbound-read-return.md)
+for the native worker's conservative expiry and deployment order.
+
 `GET /internal/hermes/inbound-bindings/{binding_id}/events` requires the service
 Authorization plus these headers (none in query strings):
 

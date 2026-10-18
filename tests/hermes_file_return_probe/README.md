@@ -44,3 +44,9 @@ Windows component command. This runs only one new synthetic PDF session: the
 actual model-visible download schema and tool, then read with prepare_return,
 then the return tool. It requires a verified download receipt and exactly one
 native fetch. PNG and the negative-case matrix are not run by this option.
+
+With the versioned resolve-clock fixture, `--server-clock-offset-seconds` accepts
+`-2`, `-0.8`, `0.8` or `2` for this PDF-only case. The synthetic server's
+`server_now`, original lease and attachment expiry move together. Client and
+worker clocks and all monotonic timers remain unchanged. A successful run
+requires exactly one resolve and an original duration no longer than 30 seconds.
