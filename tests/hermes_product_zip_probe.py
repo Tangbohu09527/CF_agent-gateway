@@ -586,6 +586,10 @@ def main():
     original = load("product_original", REPO / "tests/hermes_return_probe/probe.py")
     original.verify_source(args.hermes_source, base.HERMES)
     case = args.output
+    if os.name == "posix":
+        # Fresh isolated copies must preserve the client credential contract.
+        # This does not chmod a source credential or any production path.
+        os.umask(0o077)
     case.mkdir(mode=0o700, parents=True)
     for folder in (
         "profile",
