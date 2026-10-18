@@ -14,6 +14,7 @@ import socket
 import subprocess
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 
@@ -24,6 +25,7 @@ from test_artifact_return_http import rig as rig  # Reuse real auth/claim/SQLite
 from test_hermes_tls import _test_certificates
 
 from cf_agent_gateway.artifact import ArtifactRepository
+from cf_agent_gateway.artifact.enterprise_exports import EnterpriseExportSettings
 from cf_agent_gateway.hermes.return_bridge.enablement import EnablementError
 from cf_agent_gateway.hermes.return_bridge.site_nginx import (
     ENTERPRISE_MAP_BEGIN,
@@ -40,6 +42,32 @@ from cf_agent_gateway.hermes.return_bridge.site_nginx import (
 from cf_agent_gateway.hermes.tls import verified_ssl_context
 
 FIXTURE = Path(__file__).parent / "fixtures/return_site/nginx-complete-synthetic.conf"
+
+
+@pytest.fixture
+def enterprise_rig(rig):
+    # Configure the real ASGI app through its normal immutable settings type.
+    # The metadata-guard request below never downloads from this synthetic origin.
+    rig.app.state.settings = replace(
+        rig.settings,
+        enterprise_exports=EnterpriseExportSettings(
+            enabled=True,
+            base_url="https://filebrowser.invalid",
+            source="synthetic-source",
+            root="/products",
+            allowed_bindings=(("wxid-gateway", "wxid-alice", "synthetic-identity"),),
+            max_bytes=rig.settings.artifact_return.max_bytes,
+        ),
+    )
+    return rig
+
+
+def test_enterprise_metadata_fixture_uses_valid_immutable_settings(enterprise_rig):
+    rig = enterprise_rig
+    assert not rig.settings.enterprise_exports.enabled
+    assert rig.app.state.settings.enterprise_exports.enabled
+    assert rig.client.post(path(rig) + "/enterprise-import", json={}).status_code == 422
+    assert artifact_count(rig) == 0
 
 
 def _source(tmp_path, text=None):
@@ -379,8 +407,9 @@ def nginx_executable():
 
 @pytest.mark.parametrize("enterprise_import", [False, True])
 def test_real_nonroot_nginx_https_to_gateway_returns(
-    nginx_executable, rig, tmp_path, enterprise_import
+    nginx_executable, enterprise_rig, tmp_path, enterprise_import
 ):
+    rig = enterprise_rig
     executable = nginx_executable
     ca, certificate, key = _test_certificates(tmp_path)
     port = _free_port()
@@ -404,7 +433,6 @@ def test_real_nonroot_nginx_https_to_gateway_returns(
             .changes[0]
             .after
         )
-        rig.settings.enterprise_exports.enabled = True
         command = [executable, "-p", str(tmp_path) + "/", "-c", str(candidate)]
         check = subprocess.run([*command, "-t"], capture_output=True, timeout=10)
         assert check.returncode == 0, check.stderr.decode(errors="replace")
