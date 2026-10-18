@@ -13,13 +13,21 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import urlsplit
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from cf_agent_gateway.hermes.return_bridge.files import ReturnBridgeError, read_task_file
+from cf_agent_gateway.hermes.return_bridge.files import ReturnBridgeError, TaskFile, read_task_file
+from cf_agent_gateway.hermes.return_bridge.staging import (
+    inbound_bytes,
+    inbound_file,
+    write_staged_file,
+)
 from cf_agent_gateway.hermes.return_bridge.transport import (
     Publication,
     UploadTransport,
@@ -28,6 +36,39 @@ from cf_agent_gateway.hermes.return_bridge.transport import (
 
 _current: ContextVar[ReturnScope | None] = ContextVar("cf_artifact_return_request", default=None)
 SCHEMA = "cf-artifact-return/v1"
+_BINDING_CLAIMS = {
+    "dispatch_id": "dispatch_id",
+    "message_id": "message_id",
+    "enterprise_identity_id": "identity_id",
+    "thread_id": "thread_id",
+    "profile_reference": "profile",
+    "profile_revision": "revision",
+    "session_id": "session_id",
+}
+
+
+def _canonical_uuid(value):
+    if type(value) is not str:
+        return False
+    try:
+        return str(UUID(value)) == value
+    except ValueError:
+        return False
+
+
+@dataclass(frozen=True, repr=False)
+class _Inbound:
+    file: TaskFile
+    check_active: Callable[[], None] = field(repr=False)
+
+    def projection(self):
+        return {
+            "file_ref": self.file.reference,
+            "kind": self.file.kind,
+            "filename": self.file.filename,
+            "size_bytes": len(self.file.content),
+            "sha256": hashlib.sha256(self.file.content).hexdigest(),
+        }
 
 
 class ReturnScope:
@@ -46,6 +87,7 @@ class ReturnScope:
         self._url = _return_url(return_url, gateway_origin, claims["dispatch_id"])
         self._authorization = authorization
         self._ack = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
+        self._binding = MappingProxyType({k: claims.get(v) for k, v in _BINDING_CLAIMS.items()})
         self._expires = claims["expires"]
         self._max_bytes = claims["max_bytes"]
         self._max_artifacts = claims["max_artifacts"]
@@ -61,6 +103,10 @@ class ReturnScope:
         self._network_lock = threading.Lock()
         self._publications: dict[tuple[str, str, str], Publication] = {}
         self._transport = UploadTransport(ca_file)
+        self._inbound: dict[int, _Inbound] = {}
+        self._inbound_refs: dict[str, _Inbound] = {}
+        self._inbound_objects: dict[tuple[int, int], _Inbound] = {}
+        self._staging_attempts: dict[int, _Inbound] = {}
 
     def __repr__(self):
         return "<ReturnScope active>" if not self._cancelled.is_set() else "<ReturnScope closed>"
@@ -94,6 +140,122 @@ class ReturnScope:
     def _slot_url(self, slot):
         return f"{self._url}/artifacts/{slot}"
 
+    def prepare_inbound(
+        self, *, attachment_id, binding, stream, size_bytes, sha256, filename, check_active
+    ):
+        """Match the trusted host binding; never accept identity from tool arguments."""
+        self.check_active()
+        if (
+            set(binding) != set(_BINDING_CLAIMS) | {"task_id", "turn_id"}
+            or any(
+                type(binding[key]) is not type(expected)
+                or binding[key] != expected
+                or expected is None
+                for key, expected in self._binding.items()
+            )
+            or any(
+                type(binding[key]) is not int or binding[key] < 1
+                for key in (
+                    "dispatch_id",
+                    "message_id",
+                    "profile_revision",
+                )
+            )
+            or any(
+                not isinstance(binding[key], str) or not binding[key]
+                for key in ("session_id", "task_id", "turn_id", "profile_reference")
+            )
+            or any(
+                not _canonical_uuid(binding[key]) for key in ("enterprise_identity_id", "thread_id")
+            )
+        ):
+            raise ReturnBridgeError("inbound_return_binding_mismatch")
+        if type(attachment_id) is not int or attachment_id < 1 or not callable(check_active):
+            raise ReturnBridgeError("inbound_return_metadata_invalid")
+
+        def source_active():
+            self.check_active()
+            try:
+                if check_active() is False:
+                    raise ValueError()
+            except Exception:
+                raise ReturnBridgeError("inbound_return_inactive") from None
+
+        source_active()
+        if not self._operation_lock.acquire(timeout=30.0):
+            raise ReturnBridgeError("return_busy")
+        try:
+            source_active()
+            existing = self._inbound.get(attachment_id)
+            previous_attempt = self._staging_attempts.get(attachment_id)
+            if previous_attempt is not None:
+                previous_attempt.check_active()
+                if existing is None:
+                    raise ReturnBridgeError("inbound_return_conflict")
+            if existing is not None:
+                # Never replace the original closure with a fresh lease.
+                existing.check_active()
+                if (size_bytes, sha256, filename) != (
+                    len(existing.file.content),
+                    hashlib.sha256(existing.file.content).hexdigest(),
+                    existing.file.filename,
+                ) or type(size_bytes) is not int:
+                    raise ReturnBridgeError("inbound_return_conflict")
+            content = inbound_bytes(stream, size_bytes, sha256, self._max_bytes, source_active)
+            if existing is not None:
+                existing.check_active()
+                if content != existing.file.content:
+                    raise ReturnBridgeError("inbound_return_conflict")
+                on_disk = read_task_file(
+                    self.work_root,
+                    existing.file.reference,
+                    existing.file.kind,
+                    existing.file.filename,
+                    max_bytes=self._max_bytes,
+                    check_active=existing.check_active,
+                    check_identity=lambda identity: self._check_inbound_identity(
+                        existing, identity
+                    ),
+                )
+                if on_disk != existing.file:
+                    raise ReturnBridgeError("inbound_return_conflict")
+                return existing.projection()
+            # Validate type/name before admitting an exclusive write. Failed
+            # write/readback consumes its attachment attempt, bounding remnants
+            # without ever deleting or overwriting an unknown file.
+            file = inbound_file(filename, content)
+            if attachment_id in self._staging_attempts:
+                raise ReturnBridgeError("inbound_return_conflict")
+            if len(self._staging_attempts) >= self._max_artifacts:
+                raise ReturnBridgeError("return_slot_limit")
+            staged = _Inbound(file, source_active)
+            self._staging_attempts[attachment_id] = staged
+            # Even a cancelled/partial exclusive write keeps its source guard.
+            # Discovering a failed leaf must never turn it into an unguarded
+            # ordinary generated-file return.
+            self._inbound_refs[file.reference] = staged
+
+            def created(identity):
+                if identity in self._inbound_objects:
+                    raise ReturnBridgeError("inbound_return_conflict")
+                self._inbound_objects[identity] = staged
+                source_active()
+
+            write_staged_file(self.work_root, file, source_active, created)
+            self._inbound[attachment_id] = staged
+            return staged.projection()
+        finally:
+            self._operation_lock.release()
+
+    def _check_inbound_identity(self, expected, identity):
+        # Check the opened object before any byte read. Windows case/8.3 names
+        # cannot lose a source guard or allocate another slot through an alias.
+        actual = self._inbound_objects.get(identity)
+        if actual is not None:
+            actual.check_active()
+        if actual is not expected:
+            raise ReturnBridgeError("inbound_return_conflict")
+
     def return_file(self, file_ref: str, kind: str, filename: str | None = None) -> dict:
         self.check_active()
         # All calls in one request share a finite slot/budget ledger. Different
@@ -102,10 +264,25 @@ class ReturnScope:
             raise ReturnBridgeError("return_busy")
         try:
             self.check_active()
+            inbound = self._inbound_refs.get(file_ref) if isinstance(file_ref, str) else None
+            guard = self.check_active if inbound is None else inbound.check_active
+            guard()
+            if inbound is not None:
+                filename = inbound.file.filename if filename is None else filename
+                if (kind, filename) != (inbound.file.kind, inbound.file.filename):
+                    raise ReturnBridgeError("inbound_return_conflict")
             file = read_task_file(
-                self.work_root, file_ref, kind, filename, max_bytes=self._max_bytes
+                self.work_root,
+                file_ref,
+                kind,
+                filename,
+                max_bytes=self._max_bytes,
+                check_active=guard,
+                check_identity=lambda identity: self._check_inbound_identity(inbound, identity),
             )
-            self.check_active()
+            guard()
+            if inbound is not None and file != inbound.file:
+                raise ReturnBridgeError("inbound_return_conflict")
             key = (file.reference, file.kind, file.filename)
             item = self._publications.get(key)
             if item is not None:
@@ -120,6 +297,7 @@ class ReturnScope:
                     slot,
                     file,
                     expected_receipt(file, artifact_id=artifact_id, response_id=self._response_id),
+                    check_source=guard,
                 )
                 self._publications[key] = item
             return self._transport.publish(self, item)

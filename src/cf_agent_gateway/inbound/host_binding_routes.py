@@ -34,7 +34,9 @@ NO_STORE = {"Cache-Control": "no-store"}
 
 class ResolveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    schema_version: Literal["cf-inbound-host-binding/v1"] = Field(alias="schema")
+    schema_version: Literal["cf-inbound-host-binding/v1", "cf-inbound-host-binding/resolve/v2"] = (
+        Field(alias="schema")
+    )
     session_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:-]+$")
     task_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:-]+$")
     host_instance_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
@@ -42,6 +44,7 @@ class ResolveRequest(BaseModel):
 
 
 class OwnerRequest(ResolveRequest):
+    schema_version: Literal["cf-inbound-host-binding/v1"] = Field(alias="schema")
     claim_epoch: str = Field(min_length=36, max_length=36)
 
 
@@ -81,7 +84,10 @@ def resolve(request: Request, body: ResolveRequest):
     with request.app.state.database_session_factory() as session:
         try:
             result = resolve_binding(
-                session, settings, **body.model_dump(exclude={"schema_version"})
+                session,
+                settings,
+                resolve_schema=body.schema_version,
+                **body.model_dump(exclude={"schema_version"}),
             )
         except (HostBindingError, MediaFetchError, ValueError, KeyError, TypeError):
             session.rollback()
