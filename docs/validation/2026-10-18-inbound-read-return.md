@@ -1,17 +1,19 @@
 # 入站工作副本读取与原件返回验证（2026-10-18）
 
-## 本轮真实验收结论（2026-10-18）
+## 最新真实验收结论（2026-10-18 08:29 UTC）
 
 | 项目 | 实际结果 | 任务与投递 |
 | --- | --- | --- |
 | PDF | 正文读取、合法返回引用、原件 Artifact、投递及用户可打开/收件摘要全部通过；收件名未原样保留 | Message4310 / Dispatch49 / attachment4 / Delivery44 |
 | 后续文字 | 沿原受管会话说明前次 PDF 记录，用户实收通过 | Message4311 / Dispatch50 / Delivery45 |
-| PNG | 原件47,740字节和摘要取件通过；未调用读取或返回工具，无Artifact，未完成图片或原文件回传 | Message4312 / Dispatch51 / attachment5 / Delivery46仅文字 |
+| 旧PNG51 | 原件取件通过；read/return未调用，无Artifact，保留未完成业务验收事实 | Message4312 / Dispatch51 / attachment5 / Delivery46仅文字 |
+| 新明确说明 | 同一会话承接，准确回复“请发送PNG”，实收通过 | Message4313 / Dispatch52 / Delivery47 |
+| 新PNG53 | 实际看图、合法返回引用、图片Artifact及微信图片实收通过；接收PNG像素完全一致，文件字节不同；file附件路由仍未实现 | Message4314 / Dispatch53 / attachment6 / Delivery48 |
 
-最终 Poll/Delivery 已关闭，无非终态Dispatch或媒体任务。本轮任务公钥及sudo授权已提前撤销，单次密钥登录确认认证拒绝；临时密码文件不存在。以下保留完整时间顺序与证据边界。运行应用仍为1a8ce964/镜像db2b0e85，Hermes427与FileBridge f3a63895组合未再修改。
+最终08:24 UTC Collect确认Poll/Delivery已关闭，无非终态Dispatch、Delivery或媒体任务。本轮任务公钥及sudo授权已提前撤销，08:24:31单次密钥登录确认认证拒绝；临时密码文件不存在。以下保留完整时间顺序与证据边界。运行应用仍为1a8ce964/镜像db2b0e85，Hermes427与FileBridge f3a63895组合未再修改。
 
 
-## 范围与已确认断点
+## 初期范围与断点（下文按时间保留，最新结果见文首）
 
 本轮保持生产 Gateway e742461、镜像 f2c50392138d0515866748ca3d933371131b544b4accd4eb7aba6ce3ee3a77ac、schema 20261016_01 和 Hermes 427d605 不变。Dispatch47 / Message4308 / attachment2 已完成一次请求，仅产生失败说明文字，没有 Artifact；不重派或复用旧授权。
 
@@ -331,3 +333,150 @@ PNG当前返回契约是image路由，不支持作为PNG文件附件回传；本
 最终撤权后本地只读复核：Hermes仍是原PID33164，8642 loopback与18642 LAN监听归该进程；两个FileBridge文件摘要与部署值一致。清理证明SHA256：`ace95b09888095a78bb43c0ddcda1c20e619da6a9c7efdb5d4c7df33cfc75481`。本次仅追加脱敏证据文档，未再次变更生产代码、配置、owner/DACL或历史任务。
 
 提交前远端核验：Gateway PR19文档头dff2378的25项检查全部SUCCESS（包含真实Gateway隔离链）；FileBridge PR4头8d12d21仍有Windows旧fixture下载HTTP410及既存backend lint失败，相关Hermes/Linux链与Windows427兼容通过。没有重跑旧测试矩阵。
+
+## 2026-10-18 明确 PNG 指令验收前的补证（08:04 UTC）
+
+本轮先补齐 Dispatch49 两项额外工具事实，再准备“明确说明→新 PNG”的真实验收。之前 PDF49 的正文读取、Artifact、Delivery44、可打开实收及79,083字节接收端摘要一致结论保留；文字50实收保留。PNG51仅下载完成，未调用read/return、无Artifact，不记为业务通过。没有重派这些任务、复用attachment5授权或修改checkpoint。
+
+### 额外工具与持久修改
+
+普通Admin通过SQLite只读事务，限定原PDF49会话摘要、时间区间和结果行，关联了两项非目标调用：
+
+| 工具 | 时间（UTC） | 实际结果 | 持久副作用证据 |
+| --- | --- | --- | --- |
+| `tool_describe` | 06:53:43.702183 | 仅请求并返回`filebrowser_read_inbound`的schema；无not_found或errors | 该schema查询handler不写技能/配置；此结论不等于全文件系统无变化 |
+| `skill_manage` | 06:54:12.467003 | 一项`patch`，`operations_applied=1`，顶层和单项success；无staged/pending字段 | 修改了Hermes HOME下`skills/productivity/ocr-and-documents/SKILL.md`，不是本次插件代码 |
+
+该patch用1,463字符替换33字符标题片段，净增加约1,430字符的入站附件操作指引：使用当前授权附件ID和工具schema、优先读取工具、显式PDF/PNG读回任务使用`prepare_return=true`及合法返回引用、不将入站句柄当路径或寻找隐藏工作副本、区分下载/返回受理/实际送达，并在不可重试授权错误时停止。其内容与本次文件操作有关，但持久修改通用技能并非当时PDF业务验收要求的必要动作，不能因技术内容相关就认定已有授权。
+
+当前唯一目标为9,192字节，SHA256 `0cb3f10e5fd7dfc02346227e6ca0f763c72a12231d7bf95bf56046222f3ba0a1`；mtime为06:54:12.432579Z，与成功结果相距约35ms。新增片段精确存在一次。旧33字符标题也仍存在于新片段内，不代表两次修改。工具回执、handler落盘分支、当前片段及时间共同证明持久技能修改；没有当时整文件修改前快照，不能声称已证明整份历史before/after diff或全部文件系统无其他变化。调用可能附带的技能ledger/usage记录另行区分源码行为与实际核验，不默认为无副作用。
+
+用户本轮明确要求发现实质性未授权修改时暂停相关现场操作。因此新PNG尚未开窗，原技能未被回退或再次修改；已集中询问是否保留现存说明并继续验收。该问题不授权模型以后修改技能或配置。
+
+两次只读目标检查先因跨Windows文件API的`ctime_ns`相差1,515,900ns而停止，失败证据保留。诊断确认仅该字段在path.stat与fstat之间不同；后续读器分别严格验证每种API前后全身份稳定，跨API继续比较dev/ino/size/mtime/mode/nlink/attributes，单独记录ctime差异。此为只读观察器适配，不是生产ACL、owner、插件或服务修改；未把该差异解释为现场文件再次改动。
+
+### 当前现场与认证事实
+
+本轮GUI遮蔽输入成功后，由已有Admin/DPAPI程序完成一次SSH密码认证和一次受控sudo密码提交。07:57:05.435113Z的只读审计确认：
+
+- Gateway仍运行应用`1a8ce964246c896d6d72dee8a037f962c58447a0`对应镜像`sha256:db2b0e850e7d087d0de367346ceeb472bb5b418aac7a89b2a1780cdfbfc5ae89`，schema仍为`20261016_01`；正式计划、受保护配置及实际挂载符合已保存证明。
+- Poll/Delivery停止，Gateway/dispatch-worker运行；在途Dispatch/Delivery队列为空，媒体ready=5、nonterminal=0、claimed=0。
+- 原账号/私聊精确过滤和受管会话tip51一致，checkpoint仍local18/gen7；42/43/46的dead及47–51历史结果保留。最新原用户入库消息仍4312，新PNG说明尚未入库。
+- 上轮任务公钥条数0，旧限定sudoers不存在，旧撤销记录符合。旧名义窗口尚未到期不代表授权仍有效。本轮没有安装/续期任务SSH或sudo授权，因此没有新的24小时起止时间可报告。
+- 此审计未轮询微信上游；数据库无在途不证明上游为空，旧机器人回复可能尚未被轮询。
+
+08:04:08.226647Z，Windows普通Admin只读核验确认原Hermes PID33164及启动身份/监听仍一致；13个已部署目标、142个解析依赖和配置摘要保持。现有服务TLS鉴权GET及API工具集、固定启动注册日志通过；没有在检查进程里初始化插件，没有调用模型、重启、安装或改权限。API工具集可用性不等于已记录下一次模型请求的完整schema。
+
+FileBrowser Web旧地址误用已由用户澄清，正确入口为`https://192.168.1.233:18443/`；本轮不把它登记为服务故障，也未改端口、TLS或FileBrowser服务。
+
+### 本地证据索引与共享边界
+
+以下是本轮私有目录`.task-artifacts/read-return-20261018/explicit-png-20261018/`内原始投影的摘要。本文公开必要脱敏执行事实；原始日志、认证材料及完整技能/会话正文未上传。外部读者可以读取本文，但不能据仅本机文件名推定已经访问原始证据。
+
+| 证据 | SHA256 | 范围 |
+| --- | --- | --- |
+| `pdf49-other-tools-evidence.json` | `a16ba1d35cb8ec67494b0204bbfa572028bf6dd70d43464a46b81b4a02b46a5f` | 两项额外工具名称、请求绑定和结构化结果 |
+| `pdf49-skill-patch-target-evidence-v3.json` | `7958d88de0f61a083a49a5b3097781d67766db00517aff4e65b6a4433ee8fc90` | patch成功、唯一目标摘要/mtime、新旧片段匹配；实际相对目录由另一次只读文件定位确认，投影的短路径白名单未含productivity前缀而输出null |
+| `skill-patch-observer-v1-stop.json` | `91b877ec9e2a4a92e6410ed76dd78b4d37f44f11dae9f3d03cf174f0d71ac5c9` | 首次观察器停止及退出1 |
+| `pdf49-skill-patch-target-evidence-v2.json` | `27d1ebb4a0a69c78a612b13da8d0f8d8733f87b5deafd32ea339f7cf28a02847` | 跨API ctime差异定位，退出1 |
+| `explicit-png-baseline-result-6758a38aa49d0a63.json` | `e545056906fedee573a13f369159698086a09badd52d23f91ee294c1ee8ea1f5` | 服务器只读基线，SSH/sudo成功，退出0；无生产写入 |
+| `windows-readonly/result.json` | `7a0de7256b778ea39fd9a9d82f0141ba73be37fa114dc1a66effb140cd5461aa` | 当前进程、库存、现有API/日志只读核验，退出0 |
+
+新短窗入口仅本地候选，未安装或开窗。基线入口21项、两阶段入口29项、Windows只读包装6项定向隔离检查通过，均不能替代PNG真实验收。未重跑历史完整隔离矩阵。Gateway文档头`4eae12ad2041d09e3aa2250ac1b56b13280a46e0`对应25项实际检查成功；这一CI结论不外推到后续尚未提交的文档或新功能。FileBridge PR4仍保留旧fixture HTTP410和既存backend lint失败边界，不声称全仓绿色。
+
+附件续办和文件名保留仍为PNG收口之后的独立开发事项，本节没有实现或部署这些功能。当前临时DPAPI凭据仅为正在进行的必要认证保留；最终清理结果必须由后续实测记录覆盖，不能由本节提前推定。
+## 2026-10-18 08:29 UTC：明确说明后的 PNG 真实验收收口
+
+本节覆盖前一节08:04的准备状态。真实模型和真实微信完成了新的说明52与PNG53；没有重新部署、重启、修改模型/配置/owner/DACL/schema，也未重派51或复用attachment5授权。原PDF49的正文/原件字节实收通过、文字50通过及PNG51仅下载的历史事实均保留。
+
+### 目标、实际输入和可证实的模型上下文
+
+Codex本轮目标是先明确下一张PNG的操作，再由用户发送一次新样本。微信实际说明全文为：
+
+> 接下来我会发送一张PNG测试图。这个要求只针对我接下来新发送的
+> 这一张图片，不针对前面的PDF或已经处理过的图片。
+>
+> 收到后，请实际读取图片内容，描述其中的文字、形状和相对位置，
+> 再使用当前可用的图片返回工具，把同一张图片发回这个聊天。
+> 不要修改图片内容，不要归档到企业文件系统，不处理其他文件。
+> 现在先回复‘请发送PNG’，等我发送后再执行。
+
+该非敏感验收文本UTF-8共486字节，SHA256为`1aae4d3bc4f9d4804cf91601d2163f23611827052343156ddca23ab033d88c3f`。数据库精确匹配说明Message4313；用户截图确认收到“请发送PNG”后才发送原样本。没有夹入状态询问、额外ACK或别的文件。
+
+Hermes只读持久化证据确认完整说明恰好存在一次，并先于当前attachment6消息进入本次受管会话。新附件包装仅有text/attachment_id，真实前缀与固定Gateway源码一致；current attachment记录为row469、08:15:28.135766Z。这证明持久化输入关系，不宣称持久化user行就是全部最终渲染prompt或外发HTTP请求。
+
+初版新观察器把前缀错误写成短句后直接换行，输出current_attachment_payload_count=0和instruction_precedes=false。实际Gateway在句号后还有完整操作/不可信数据提示，故匹配器不命中。原观察器和结果原样保留；固定同53会话的窄派生检查确认附件6唯一、在选定时间内、说明在先。该失败属于取证匹配器，不是会话丢失或生产代码故障。
+
+### 说明与图片的完整链
+
+| 阶段 | 新消息/任务 | 实际结果 |
+| --- | --- | --- |
+| 明确说明 | Message4313 / Dispatch52 / Delivery47，local20 | 原账号/原私聊/发送人精确绑定，准入allowed；一次Dispatch；legacy-response:message:4313单text分片精确为“请发送PNG”，一条投递回执，08:13:28.649284Z完成；用户截图实收 |
+| 新PNG | Message4314 / Dispatch53 / attachment6 / inbound_job6，local22 | 原绑定、准入allowed；一次取件和一次Dispatch；新的受管父会话fork与当前tip匹配，原会话历史保留 |
+| 取件/读取 | Dispatch53 | `filebrowser_read_inbound`一次，直接完成当前授权附件取件核验及图像读取；47,740字节、原件SHA匹配；没有独立download工具行，不代表没有取件 |
+| 返回准备 | 同次read | `prepare_return=true`，image/png，合法相对file_ref，47,740字节和原件摘要匹配；未正式归档 |
+| 返回受理 | `cf_return_current_chat`一次 | 使用本次准备的引用，返回Artifact `5202edad-83c5-5fea-b313-3e0d34f11f30`；工具当时的pending_delivery只证明Gateway受理 |
+| Response/Delivery | Delivery48 | Response `return:53:76fa33925e1a7f176635640c65cb15871bcb1358434d4394838d34f3700db52e:eaae8c20595bc0bad0f8395a723b74252fa0f68595e64336aeb0693415b8e96e`；text和artifact_ref两个分片；attempt49/50各一次成功、两条回执；08:16:10.341049Z完成 |
+| 微信实收 | 用户截图与指定另存图片 | 用户看到了准确描述和返回图片；本机只读核对另存的PNG，详见下表 |
+
+Dispatch53 claimed于08:15:27.988664Z，completed于08:16:05.276331Z。Artifact为ready、kind=image、mime=image/png、47,740字节、SHA256 `102c46ea4ba8225d9c6bde10226f4ea902590cfc3666891579d8feac449668a4`；原件存储摘要也经服务器核验。协议ACK通过由固定应用dispatch成功路径推得，未录下原始响应header，不将其写为抓包事实。投递回执有两条，但provider_message_id字段没有记录；用户实收为独立证据。
+
+53的完整实际工具顺序为`tool_describe`→`filebrowser_read_inbound`→`cf_return_current_chat`，各一条请求及结果。tool_describe只查询read与return两项schema，无错误；没有skill_manage调用。52工具库存为空。read明确报告native_image_attached，官方427的工具内容经当前模型适配后再持久化为JSON摘要加一个`[screenshot]`占位，且后面存在assistant行：这证明canonical工具消息实际含图像part，不只依赖模型自述。SQLite不保留该图片payload；未验证外发HTTP图像字节，亦不能排除后续provider重试时的降级路径。本次没有额外调用模型或重新执行工具来补证。
+
+用户收到的描述与独立样本基准一致：标题和PIC-6V9K4R，A左上3个红圆、B右上2个蓝方、C左下4个黄三角、D右下1个绿星；A→B向右、B→D向下、D→C向左。该基准未由Codex额外注入被测模型。真实读取证据、描述和用户图片实收共同构成本次正向业务通过。
+
+### 接收图片：像素相同，文件字节不同
+
+保存路径由用户自由选择，与业务正确性无关；本轮只读了用户指定文件和原测试样本。
+
+| 对象 | 格式/尺寸 | 字节 | SHA256 |
+| --- | --- | --- | --- |
+| 原样本、入站附件、工作副本及Gateway Artifact | PNG / 1400×1000 / RGB | 47,740 | `102c46ea4ba8225d9c6bde10226f4ea902590cfc3666891579d8feac449668a4` |
+| 微信返回图片另存结果 | PNG / 1400×1000 / RGB | 48,549 | `974dcea86dfa8cdc61faed309c55fb49f2fde3540672d49701df65d7c246bd6d` |
+
+两者解码RGBA像素摘要均为`1dd8769be922c4d3ca5de71af966f27b89351353bf52546317e50fd39b2f3591`，逐像素一致。接收文件新增pHYs块、IDAT由一块变为六块且压缩负载不同，故文件字节不一致。变化发生在Gateway已验证Artifact之后、用户另存完成之前或之时；没有进一步证据把具体层归因于协议、微信发送/接收端或另存实现。本次**图像识别和image路由实际实收通过；端到端原文件字节不变未通过；PNG作为file附件返回仍未实现**。不据显示正常宣称原文件回传通过。
+
+### PDF49持久副作用的补证与本轮边界
+
+用户明确批准保留既有OCR技能说明后，才继续本次验收；这不授权未来模型修改技能/配置。本轮52/53无skill_manage调用，结束时该技能SHA仍为`0cb3f10e5fd7dfc02346227e6ca0f763c72a12231d7bf95bf56046222f3ba0a1`。不能据此宣称全文件系统无其他变化。
+
+在08:04初始检查之后，又核实了PDF49实际留下的curator ledger条目和两份内容寻址备份：before为7,753字节/SHA `0de6b15b2cd7e427855a8cca9008a65abf73bbc4b61a198a2edf7dfe7d61c1f8`，after为9,192字节/上述0cb摘要，两个备份的实际字节摘要均读验一致。ledger对应agent patch、原会话摘要、单一目标，06:54:12.460710Z；usage记录last_patched为06:54:12.462484Z，当前patch_count/generation为2，缺少此前计数，不能归因本次增加2。prompt snapshot当前存在，mtime07:03:52.012938Z；handler源码支持缓存失效及可选生命周期hook，但该次snapshot删除与其他hook副作用未直接观察。之前“尚无before快照”的描述只代表当时未读取，现由这些实际备份证据补齐；未导出完整技能正文。
+
+### 限时授权、当前现场和安全收口
+
+本轮沿用原任务密钥及遮蔽输入/DPAPI流程，不生成新密钥、不新增认证平台。一次凭据输入用于本轮必要SSH/sudo。固定两阶段管理入口装于`/opt/cf-explicit-png-1a8ce964-20261018`，root所有的依赖、严格主机密钥、来源192.168.1.232、七条固定sudo命令和禁转发限制保留；任意root命令负验证通过。
+
+服务器实际授权起点是2026-10-18 08:10:47 UTC（北京时间16:10:47），安装成功08:10:51 UTC；固定截止2026-10-19 08:10:47 UTC（北京时间16:10:47）。期限从同次安装事务开始计时，成功后可用时长比24小时短4秒，没有延长或循环续期。key登录和限定preflight独立验证后，DPAPI密码即已删除。
+
+文字窗口于08:13:29自动提前关闭。PNG窗口原最迟截止08:17:56Z，实际收到最终投递结果后，Controller于08:16:10.892Z自动关闭Poll/Delivery；08:20:12Z人工Collect再次核验。最终Collect观察08:23:59Z与08:24:01Z：Gateway/dispatch-worker运行，Poll/Delivery停止，Dispatch计数dead5/success48、Delivery全部48条delivered，无非终态Dispatch/Delivery，媒体ready6、nonterminal0、claimed0。checkpoint自然推进至local22/gen7；历史42/43/46及47–51保留，不清理、不重派。
+
+原私聊最后实际轮询08:15:30Z看到22条、没有新待处理用户消息；停止之后没有再次读取上游，机器人本次输出可能还未作为self echo轮询。不能把数据库空在途说成当前上游绝对为空。第二份旧PDF早已入库，与本次等待无关。
+
+08:24阶段固定collect --revoke成功，确认只移除本任务公钥及sudoers、保留证据。08:24:31Z独立一次严格主机密钥、禁密码回退的探测返回认证拒绝/255，无主机密钥或超时错误；DPAPI及暂存文件不存在，原私钥保留。此后不再远程管理。08:25:49Z普通Admin复核Hermes仍为PID33164、同启动时间和8642/18642监听。沙盒进程视图此前查不到该PID；按审批改用Admin只读核验后确认仍在，未重启/杀进程。
+
+实际产品保持Gateway源码`1a8ce964246c896d6d72dee8a037f962c58447a0`、镜像`sha256:db2b0e850e7d087d0de367346ceeb472bb5b418aac7a89b2a1780cdfbfc5ae89`、schema20261016_01；Hermes `427d605d4985c2d49a795493ef6c5d66413057d1`、FileBridge `f3a63895e33958dda2bbc4f3413c5619bdfabdff`及已装返回插件保持。正式配置仍`/opt/cf-agent-gateway/config/production.yaml`，SHA `774762c1ecb9f7c2055f1b6f73e52500f940d35c1402f618e74897d1dfbe93c1`。没有生产业务目录归档/覆盖/删除，没有Gateway/Hermes/FileBrowser部署或权限变更。
+
+### 可共享执行摘录和证据索引
+
+以上表格和脱敏摘录可供外部读者直接核验报告含义；下列原始证据继续在本机私有目录保存，未上传。单凭摘要不能声称读过原日志。认证包、密钥、会话原文及环境凭据不在Git。
+
+| 私有证据 | SHA256 | 主要事实 |
+| --- | --- | --- |
+| `auth/rendered/continuation-auth24-result-80339dc57fb46101.json` | `dc7422e1275ea4cb73474fa6e728e607568509d0155ce2d5b8dbe639b4fa5eaa` | 实际安装、限定命令正/负验证、密码清理 |
+| `text-collect-20261018.log` | `66e6078c1f4c52822b59d1c4f78800cc3ab45cfe3e5e61bd1be4b15a283b0f97` | 4313/52/47及关闸 |
+| `png-collect-20261018.log` | `5946b386873fe6be92cbab906b9dacaf43add5ab44d17d2ee90f8018afacd86a` | 4314/53/6/48、Artifact和两条投递 |
+| `explicit-png-two-case-tool-evidence.json` | `8a105237ace1fec9c8b948c33fdb22898446e7f6dc8584889521dd201f01862f` | 完整实际工具库存、read图像part、prepare/ref、return |
+| `explicit-png-attachment-shape-evidence.json` | `448d70c97d79a18989f99845d677db1f55ed10d95bb4fc69f102bd3b5244a252` | 保留初版结果后的前缀匹配纠正、同一会话指令在先 |
+| `recipient-png-byte-proof.json` | `d3a0be4cf9ea11fdd4a7c4d9a6f856095fa8c8a135e1b1be41f2a379aa1d70c6` | 接收文件格式/尺寸/摘要差异 |
+| `recipient-png-pixel-proof.json` | `69dfe2b62491e505f5b5f526af3719c9958606eb7c3c6d638b5ac8e5db62fbd4` | 解码像素完全相同、PNG块变化 |
+| `pdf49-skill-sideeffects-evidence.json` | `a53abe31b321216b1cc85c1db2e39e9f7d206f682f59320cf9ba4f3df990b13d` | ledger/usage/快照的实际范围 |
+| `pdf49-skill-backup-digests.json` | `b3487f1eaeba557aae8681236b5cb5816dd6f3687a931b3e0877420fc2c27d0a` | before/after备份实际摘要 |
+| `final-collect-revoke-20261018.log` | `7fffd2cc4cff337ccc6f55f53a812e724f5e9ef8d4ecaed3292f2886b776a223` | 最终关闸、无在途及撤权 |
+| `final-cleanup-proof.json` | `127e66ffa3123488fab063479fe5946a63f52c692c49bf1e3e1363c1720545c4` | 撤权后认证拒绝、密码不存在、技能摘要不变 |
+| `final-windows-process-proof.json` | `332cc70204c0f7dfc0d5dcc2b9ae93bc6fcac597b8326b592356a3d6266b4b2b` | 当前Hermes进程和监听 |
+
+本轮新增观察器的6项合成投影测试及短窗/认证包装定向检查只验证取证边界，不当成真实模型验收；上面的52/53才是真实模型/微信结果。未重跑旧完整矩阵。Gateway旧文档头4eae12a的25项检查成功；本节提交的CI须按实际新SHA另查。FileBridge PR4旧fixture HTTP410和既存lint问题仍保留，不声称全仓绿色。
+
+### 后续独立候选，尚未部署
+
+PNG闭环收口后才开始A附件续办与B原名保留。A将新操作消息明确关联原附件，产生新的受限任务授权，不复活旧Dispatch/租约；无法唯一选择时澄清。B将内部临时目录与收件basename分离，核对协议及实际paste-file路径对中文的再次改名。两项各在独立分支/工作树实现并定向验证，保留PR19及原生产材料；当前没有切换这些候选。部署范围、迁移/回退边界及源码/运行二进制证明缺口将随各自候选报告，需集中批准后才实施。
