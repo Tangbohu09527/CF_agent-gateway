@@ -5,12 +5,17 @@ ARG SOURCE_COMMIT=unrecorded
 LABEL org.opencontainers.image.source="https://github.com/Tangbohu09527/CF_agent-gateway" \
     org.opencontainers.image.revision="${SOURCE_COMMIT}"
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV TZ=Asia/Shanghai \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     CF_AGENT_GATEWAY_ALEMBIC_CONFIG=/app/alembic.ini
 
 WORKDIR /app
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 gateway \
     && useradd --uid 10001 --gid gateway --no-create-home \
