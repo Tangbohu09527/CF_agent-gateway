@@ -30,6 +30,13 @@ class InboundMediaJob(Base):
             "AND claim_token IS NULL)",
             name="ck_inbound_media_ready",
         ),
+        CheckConstraint(
+            "(source_job_id IS NULL AND followup_action IS NULL) OR "
+            "(source_job_id IS NOT NULL AND source_job_id != id "
+            "AND followup_action IS NOT NULL AND "
+            "followup_action IN ('read', 'read-return'))",
+            name="ck_inbound_followup_scope",
+        ),
         Index("ix_inbound_media_due", "state", "next_attempt_at"),
     )
 
@@ -49,6 +56,10 @@ class InboundMediaJob(Base):
     last_error_code: Mapped[str | None] = mapped_column(String(128))
     manifest: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"))
+    source_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("inbound_media_jobs.id", ondelete="RESTRICT")
+    )
+    followup_action: Mapped[str | None] = mapped_column(String(16))
     read_token_hash: Mapped[str | None] = mapped_column(String(64))
     read_claim_token: Mapped[str | None] = mapped_column(String(255))
     read_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

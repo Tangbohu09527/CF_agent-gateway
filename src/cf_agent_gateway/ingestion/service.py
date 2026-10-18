@@ -285,6 +285,7 @@ class MessageAdmissionService:
                         self._session,
                         dispatch_record,
                         wait_seconds=self._inbound_media.wait_seconds,
+                        followup_enabled=self._inbound_media.followup_enabled,
                     )
                 self._admission_outcome_store.stage_completion(
                     claim_token=claim_token,

@@ -113,6 +113,7 @@ class Planner:
         self.images = []
         self.pdf_text_seen = False
         self.repeated_descriptors_equal = False
+        self.read_only_verified = False
         self.lease_entered = threading.Event()
         self.lease_release = threading.Event()
 
@@ -138,7 +139,9 @@ class Planner:
             return {"role": "assistant", "content": "Ready to read and return original bytes."}
         recent = messages[marker + 1 :]
         visible, available = schemas(body, recent)
-        wanted = [RETURN] if label == "replay" else [READ, RETURN]
+        wanted = (
+            [RETURN] if label == "replay" else [READ] if label == "reuse-read" else [READ, RETURN]
+        )
         if self.download_first:
             assert label == "pdf", "download-first probe is PDF-only"
             wanted.insert(0, DOWNLOAD)
@@ -195,6 +198,25 @@ class Planner:
         match = re.search(r'"attachment_id"\s*:\s*(\d+)', text)
         assert match, "real Gateway omitted attachment ID"
         attachment = int(match.group(1))
+        if label == "reuse-read":
+            reads = [
+                item
+                for item in records
+                if item.get("ok") is True
+                and item.get("verified") is True
+                and item.get("format") == "pdf"
+            ]
+            if reads:
+                assert not prepared and not receipts
+                assert all("return_preparation" not in item for item in reads)
+                assert TEXT in json.dumps(reads), "read-only result omitted original PDF text"
+                self.read_only_verified = True
+                return {
+                    "role": "assistant",
+                    "content": "Read existing PDF without a return capability.",
+                }
+            assert len(errors) <= 1, "read-only existing attachment failed"
+            return tool_call(READ, {"attachment_id": attachment, "prepare_return": False}, visible)
         if self.download_first:
             downloads = [
                 item
@@ -239,10 +261,11 @@ class Planner:
             assert descriptor["sha256"] == value["sha256"] and (
                 descriptor["size_bytes"] == value["bytes_written"]
             ), "prepared bytes differ from the verified download"
-        if attachment not in self.prepared:
-            self.prepared[attachment] = descriptor
+        operation = (label, attachment)
+        if operation not in self.prepared:
+            self.prepared[operation] = descriptor
             return tool_call(READ, {"attachment_id": attachment, "prepare_return": True}, visible)
-        assert self.prepared[attachment] == descriptor, (
+        assert self.prepared[operation] == descriptor, (
             "repeat changed the authorized working-copy descriptor"
         )
         self.repeated_descriptors_equal = True

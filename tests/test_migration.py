@@ -92,7 +92,7 @@ RUNTIME_RECOVERY_REVISION = "20260823_04"
 def _head_revision() -> str:
     migration_config = migration.create_migration_config()
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert head_revision == "20261016_01"
+    assert head_revision == "20261018_01"
     return head_revision
 
 

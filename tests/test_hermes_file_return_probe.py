@@ -370,3 +370,76 @@ def test_download_first_descriptor_must_match_downloaded_bytes():
     read = {"ok": True, "return_preparation": {"ok": True, **descriptor(), "sha256": "d" * 64}}
     with pytest.raises(AssertionError, match="prepared bytes differ"):
         model.Planner(download_first=True).decide(download_request(downloaded, read))
+
+
+def test_new_operation_same_attachment_gets_its_own_descriptor():
+    planner = model.Planner()
+    old = {"ok": True, "return_preparation": descriptor()}
+    planner.decide(request(old))
+    new = copy.deepcopy(old)
+    new["return_preparation"]["file_ref"] = "inbound-" + "d" * 32 + ".pdf"
+    assert called(planner.decide(request(new, label="reuse-pdf")))[0] == model.READ
+    assert called(planner.decide(request(new, new, label="reuse-pdf")))[0] == model.RETURN
+    assert planner.prepared[("pdf", 5)] != planner.prepared[("reuse-pdf", 5)]
+    broken = copy.deepcopy(new)
+    broken["return_preparation"]["file_ref"] = "inbound-" + "e" * 32 + ".pdf"
+    with pytest.raises(AssertionError, match="repeat changed"):
+        planner.decide(request(new, broken, label="reuse-pdf"))
+
+
+def test_read_only_existing_attachment_does_not_request_return_preparation():
+    planner = model.Planner()
+    assert called(planner.decide(request(label="reuse-read"))) == (
+        model.READ,
+        {"attachment_id": 5, "prepare_return": False},
+    )
+    result = {"ok": True, "verified": True, "format": "pdf", "text": model.TEXT}
+    assert "tool_calls" not in planner.decide(request(result, label="reuse-read"))
+    assert planner.read_only_verified and planner.prepared == {}
+    result["return_preparation"] = descriptor()
+    with pytest.raises(AssertionError):
+        planner.decide(request(result, label="reuse-read"))
+
+
+def test_read_only_requires_actual_successful_pdf_content():
+    planner = model.Planner()
+    with pytest.raises(AssertionError, match="original PDF text"):
+        planner.decide(
+            request(
+                {"ok": True, "verified": True, "format": "pdf", "text": "other"}, label="reuse-read"
+            )
+        )
+    assert not planner.read_only_verified
+
+
+def test_restart_receipts_are_exclusive_generation_names(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "file_return_restart_contract", MODULE.with_name("probe.py")
+    )
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    assert probe.host_record(tmp_path, "ready.json") == tmp_path / "ready.json"
+    assert probe.host_record(tmp_path, "ready.json", 1) == tmp_path / "ready-1.json"
+    assert probe.host_record(tmp_path, "host.stdout", 1) == tmp_path / "host-1.stdout"
+    assert probe.host_record(tmp_path, "host-ended.json", 1) == tmp_path / "host-ended-1.json"
+    with pytest.raises(AssertionError):
+        probe.host_record(tmp_path, "ready.json", 2)
+
+
+def test_gateway_outbound_pdf_preserves_protocol_qt_sample_basename():
+    import base64
+
+    spec = importlib.util.spec_from_file_location(
+        "file_return_filename_contract", MODULE.with_name("probe.py")
+    )
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    original = b"%PDF-synthetic-original"
+    sent = {"filename": "中文 空格 (1) %23 #.pdf", "data": base64.b64encode(original).decode()}
+    assert sent["filename"] == probe.PDF_FILENAME
+    probe.verify_received_pdf(sent, original)
+    for changed in ("send_file_123_" + sent["filename"], "__ (1) %23 #.pdf", "中文空格(1)%23#.pdf"):
+        with pytest.raises(AssertionError, match="filename changed"):
+            probe.verify_received_pdf({**sent, "filename": changed}, original)
+    with pytest.raises(AssertionError):
+        probe.verify_received_pdf(sent, b"changed bytes")

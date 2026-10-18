@@ -92,8 +92,8 @@ jobs:
           name: official-file-return-${{ github.sha }}
           path: |
             .pytest_cache/file-return/evidence/safe-summary.json
-            .pytest_cache/file-return/evidence/host-failure.json
-            .pytest_cache/file-return/evidence/host-ended.json
+            .pytest_cache/file-return/evidence/host-failure*.json
+            .pytest_cache/file-return/evidence/host-ended*.json
             .pytest_cache/file-return/evidence/source-proof.json
           if-no-files-found: error
           retention-days: 14

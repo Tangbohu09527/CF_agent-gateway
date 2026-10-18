@@ -9,12 +9,14 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select, update
 
+from cf_agent_gateway.adapters.wechat.inbound_media_http import MediaFetchError
 from cf_agent_gateway.agent_profile import AgentProfile
 from cf_agent_gateway.artifact.models import Artifact, ArtifactStatus
 from cf_agent_gateway.artifact.repository import ArtifactRepository
@@ -67,7 +69,87 @@ def lock_claim(session, dispatch_id, claim_token):
     return record
 
 
-def _snapshot(session, record, settings):
+def _followup_constraint(session, record):
+    # This is server-derived current authorization, never a model-selected ID.
+    from cf_agent_gateway.inbound.followup import return_constraint
+
+    try:
+        constraint = return_constraint(session, record)
+    except MediaFetchError:
+        raise ReturnDenied() from None
+    if constraint is None or constraint == {"action": "read"}:
+        return constraint
+    if (
+        not isinstance(constraint, dict)
+        or set(constraint) != {"action", "attachment_id", "size", "sha256", "kind", "mime_type"}
+        or constraint["action"] != "read-return"
+        or type(constraint["attachment_id"]) is not int
+        or constraint["attachment_id"] <= 0
+        or type(constraint["size"]) is not int
+        or constraint["size"] <= 0
+        or not isinstance(constraint["sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", constraint["sha256"])
+        or type(constraint["kind"]) is not str
+        or type(constraint["mime_type"]) is not str
+        or (constraint["kind"], constraint["mime_type"])
+        not in {("file", "application/pdf"), ("image", "image/png")}
+    ):
+        raise ReturnDenied()
+    return dict(constraint)
+
+
+def validate_artifact_constraint(constraint, *, slot, kind, mime_type, size, sha256):
+    """An original-file continuation can publish one byte-identical original only."""
+    if constraint is not None and (
+        constraint["action"] != "read-return"
+        or slot != 0
+        or (kind, mime_type, size, sha256)
+        != (constraint["kind"], constraint["mime_type"], constraint["size"], constraint["sha256"])
+    ):
+        raise ReturnDenied()
+
+
+def _followup_binding(session, record, settings, session_id):
+    from cf_agent_gateway.inbound.host_binding_models import InboundHostBinding
+    from cf_agent_gateway.inbound.models import InboundMediaJob
+
+    job = session.scalar(
+        select(InboundMediaJob)
+        .where(InboundMediaJob.dispatch_id == record.id)
+        .execution_options(populate_existing=True)
+    )
+    if job is None or job.source_job_id is None:
+        return None
+    bindings = list(
+        session.scalars(
+            select(InboundHostBinding)
+            .where(
+                InboundHostBinding.dispatch_id == record.id,
+                InboundHostBinding.claim_token_hash == _hash(record.claim_token),
+            )
+            .execution_options(populate_existing=True)
+            .limit(2)
+        )
+    )
+    if len(bindings) != 1:
+        raise ReturnDenied()
+    binding = bindings[0]
+    if (
+        binding.job_id != job.id
+        or binding.ai_thread_id != record.ai_thread_id
+        or binding.profile_reference != settings.profile_reference
+        or binding.profile_revision != settings.profile_revision
+        or not isinstance(binding.session_id, str)
+        or not binding.session_id
+        or (session_id is not None and binding.session_id != session_id)
+    ):
+        raise ReturnDenied()
+    # A closed/revoked host lease may legitimately precede result sealing. Bind
+    # immutable intent/session identity, not its changing lifecycle state.
+    return {"binding_id": binding.id, "session_sha256": _hash(binding.session_id)}
+
+
+def _snapshot(session, record, settings, *, session_id=None):
     message = session.get(Message, record.message_id, populate_existing=True)
     if message is None or message.source != "wechat" or message.is_self:
         raise ReturnDenied()
@@ -111,7 +193,7 @@ def _snapshot(session, record, settings):
         )
         if binding is None or binding.ai_thread_id != record.ai_thread_id:
             raise ReturnDenied()
-    return {
+    snapshot = {
         "dispatch_id": record.id,
         "claim": _hash(record.claim_token),
         "message_id": record.message_id,
@@ -130,6 +212,14 @@ def _snapshot(session, record, settings):
         "max_bytes": settings.max_bytes,
         "max_artifacts": settings.max_artifacts,
     }
+    constraint = _followup_constraint(session, record)
+    if constraint is not None:
+        snapshot["original_attachment_constraint"] = constraint
+        snapshot["max_artifacts"] = 1
+        binding = _followup_binding(session, record, settings, session_id)
+        if binding is not None:
+            snapshot["original_attachment_binding"] = binding
+    return snapshot
 
 
 def _prefix(record, claim_token):
@@ -148,8 +238,11 @@ def issue_context(session, record, settings, *, session_id):
     if not settings.enabled or not settings.host_contract_confirmed:
         raise ReturnDenied()
     record = lock_claim(session, record.id, record.claim_token)
-    snapshot = _snapshot(session, record, settings)
-    if snapshot["expires"] <= datetime.now(UTC).timestamp():
+    snapshot = _snapshot(session, record, settings, session_id=session_id)
+    if (
+        snapshot.get("original_attachment_constraint") == {"action": "read"}
+        or snapshot["expires"] <= datetime.now(UTC).timestamp()
+    ):
         raise ReturnDenied()
     payload = base64.urlsafe_b64encode(
         _json(
@@ -167,7 +260,7 @@ def issue_context(session, record, settings, *, session_id):
     }
 
 
-def authorize(session, settings, dispatch_id, authorization):
+def authorize_snapshot(session, settings, dispatch_id, authorization):
     """Verify the signed snapshot, then serialize upload with dispatch completion."""
     if not settings.enabled or not isinstance(authorization, str) or len(authorization) > 4096:
         raise ReturnDenied()
@@ -190,13 +283,21 @@ def authorize(session, settings, dispatch_id, authorization):
         if record is None or not record.claim_token or _hash(record.claim_token) != claims["claim"]:
             raise ReturnDenied()
         record = lock_claim(session, dispatch_id, record.claim_token)
-        snapshot = _snapshot(session, record, settings)
+        snapshot = _snapshot(session, record, settings, session_id=claims["session_id"])
         if claims != {"schema": SCHEMA, "session_id": claims["session_id"], **snapshot}:
             raise ReturnDenied()
-        if snapshot["expires"] <= datetime.now(UTC).timestamp():
+        if (
+            snapshot.get("original_attachment_constraint") == {"action": "read"}
+            or snapshot["expires"] <= datetime.now(UTC).timestamp()
+        ):
             raise ReturnDenied()
     except (ValueError, KeyError, TypeError, UnicodeError):
         raise ReturnDenied() from None
+    return record, snapshot
+
+
+def authorize(session, settings, dispatch_id, authorization):
+    record, snapshot = authorize_snapshot(session, settings, dispatch_id, authorization)
     return record, response_id_for(record, snapshot)
 
 
@@ -209,9 +310,22 @@ def seal_returns(session, record_id, claim_token, outcome, *, settings, storage_
     from cf_agent_gateway.hermes.errors import HermesResponseError
     from cf_agent_gateway.hermes.models import ArtifactRefPart, ResponseEnvelope
 
-    if not settings.enabled:
-        return outcome
     try:
+        if not settings.enabled:
+            record = session.get(HermesDispatchRecord, record_id, populate_existing=True)
+            constraint = _followup_constraint(session, record)
+            if constraint is not None:
+                record = lock_claim(session, record_id, claim_token)
+                candidate = session.scalar(
+                    select(Artifact)
+                    .where(Artifact.response_id.startswith(_prefix(record, claim_token)))
+                    .limit(1)
+                )
+                if candidate is not None or any(
+                    part.type == "artifact_ref" for part in outcome.parts
+                ):
+                    raise ReturnDenied()
+            return outcome
         record = lock_claim(session, record_id, claim_token)
         snapshot = _snapshot(session, record, settings)
         response_id = response_id_for(record, snapshot)
@@ -222,7 +336,10 @@ def seal_returns(session, record_id, claim_token, outcome, *, settings, storage_
                 )
             )
         )
-        expected_slots = [slot_id(response_id, slot) for slot in range(settings.max_artifacts)]
+        constraint = snapshot.get("original_attachment_constraint")
+        if constraint == {"action": "read"} and candidates:
+            raise ReturnDenied()
+        expected_slots = [slot_id(response_id, slot) for slot in range(snapshot["max_artifacts"])]
         if any(
             a.response_id != response_id
             or a.artifact_id not in expected_slots
@@ -230,6 +347,15 @@ def seal_returns(session, record_id, claim_token, outcome, *, settings, storage_
             for a in candidates
         ):
             raise ReturnDenied()
+        for artifact in candidates:
+            validate_artifact_constraint(
+                constraint,
+                slot=expected_slots.index(artifact.artifact_id),
+                kind=artifact.kind.value,
+                mime_type=artifact.mime_type,
+                size=artifact.size,
+                sha256=artifact.sha256,
+            )
         artifact_ids = [
             aid for aid in expected_slots if any(a.artifact_id == aid for a in candidates)
         ]
@@ -245,6 +371,8 @@ def seal_returns(session, record_id, claim_token, outcome, *, settings, storage_
         )
         for artifact_id in artifact_ids:
             repository.read(artifact_id)
+        if _snapshot(session, record, settings) != snapshot:
+            raise ReturnDenied()
         if supplied:
             # A valid existing envelope owns its text/media interleaving. Do not
             # reorder its segments when reusing the structured response contract.

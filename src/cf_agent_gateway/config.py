@@ -274,10 +274,15 @@ class InboundMediaSettings:
     staging_root: str = "/var/lib/cf-agent-gateway/inbound-media"
     public_base_url: str = ""
     wait_seconds: int = 900
+    followup_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("inbound_media.enabled must be boolean")
+        if type(self.followup_enabled) is not bool:
+            raise ValueError("inbound_media.followup_enabled must be boolean")
+        if self.followup_enabled and not self.enabled:
+            raise ValueError("inbound_media.followup_enabled requires inbound_media.enabled")
         if type(self.wait_seconds) is not int or not 1 <= self.wait_seconds <= 86400:
             raise ValueError("inbound_media.wait_seconds must be between 1 and 86400")
         # POSIX deployment paths remain valid in Windows configuration tooling.

@@ -18,7 +18,14 @@ from cf_agent_gateway.artifact.errors import (
 )
 from cf_agent_gateway.artifact.models import ArtifactStatus
 from cf_agent_gateway.artifact.repository import ArtifactRepository
-from cf_agent_gateway.artifact.return_handoff import ReturnDenied, authorize, slot_id
+from cf_agent_gateway.artifact.return_handoff import (
+    ReturnDenied,
+    authorize,
+    authorize_snapshot,
+    response_id_for,
+    slot_id,
+    validate_artifact_constraint,
+)
 
 router = APIRouter(prefix="/internal/hermes/returns", tags=["artifact-return"])
 NO_STORE = {"Cache-Control": "no-store"}
@@ -86,12 +93,16 @@ def _receipt(artifact):
 
 
 def _authorized_repository(request, session, dispatch_id, slot, settings):
-    _, response_id = authorize(
+    record, snapshot = authorize_snapshot(
         session,
         settings,
         dispatch_id,
         request.headers.get("authorization", ""),
     )
+    response_id = response_id_for(record, snapshot)
+    constraint = snapshot.get("original_attachment_constraint")
+    if constraint is not None and slot != 0:
+        raise ReturnDenied()
     if not 0 <= slot < settings.max_artifacts:
         raise _error(422, "invalid artifact slot")
     repository = ArtifactRepository(
@@ -99,7 +110,7 @@ def _authorized_repository(request, session, dispatch_id, slot, settings):
         request.app.state.settings.artifact.storage_root,
         max_artifact_bytes=settings.max_bytes,
     )
-    return repository, response_id, slot_id(response_id, slot)
+    return repository, response_id, slot_id(response_id, slot), constraint
 
 
 @router.put("/{dispatch_id}/artifacts/{slot}")
@@ -117,7 +128,7 @@ async def put_return_artifact(dispatch_id: int, slot: int, request: Request):
 def _put(request, settings, dispatch_id, slot, content):
     with request.app.state.database_session_factory() as session:
         try:
-            repository, response_id, artifact_id = _authorized_repository(
+            repository, response_id, artifact_id, constraint = _authorized_repository(
                 request,
                 session,
                 dispatch_id,
@@ -125,6 +136,9 @@ def _put(request, settings, dispatch_id, slot, content):
                 settings,
             )
             filename, kind, mime, size, digest = _metadata(request, content)
+            validate_artifact_constraint(
+                constraint, slot=slot, kind=kind, mime_type=mime, size=size, sha256=digest
+            )
             existing = repository.get(artifact_id)
             if existing is not None:
                 if (
@@ -183,7 +197,7 @@ def get_return_artifact(dispatch_id: int, slot: int, request: Request):
     settings = _settings(request)
     with request.app.state.database_session_factory() as session:
         try:
-            repository, _, artifact_id = _authorized_repository(
+            repository, _, artifact_id, constraint = _authorized_repository(
                 request,
                 session,
                 dispatch_id,
@@ -195,6 +209,14 @@ def get_return_artifact(dispatch_id: int, slot: int, request: Request):
                 raise _error(404)
             if artifact.status is not ArtifactStatus.READY:
                 raise _error(409, "artifact unavailable")
+            validate_artifact_constraint(
+                constraint,
+                slot=slot,
+                kind=artifact.kind.value,
+                mime_type=artifact.mime_type,
+                size=artifact.size,
+                sha256=artifact.sha256,
+            )
             repository.read(artifact_id)
             authorize(session, settings, dispatch_id, request.headers.get("authorization", ""))
             receipt = _receipt(artifact)

@@ -25,6 +25,8 @@ inbound_media:
   staging_root: /var/lib/cf-agent-gateway/inbound-media
   public_base_url: ""
   wait_seconds: 900
+  # Explicit /attachment continuation is private-chat only and separately opt-in.
+  followup_enabled: false
 
 runtime:
   polling_interval_seconds: 3
