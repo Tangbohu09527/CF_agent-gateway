@@ -85,6 +85,16 @@ def source_inventory(root, revision, relative, *, allow_dirty=False):
     }
 
 
+def isolated_host_environment(environment, home):
+    # Official427's positive isolation marker prevents ancestry discovery and
+    # strengthens SessionDB's live-database protection; never enable its bypass.
+    result = dict(environment)
+    result["HERMES_HOME"] = str(home)
+    result["HERMES_TEST_ISOLATION"] = "1"
+    result.pop("HERMES_STATE_DB_GUARD_BYPASS", None)
+    return result
+
+
 def ordinary_windows():
     if os.name != "nt":
         return None
@@ -164,7 +174,6 @@ def install_host_audit(case, sources, worker, support):
         "/etc/localtime",
         "/etc/ssl/certs/ca-certificates.crt",
         f"/proc/{os.getpid()}/stat",
-        f"/proc/{os.getppid()}/stat",
     }
     violations = []
     optional_metadata_denials = []
@@ -246,7 +255,7 @@ def install_host_audit(case, sources, worker, support):
                     "path": os.fsdecode(args[0]) if name in {"open", "sqlite3.connect"} else None,
                     "frames": [
                         {"file": Path(frame.filename).name, "line": frame.lineno}
-                        for frame in traceback.extract_stack(limit=8)
+                        for frame in traceback.extract_stack(limit=20)
                     ],
                 }
             )
@@ -458,8 +467,7 @@ def official_host(args, case, model, origin, certificates, keys):
         "checkpoints": {"enabled": False},
     }
     save(home / "config.yaml", config)
-    environment = original.isolated_environment(case)
-    environment["HERMES_HOME"] = str(home)
+    environment = isolated_host_environment(original.isolated_environment(case), home)
     # Native child gets only a new test service key via anonymous stdin. No model,
     # Gateway or production configuration is discovered from inherited HOME.
     payload = {

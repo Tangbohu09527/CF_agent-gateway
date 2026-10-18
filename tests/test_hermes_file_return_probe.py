@@ -277,10 +277,20 @@ def test_posix_spawn_rejects_modified_popen_ticket(guarded_events, change):
         guard("os.posix_spawn", ("fixed-parser", command, env))
 
 
-def test_proc_metadata_only_for_probe_and_direct_parent(guarded_events):
+def test_proc_metadata_does_not_walk_ancestor_processes(guarded_events):
     probe, guard, _ = guarded_events
-    guard("open", (f"/proc/{probe.os.getppid()}/stat", "r", 0))
+    with pytest.raises(PermissionError):
+        guard("open", (f"/proc/{probe.os.getppid()}/stat", "r", 0))
     with pytest.raises(PermissionError):
         guard("open", ("/proc/999999/environ", "r", 0))
     with pytest.raises(PermissionError):
         guard("open", ("/proc/999999/stat", "r", 0))
+
+
+def test_host_declares_official_isolation_and_never_db_guard_bypass(guarded_events, tmp_path):
+    probe, _, _ = guarded_events
+    before = {"HERMES_STATE_DB_GUARD_BYPASS": "1", "PATH": "synthetic"}
+    home = tmp_path / "profile"
+    result = probe.isolated_host_environment(before, home)
+    assert result == {"PATH": "synthetic", "HERMES_HOME": str(home), "HERMES_TEST_ISOLATION": "1"}
+    assert "HERMES_STATE_DB_GUARD_BYPASS" in before
