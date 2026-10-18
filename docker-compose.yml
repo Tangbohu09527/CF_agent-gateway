@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
+      TZ: Asia/Shanghai
       CF_GATEWAY_CONFIG: /app/config/config.yaml
     ports:
       - "8080:8080"

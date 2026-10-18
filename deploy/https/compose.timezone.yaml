@@ -1,0 +1,5 @@
+# Merge with the existing protected HTTPS Compose; no image/mount/TLS replacement.
+services:
+  https:
+    environment:
+      TZ: Asia/Shanghai
