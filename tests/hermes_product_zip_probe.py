@@ -400,18 +400,26 @@ async def run(args, case, model, certs, keys, file_config):
         }
 
         class ObservedHermesClient(HermesClient):
-            def _request(self, *positional, **kwargs):
-                response = super()._request(*positional, **kwargs)
+            async def _request_async(self, *positional, **kwargs):
+                response = await super()._request_async(*positional, **kwargs)
                 try:
                     value = response.json()
                 except ValueError:
                     value = None
                 base.save(
-                    case / "response-shape.json",
+                    case
+                    / (
+                        "response-shape-"
+                        + str(len(list(case.glob("response-shape-*.json"))))
+                        + ".json"
+                    ),
                     {
                         "status": response.status_code,
-                        "operation": kwargs.get("operation"),
+                        "endpoint": positional[1] if len(positional) > 1 else None,
                         "keys": sorted(value) if isinstance(value, dict) else [],
+                        "error_type": value.get("error", {}).get("type")
+                        if isinstance(value, dict) and isinstance(value.get("error"), dict)
+                        else None,
                         "choices": [
                             {
                                 "finish_reason": item.get("finish_reason"),
@@ -666,6 +674,9 @@ def main():
                 )
                 if (case / name).exists()
             },
+            "response_shapes": [
+                json.loads(p.read_text()) for p in sorted(case.glob("response-shape-*.json"))
+            ],
             "host_events": [
                 {
                     k: v
