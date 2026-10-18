@@ -40,6 +40,7 @@ def load(name, path):
 base = load("product_base_probe", REPO / "tests/hermes_file_return_probe/probe.py")
 peer = load("product_model_peer", REPO / "tests/hermes_file_return_probe/model.py")
 PRODUCT, RETURN = "filebrowser_product_materials", "cf_return_current_chat"
+INGEST = "filebrowser_ingest_product_zip"
 
 
 class Planner:
@@ -50,6 +51,7 @@ class Planner:
         self.actions = []
         self.image_seen = False
         self.manifest = None
+        self.attachment_id = None
 
     def decide(self, body):
         try:
@@ -75,10 +77,11 @@ class Planner:
             return {"role": "assistant", "content": "Isolated product ZIP task."}
         visible, schemas = peer.schemas(body, messages)
         assert not {"terminal", "execute_code", "skill_manage", "write_file"} & set(visible)
-        if not {PRODUCT, RETURN} <= schemas.keys():
+        required = [PRODUCT, RETURN, INGEST] if self.attachment_id else [PRODUCT, RETURN]
+        if not set(required) <= schemas.keys():
             assert "tool_describe" in visible
-            return peer.tool_call("tool_describe", {"names": [PRODUCT, RETURN]}, visible)
-        for name in (PRODUCT, RETURN):
+            return peer.tool_call("tool_describe", {"names": required}, visible)
+        for name in required:
             definition = schemas[name]
             assert definition["parameters"]["additionalProperties"] is False
             self.schemas[name] = hashlib.sha256(
@@ -147,6 +150,8 @@ class Planner:
         if inspections:
             result = inspections[-1]
             self.manifest = result["manifest"]
+            if self.attachment_id:
+                self.archive = result["path"]
             previews = [obj for obj in results if obj.get("vision") == "native_image_attached"]
             if not previews:
                 self.actions.append("preview")
@@ -189,6 +194,9 @@ class Planner:
                 },
                 visible,
             )
+        if self.attachment_id:
+            self.actions.append("ingest")
+            return peer.tool_call(INGEST, {"attachment_id": self.attachment_id}, visible)
         self.actions.append("inspect")
         return peer.tool_call(PRODUCT, {"action": "inspect", "path": self.archive}, visible)
 
@@ -201,6 +209,9 @@ async def run(args, case, model, certs, keys, file_config):
 
     from cf_agent_gateway.access import AccessPolicyService, RiskLevel
     from cf_agent_gateway.adapters.wechat import NormalizedWechatMessage
+    from cf_agent_gateway.adapters.wechat.inbound_media import parse_inbound_media
+    from cf_agent_gateway.adapters.wechat.inbound_media_http import BoundMediaResult
+    from cf_agent_gateway.adapters.wechat.inbound_media_staging import InboundMediaStaging
     from cf_agent_gateway.artifact import ArtifactRepository
     from cf_agent_gateway.artifact.enterprise_exports import EnterpriseExportSettings
     from cf_agent_gateway.artifact.models import Artifact
@@ -209,6 +220,7 @@ async def run(args, case, model, certs, keys, file_config):
         APISettings,
         ArtifactSettings,
         DatabaseSettings,
+        InboundMediaSettings,
         LoggingSettings,
         Settings,
         WorkerSettings,
@@ -218,6 +230,10 @@ async def run(args, case, model, certs, keys, file_config):
     from cf_agent_gateway.hermes import HermesClient
     from cf_agent_gateway.hermes.return_bridge.zip_contract import verify_zip
     from cf_agent_gateway.identity.service import IdentityService
+    from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
+    from cf_agent_gateway.inbound.host_binding_models import InboundHostBinding
+    from cf_agent_gateway.inbound.models import InboundMediaJob
+    from cf_agent_gateway.inbound.worker import InboundMediaWorker
     from cf_agent_gateway.ingestion import MessageAdmissionService
     from cf_agent_gateway.response.models import ResponseRecord
     from cf_agent_gateway.runtime.dispatch_worker import build_dispatch_worker
@@ -241,6 +257,27 @@ async def run(args, case, model, certs, keys, file_config):
         ),
         worker=WorkerSettings(enabled=True, concurrency=1, retry_limit=0, lease_seconds=600),
     )
+    if args.ingest:
+        settings = replace(
+            settings,
+            inbound_media=InboundMediaSettings(
+                enabled=True,
+                staging_root=str(case / "staging"),
+                public_base_url=origin,
+                max_bytes=128 * 1024 * 1024,
+            ),
+            host_binding=HostBindingSettings(
+                enabled=True,
+                dedicated_endpoint_confirmed=True,
+                host_id="isolated-product-host",
+                profile_reference="default",
+                service_token_env=base.SERVICE_ENV,
+                encryption_key_env="CF_FILE_RETURN_GRANT",
+                runtime_model=model.config["default"],
+                runtime_provider="custom",
+                runtime_fallback_disabled_confirmed=True,
+            ),
+        )
     app = create_app(settings)
     server = uvicorn.Server(
         uvicorn.Config(
@@ -271,7 +308,7 @@ async def run(args, case, model, certs, keys, file_config):
             access = AccessPolicyService(session)
             access.upsert_user_policy(enterprise_identity_id=identity.id, enabled=True)
             access.upsert_gateway_policy(enabled=True, allowed_risk_levels={RiskLevel.NORMAL})
-            item = MessageAdmissionService(session).process(
+            item = MessageAdmissionService(session, inbound_media=settings.inbound_media).process(
                 NormalizedWechatMessage.model_validate(
                     {
                         "source_account_id": base.ACCOUNT,
@@ -285,8 +322,8 @@ async def run(args, case, model, certs, keys, file_config):
                         "sender_id": base.CHAT,
                         "sender_type": "human",
                         "is_mentioned": None,
-                        "message_type": "text",
-                        "raw_type": 1,
+                        "message_type": "file" if args.ingest else "text",
+                        "raw_type": 49 if args.ingest else 1,
                         "content": (
                             "Isolated protocol substitute: inspect, preview, archive and return "
                             "the provided product ZIP. This is not an employee WeChat input."
@@ -298,6 +335,37 @@ async def run(args, case, model, certs, keys, file_config):
             )
             assert item.dispatch_record_id
             identity_id = identity.id
+        if args.ingest:
+
+            class MediaFetch:
+                def fetch(self, source):
+                    with args.input_zip.open("rb") as stream:
+                        raw = stream.read(128 * 1024 * 1024 + 1)
+                    assert len(raw) <= 128 * 1024 * 1024
+                    return BoundMediaResult(
+                        source.fingerprint,
+                        parse_inbound_media(
+                            {
+                                "type": "file",
+                                "filename": "完整商品 ZIP (1).zip",
+                                "data": base64.b64encode(raw).decode(),
+                            },
+                            max_bytes=128 * 1024 * 1024,
+                        ),
+                    )
+
+            intake = InboundMediaWorker(
+                factory, MediaFetch(), InboundMediaStaging(case / "staging")
+            )
+            assert await asyncio.to_thread(intake.run_once) == "ready"
+            with factory() as session:
+                job = session.scalar(
+                    select(InboundMediaJob).where(
+                        InboundMediaJob.dispatch_id == item.dispatch_record_id
+                    )
+                )
+                assert job is not None and job.state == "ready"
+                model.planner.attachment_id = job.attachment_id
         settings = replace(
             settings,
             enterprise_exports=EnterpriseExportSettings(
@@ -312,6 +380,7 @@ async def run(args, case, model, certs, keys, file_config):
         )
         app.state.settings = settings
         product_settings = {
+            "_probe_ingest": args.ingest,
             "product_enabled": True,
             "client_path": str(args.worker),
             "client_sha256": base.sha(args.worker.read_bytes()),
@@ -372,6 +441,28 @@ async def run(args, case, model, certs, keys, file_config):
                 )
             )
             dispatch = session.get(HermesDispatchRecord, item.dispatch_record_id)
+            inbound = None
+            if args.ingest:
+                job = session.scalar(
+                    select(InboundMediaJob).where(InboundMediaJob.dispatch_id == dispatch.id)
+                )
+                binding = session.scalar(
+                    select(InboundHostBinding).where(InboundHostBinding.dispatch_id == dispatch.id)
+                )
+                assert job.state == "ready" and job.attempt_count == 1
+                assert (
+                    binding is not None
+                    and binding.state == "revoked"
+                    and binding.reason == "completed"
+                    and binding.grant_ciphertext is None
+                )
+                inbound = {
+                    "attachment": job.attachment_id,
+                    "job": job.id,
+                    "attempts": job.attempt_count,
+                    "host_closed": True,
+                    "model_invoked_ingest": model.planner.actions[0] == "ingest",
+                }
             # The protocol's actual file envelope nests data/name under "file".
             sent = [request["file"] for request in receiver.requests if "file" in request]
             assert len(sent) == 1 and base64.b64decode(sent[0]["data"], validate=True) == raw
@@ -382,6 +473,7 @@ async def run(args, case, model, certs, keys, file_config):
                 "wechat": "isolated-protocol-substitute",
                 "actual_schema_sha256": model.planner.schemas,
                 "actions": model.planner.actions,
+                "inbound_zip": inbound,
                 "preview_in_model_http": model.planner.image_seen,
                 "message": item.message_id,
                 "dispatch": dispatch.id,
@@ -418,7 +510,19 @@ def main():
     parser.add_argument("--archive", required=True)
     parser.add_argument("--input-zip", type=Path, required=True)
     parser.add_argument("--reuse-upload-receipt", type=Path)
+    parser.add_argument("--ingest", action="store_true")
+    parser.add_argument("--inbound-worker", type=Path)
     args = parser.parse_args()
+    if args.ingest:
+        assert os.name == "posix", (
+            "real Gateway inbound staging requires POSIX; never bypass its ACL checks"
+        )
+        assert (
+            args.inbound_worker is not None
+            and args.inbound_worker.is_file()
+            and args.reuse_upload_receipt is None
+        )
+        args.inbound_worker = args.inbound_worker.resolve()
     for name in ("hermes_source", "filebridge_source", "worker", "output", "file_client_config"):
         setattr(args, name, getattr(args, name).resolve())
     args.hermes_python = args.hermes_python.absolute()
@@ -457,7 +561,16 @@ def main():
         "expected_bytes": args.input_zip.stat().st_size,
         "expected_sha256": digest,
     }
-    if args.reuse_upload_receipt:
+    if args.ingest:
+        base.save(
+            case / "input-ingest-pending.json",
+            {
+                "sha256": digest,
+                "size_bytes": args.input_zip.stat().st_size,
+                "source": "isolated-protocol-substitute",
+            },
+        )
+    elif args.reuse_upload_receipt:
         previous = json.loads(args.reuse_upload_receipt.read_text())
         assert previous["ok"] and previous["result"]["sha256"] == digest
         assert previous["result"]["path"] == args.archive
@@ -479,6 +592,7 @@ def main():
             "CF_FILE_RETURN_SIGNING": keys["signing"],
             "CF_GATEWAY_API_TOKEN": keys["api"],
             "CF_PRODUCT_FIXTURE_TOKEN": token,
+            "CF_FILE_RETURN_GRANT": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
         }
     )
     sys.path[:0] = [str(REPO / "src"), str(REPO / "tests")]

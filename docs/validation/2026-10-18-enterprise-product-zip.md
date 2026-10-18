@@ -51,3 +51,12 @@ Private evidence under the independent Gateway worktree `.task-artifacts/officia
 This document shares the sanitized execution facts. Raw local logs and fixture databases are **not remotely shared evidence**; readers cannot infer they have inspected them from a local path or hash alone. The parent report must add exact commit/PR/CI, built images, runtime installation proof, real-model operation evidence and any production snapshot. No candidate code here proves those later steps happened.
 
 Related contract and minimal deployment boundary: [enterprise product ZIP integration](../development/enterprise-product-zip.md). Previously accepted PDF, text and PNG results, including PNG re-encoding and the retained Skill edit, remain in [the original read/return report](2026-10-18-inbound-read-return.md); this candidate does not replace those facts.
+
+
+## Follow-up candidate and remaining ingress proof
+
+The narrow read-only FileBrowser account resolves downloads relative to its account scope. Product commit `663a7680f13d5996b05b94188350ea1d539a33cd` adds an explicit `download_scope_prefix`, restricted to the exact authorized export root. Authorization and the producer descriptor keep their full path; only the fixed reader API request is translated. The targeted enterprise tests pass 22 cases, including unchanged bytes and rejected sibling prefixes. No token permission was widened.
+
+`hermes_product_zip_probe.py --ingest --inbound-worker …` now selects the normal Gateway ZIP admission, media worker and POSIX staging before the official HostAdapter consumer and native FileBridge download/upload. The native inbound worker and enterprise client are separate fixed binaries. The dedicated Linux CI starts the real FileBrowser TLS/auth/audit/product handlers and uses a deterministic 18 MiB, 12-image ZIP, model and WeChat substitutes. The new mode is **not yet recorded as passed here**. Windows explicitly rejects this mode before creating a case; its POSIX staging contract is not bypassed.
+
+The previously completed full real-material enterprise chain remains the independent `official-product-08` evidence above. That run started with native upload, and does not establish incoming ZIP HostAdapter coverage. The FileBridge follow-up also corrects the missing ZIP MIME in the host-control contract; the initial `80fb038` candidate alone must not be described as complete inbound ZIP support.

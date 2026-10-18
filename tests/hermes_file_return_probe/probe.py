@@ -162,7 +162,7 @@ def event(kind, payload):
         output.write(encoded + "\n")
 
 
-def install_host_audit(case, sources, worker, support, *, product_config=None):
+def install_host_audit(case, sources, worker, support, *, product_config=None, inbound_worker=None):
     """Narrow test I/O guard, with byte-host normalization used by httpcore.
 
     The subprocess allowance is the existing FileBridge worker/parser contract.
@@ -170,6 +170,7 @@ def install_host_audit(case, sources, worker, support, *, product_config=None):
     """
     import errno
 
+    inbound_worker = inbound_worker or worker
     roots = (case, *sources, Path(sys.prefix), Path(sys.base_prefix))
     metadata = {
         "/proc/1/cgroup",
@@ -212,7 +213,8 @@ def install_host_audit(case, sources, worker, support, *, product_config=None):
                 path, (case,) if write else roots, allow_extended=not write
             )
             if not write and (
-                os.fsdecode(path) in metadata or Path(path).resolve() == worker.resolve()
+                os.fsdecode(path) in metadata
+                or Path(path).resolve() in {worker.resolve(), inbound_worker.resolve()}
             ):
                 denied = False
             if (
@@ -241,8 +243,12 @@ def install_host_audit(case, sources, worker, support, *, product_config=None):
         elif name == "subprocess.Popen":
             executable, command, cwd, env = args
             spawn_ticket.value = None
-            expected = subprocess.list2cmdline([str(worker)]) if os.name == "nt" else [str(worker)]
-            native = command == expected and executable in (None, str(worker))
+            expected = (
+                subprocess.list2cmdline([str(inbound_worker)])
+                if os.name == "nt"
+                else [str(inbound_worker)]
+            )
+            native = command == expected and executable in (None, str(inbound_worker))
             if product_config is not None:
                 for verb in (
                     "list",
@@ -343,6 +349,7 @@ async def host():
         Path(_HOST_PAYLOAD["worker"]),
         support,
         product_config=Path(product["product_config_path"]) if product else None,
+        inbound_worker=Path(_HOST_PAYLOAD.get("inbound_worker", _HOST_PAYLOAD["worker"])),
     )
     from agent.secret_scope import reset_secret_scope, set_secret_scope
     from gateway.config import PlatformConfig
@@ -361,7 +368,7 @@ async def host():
         for callback in manager._middleware.get("tool_execution", [])
     ]
     assert sum(type(owner).__name__ == "HostAdapter" for owner in host_adapters) == (
-        0 if product else 1
+        1 if not product or product.get("_probe_ingest") else 0
     ), "FileBridge host wiring absent"
     adapter = APIServerAdapter(
         PlatformConfig(
@@ -528,7 +535,16 @@ def official_host(
         "checkpoints": {"enabled": False},
     }
     if product_settings is not None:
-        config["plugins"]["entries"]["cf-filebridge"]["settings"] = product_settings
+        product_config = {k: v for k, v in product_settings.items() if k != "_probe_ingest"}
+        if product_settings.get("_probe_ingest"):
+            inherited = config["plugins"]["entries"]["cf-filebridge"]["settings"]
+            inherited["inbound_content_enabled"] = False
+            inherited["inbound_host"]["consumer_tools"] = ["filebrowser_ingest_product_zip"]
+            inherited["inbound_host"]["max_bytes"] = 128 * 1024 * 1024
+            inherited["inbound_host"]["client_path"] = str(args.inbound_worker)
+            inherited["inbound_host"]["client_sha256"] = sha(args.inbound_worker.read_bytes())
+            product_config = {**inherited, **product_config}
+        config["plugins"]["entries"]["cf-filebridge"]["settings"] = product_config
         config["platform_toolsets"]["api_server"] = [
             "cf_artifact_return",
             "cf_filebridge_products",
@@ -546,6 +562,7 @@ def official_host(
         "hermes": str(args.hermes_source),
         "filebridge": str(args.filebridge_source),
         "worker": str(args.worker),
+        "inbound_worker": str(getattr(args, "inbound_worker", None) or args.worker),
         "service_key": keys["hermes"],
         "host_key": keys["host"],
         "origin": f"https://localhost:{port}",
