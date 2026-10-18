@@ -134,6 +134,8 @@ def run_wechat_poll_once(
                 checkpoint_store,
                 sink,
                 bootstrap_mode=settings.wechat.bootstrap_mode,
+                poll_source_account_id=settings.wechat.poll_source_account_id,
+                poll_conversation_id=settings.wechat.poll_conversation_id,
             )
         else:
             polling_service = WechatPollingService(
@@ -141,6 +143,8 @@ def run_wechat_poll_once(
                 checkpoint_store,
                 sink,
                 bootstrap_mode=settings.wechat.bootstrap_mode,
+                poll_source_account_id=settings.wechat.poll_source_account_id,
+                poll_conversation_id=settings.wechat.poll_conversation_id,
                 lifecycle_state=lifecycle_state,
             )
         polling_failed = False

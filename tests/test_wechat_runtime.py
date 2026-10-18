@@ -288,12 +288,16 @@ def test_runtime_assembly_and_cleanup_order(
             sink: object,
             *,
             bootstrap_mode: str,
+            poll_source_account_id: str | None,
+            poll_conversation_id: str | None,
             lifecycle_state: WechatPollingLifecycleState,
         ) -> None:
             assert runtime_client is client
             assert checkpoint_store is checkpoint_store_marker
             assert sink is sink_marker
             assert bootstrap_mode == "backfill"
+            assert poll_source_account_id is None
+            assert poll_conversation_id is None
             assert lifecycle_state is lifecycle_state_marker
             events.append("polling_service")
 

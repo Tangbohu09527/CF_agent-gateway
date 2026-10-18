@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import TIMEOUT_MAX
 from typing import Any, Literal
@@ -119,6 +119,8 @@ class WechatSettings:
     base_url: str = "http://127.0.0.1:6174"
     bootstrap_mode: Literal["latest", "backfill"] = "latest"
     token_env: str = "CF_AGENT_WECHAT_TOKEN"
+    poll_source_account_id: str | None = field(default=None, repr=False)
+    poll_conversation_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -156,6 +158,19 @@ class WechatSettings:
         token_env = self.token_env.strip()
         if "=" in token_env or "\x00" in token_env:
             raise ValueError("wechat.token_env must name an environment variable")
+
+        scope = (self.poll_source_account_id, self.poll_conversation_id)
+        if any(value is not None for value in scope) and any(
+            not isinstance(value, str)
+            or not value
+            or len(value) > 255
+            or any(
+                character.isspace() or ord(character) < 32 or ord(character) == 127
+                for character in value
+            )
+            for value in scope
+        ):
+            raise ValueError("wechat poll scope requires an exact account and conversation pair")
 
         object.__setattr__(self, "base_url", base_url)
         object.__setattr__(self, "token_env", token_env)
@@ -399,6 +414,8 @@ def load_settings(path: str | Path) -> Settings:
             base_url=wechat.get("base_url", "http://127.0.0.1:6174"),
             bootstrap_mode=wechat.get("bootstrap_mode", "latest"),
             token_env=wechat.get("token_env", "CF_AGENT_WECHAT_TOKEN"),
+            poll_source_account_id=wechat.get("poll_source_account_id"),
+            poll_conversation_id=wechat.get("poll_conversation_id"),
         ),
         hermes=HermesSettings(
             enabled=hermes.get("enabled", False),
