@@ -54,11 +54,17 @@ class Planner:
         if missing:
             return self.peer.tool_call("tool_describe", {"names": missing}, visible)
         results = json.dumps([m for m in messages if m.get("role") == "tool"])
+        records = [
+            o
+            for m in messages
+            if m.get("role") == "tool"
+            for o in self.peer.objects(m.get("content"))
+        ]
         if TEXT not in results:
             return self.peer.tool_call(required[0], {}, visible)
-        if self.file_service and "employee_query" not in results:
+        if self.file_service and not any(o.get("employee_query") == "complete" for o in records):
             return self.peer.tool_call(required[2], {}, visible)
-        if self.file_service and "employee_export" not in results:
+        if self.file_service and not any(o.get("employee_export") == "complete" for o in records):
             return self.peer.tool_call(required[3], {}, visible)
         if "trusted_task_context_missing" not in results:
             return self.peer.tool_call(required[1], {"query": "synthetic product"}, visible)
