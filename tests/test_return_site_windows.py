@@ -73,6 +73,11 @@ def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(site, "executor", lambda _: str(home / "tools/python.exe"))
     monkeypatch.setattr(site, "toolset_snapshot", lambda *_: tools)
     monkeypatch.setattr(site, "process_snapshot", lambda _: runtime)
+    user = {"sid": "S-1-5-21-123-456-789-1001", "elevated": False}
+    monkeypatch.setattr(site.work_security, "current_user", lambda: dict(user))
+    monkeypatch.setattr(site.work_security, "process_user", lambda _: dict(user))
+    monkeypatch.setattr(site.work_security, "check", lambda *args, **kwargs: None)
+    monkeypatch.setattr(site.work_security, "prepare", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         site, "listener_environment_snapshot", lambda: {"Process": {}, "User": {}, "Machine": {}}
     )
