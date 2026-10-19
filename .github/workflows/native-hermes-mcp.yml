@@ -3,9 +3,9 @@ name: Isolated native Hermes MCP boundary
 on:
   push:
     branches: [codex/feat-native-hermes-remote-tools]
-    paths: [tests/native_mcp_probe.py, tests/native_mcp_file_service.py, .github/workflows/native-hermes-mcp.yml]
+    paths: [tests/native_mcp_probe.py, tests/native_mcp_file_service.py, tests/native_mcp_dependencies.py, tests/native_mcp_official_install.sh, .github/workflows/native-hermes-mcp.yml]
   pull_request:
-    paths: [tests/native_mcp_probe.py, tests/native_mcp_file_service.py, .github/workflows/native-hermes-mcp.yml]
+    paths: [tests/native_mcp_probe.py, tests/native_mcp_file_service.py, tests/native_mcp_dependencies.py, tests/native_mcp_official_install.sh, .github/workflows/native-hermes-mcp.yml]
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   native-boundary:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,7 +26,7 @@ jobs:
         with:
           repository: NousResearch/hermes-agent
           ref: 427d605d4985c2d49a795493ef6c5d66413057d1
-          path: .pytest_cache/native/hermes
+          path: .pytest_cache/native/official-home/hermes-agent
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -44,15 +44,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14.7"
-      - name: Isolated official runtime dependencies
-        run: |
-          python -m venv .pytest_cache/native/venv
-          .pytest_cache/native/venv/bin/python -m pip install -r tests/hermes_return_probe/requirements.txt 'mcp==2.0.0' 'Pillow>=11,<13'
+      - name: Official installer dependency stage, locked full default environment
+        run: bash tests/native_mcp_official_install.sh .pytest_cache/native/official-home/hermes-agent .pytest_cache/native/dependency-summary.json
       - name: Official clean API, remote content, employee export and missing task binding
         run: |
-          .pytest_cache/native/venv/bin/python -I -B tests/native_mcp_probe.py \
-            --hermes-source .pytest_cache/native/hermes \
-            --hermes-python .pytest_cache/native/venv/bin/python \
+          "$NATIVE_OFFICIAL_PYTHON" -I -B tests/native_mcp_probe.py \
+            --hermes-source .pytest_cache/native/official-home/hermes-agent \
+            --hermes-python "$NATIVE_OFFICIAL_PYTHON" \
+            --dependency-summary .pytest_cache/native/dependency-summary.json \
             --filebridge-source .pytest_cache/native/filebridge \
             --output .pytest_cache/native/evidence --api
       - name: Preserve sanitized evidence
@@ -60,6 +59,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: native-mcp-boundary-${{ github.sha }}
-          path: .pytest_cache/native/evidence/safe-summary.json
+          path: |
+            .pytest_cache/native/evidence/safe-summary.json
+            .pytest_cache/native/dependency-summary.json
           if-no-files-found: error
           retention-days: 14

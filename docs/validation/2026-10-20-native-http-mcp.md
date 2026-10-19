@@ -35,8 +35,32 @@ python -I -B tests/native_mcp_probe.py \
 ```
 
 Linux 检查入口为 `.github/workflows/native-hermes-mcp.yml`。
-它只保存 `safe-summary.json`；合成业务 ZIP、临时用户 Token、完整配置和普通进程日志
+修正后的环境调用固定官方 `scripts/install.sh --stage python-deps`，内部由官方 PM
+按 `uv.lock` 安装默认完整 `[all]`，包含官方 MCP extra；不再用自选 pip 子集代替。
+`--skip-browser --skip-computer-use` 是官方允许的可选工具二进制退出开关，不删减 Python `[all]`。
+运行解释器来自 PM 锁定的 Python `3.14.7+20260901`；依赖审计逐项核对 core 和 `[all]`
+递归 extras 的版本约束、官方源码干净状态及三份锁定输入哈希。该检查仅执行官方安装器的
+依赖阶段，不等同于完整安装器所有阶段或新电脑安装验收。
+
+工作流只保存 `safe-summary.json` 和不含凭据的 `dependency-summary.json`；合成业务 ZIP、临时用户 Token、完整配置和普通进程日志
 均不上传为证据附件。生产开关未改变。
+
+## 旧子集环境的适用范围
+
+原检查 `39302151607` / `39302780142` 的官方源码未修改，但其运行环境是
+Python 3.14.7 下 `tests/hermes_return_probe/requirements.txt` 加
+`mcp==2.0.0`、`Pillow>=11,<13` 的自建 pip 子集，没有运行官方安装器或完整锁定依赖。
+该 requirements 文件注释对应旧 `0f4a98f` API/Agent 子集，并非 `427d605` 的安装清单。
+
+最终旧检查的实际安装记录中，MCP `2.0.0` 与 Pillow `12.3.0` 符合固定官方 pin；
+但 `PyJWT 2.15.1`、`httpx2 2.14.0`、`starlette 1.9.0` 分别偏离官方的
+`2.13.0`、`2.7.0`、`1.3.1`。同时缺少多项官方 core 包。
+因此不能说旧探针满足完整官方依赖或证明正式官方安装通过；它只证明所记录子集环境中的
+真实源码加载、处理器执行与链路边界。新正式依赖环境的准确 CI 结果须另列。
+
+固定官方 `pyproject.toml:10–15` 明确只支持 Python 3.14 运行时；
+`requires-python >=3.11,<3.15` 是旧安装升级兼容桥。下面 Windows Python 3.12 的结果
+只保留为非标准运行时诊断，不作为官方支持基线验收。
 
 ## 已直接证明的边界
 

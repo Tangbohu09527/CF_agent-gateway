@@ -99,6 +99,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--api", action="store_true")
     parser.add_argument("--filebridge-source", type=Path)
+    parser.add_argument("--dependency-summary", type=Path)
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.hermes_source = args.hermes_source.resolve()
@@ -107,6 +108,12 @@ def main():
         ["git", "-C", str(args.hermes_source), "rev-parse", "HEAD"], text=True
     ).strip()
     assert head == COMMIT
+    dependencies = None
+    if args.dependency_summary:
+        dependencies = json.loads(args.dependency_summary.read_bytes())
+        assert dependencies["hermes_commit"] == head
+        assert dependencies["all_requirements_satisfied"]
+        assert dependencies["official_default_extras"] == ["all"]
     args.output.mkdir(parents=True, exist_ok=False)
     for name in ("home", "user", "tmp", "empty-bundled"):
         (args.output / name).mkdir()
@@ -356,6 +363,7 @@ def main():
     result.update(
         {
             "hermes_commit": head,
+            "runtime_dependencies": dependencies,
             "model": "HTTP substitute",
             "wechat": "not reached",
             "wire": wire,
