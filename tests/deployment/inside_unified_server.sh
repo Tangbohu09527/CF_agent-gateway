@@ -44,7 +44,7 @@ cat > /root/suite-inputs/inputs.json <<EOF
  "gateway":{"version":1,"hermes_url":"https://unconfigured-ai.test:8642","hermes_model":"isolated-not-called","database":{"mode":"managed"}},
  "filebrowser":{"image":null,"mode":"staging"},
  "https":{"bind_address":"$ADDRESS","gateway_port":18444,"filebrowser_port":18443,
- "allowed_cidrs":["172.16.0.0/12","127.0.0.0/8"],"server_name":"suite.test",
+ "allowed_cidrs":["172.16.0.0/12"],"server_name":"suite.test",
  "certificate_file":"/root/suite-inputs/server.crt","private_key_file":"/root/suite-inputs/server.key","ca_file":"/root/suite-inputs/ca.crt"}}
 EOF
 printf '%s suite.test\n' "$ADDRESS" >> /etc/hosts

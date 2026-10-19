@@ -284,7 +284,30 @@ def acceptance():
     }
     PRIVATE.write_text(json.dumps(private))
     result = json.loads(RESULT.read_bytes())
+    public_receipts = {}
+    for name, target in {
+        "filebrowser": STATE / "filebrowser-image.json",
+        "https": STATE / "https-image.json",
+        "gateway": Path("/var/lib/cf-agent-gateway-install/gateway-image.json"),
+        "python": Path("/var/lib/cf-agent-gateway-install/python-image.json"),
+        "postgres": Path("/var/lib/cf-agent-gateway-install/postgres-image.json"),
+    }.items():
+        # These fixed receipts contain only source hashes and image references,
+        # never environment files or credential records.
+        data = json.loads(target.read_bytes())
+        allowed = {
+            "source_sha",
+            "reference",
+            "image_id",
+            "requested_reference",
+            "digest_reference",
+            "gateway_commit",
+            "base_digest",
+        }
+        check(set(data) <= allowed, "unexpected-private-image-receipt-field")
+        public_receipts[name] = data
     result.update(
+        image_receipts=public_receipts,
         status="acceptance-passed-awaiting-repeat",
         bytes=len(payload),
         members=12,

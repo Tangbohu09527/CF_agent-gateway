@@ -6,7 +6,8 @@
 数据库资产仍由本仓库管理。已有安装升级请走 [production runbook](production.md)，
 不要用本安装器切换版本或重置凭据。
 
-当前 Hermes 安装来源、版本及包装层尚未核实，详见 [Hermes LAN 教程与缺少的输入](hermes-lan.md)。
+当前正式安装仍含项目桥接插件/EXE；本轮独立官方原生接入与缺口见[统一入口说明](unified-server.md)。
+历史通用配置入口见[Hermes LAN 教程](hermes-lan.md)，不能用旧未知段落否定后续固定证据。
 Gateway 的准备和下述 A 层隔离回归可以独立完成；真实 AI 主机安装和业务验收不能据此写成已完成。
 本页是后续新设备操作入口，不是已经现场部署的记录。
 

@@ -95,6 +95,7 @@ def validate_inputs(raw):
         or address.is_loopback
         or address.is_unspecified
         or address.is_multicast
+        or address.is_link_local
     ):
         raise SuiteError("HTTPS needs a specific non-loopback IPv4 bind address")
     ports = [tls["gateway_port"], tls["filebrowser_port"]]
@@ -105,12 +106,27 @@ def validate_inputs(raw):
         raise SuiteError("HTTPS needs two distinct non-privileged ports")
     if not isinstance(tls["allowed_cidrs"], list) or not tls["allowed_cidrs"]:
         raise SuiteError("explicit HTTPS client networks required")
+    if len(tls["allowed_cidrs"]) != len(set(tls["allowed_cidrs"])):
+        raise SuiteError("HTTPS client networks must be unique")
     for value in tls["allowed_cidrs"]:
         network = ipaddress.ip_network(value, strict=True)
-        if network.version != 4 or network.prefixlen == 0:
-            raise SuiteError("HTTPS client networks must be narrower than /0")
-    if not isinstance(tls["server_name"], str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", tls["server_name"]
+        if (
+            network.version != 4
+            or network.prefixlen == 0
+            or str(network) != value
+            or network.network_address.is_unspecified
+            or network.is_loopback
+            or network.is_multicast
+            or network.is_link_local
+        ):
+            raise SuiteError("HTTPS requires canonical unicast source networks narrower than /0")
+    if (
+        not isinstance(tls["server_name"], str)
+        or len(tls["server_name"]) > 253
+        or not all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in tls["server_name"].split(".")
+        )
     ):
         raise SuiteError("invalid TLS server name")
     for name in ("certificate_file", "private_key_file", "ca_file"):
