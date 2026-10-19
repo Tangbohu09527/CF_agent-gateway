@@ -441,10 +441,15 @@ def main():
     )
     action = sys.argv[1]
     if action == "resume-precondition":
+        check(
+            Path("/root/cgroup-resource-smoke").read_text().strip() == "passed",
+            "nested-cgroup-resource-controls-not-proved",
+        )
         value = {
             "scope": "pristine-Debian13-container-independent-Docker-daemon",
             "systemd": "four-read-only-observation-substitute",
             "storage": "independent tmpfs test-disk; not persistent host disk/RAID",
+            "cgroup": "private namespace; cpu/memory/pids resource-limited smoke passed",
             "status": "first-failure-observed",
         }
         if (STATE / "journal.json").exists():

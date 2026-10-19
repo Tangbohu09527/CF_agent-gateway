@@ -28,10 +28,12 @@ openssl x509 -req -in "$FIXTURES/server.csr" -CA "$FIXTURES/ca.crt" -CAkey "$FIX
   -CAcreateserial -days 2 -extfile "$FIXTURES/extensions" -out "$FIXTURES/server.crt" >/dev/null 2>&1
 docker pull --platform linux/amd64 debian:13-slim
 docker image inspect --format '{{json .RepoDigests}}' debian:13-slim > "$EVIDENCE/debian-image.json"
-docker run --name "$NAME" --privileged --platform linux/amd64 \
+DEBIAN_IMAGE="$(docker image inspect --format '{{index .RepoDigests 0}}' debian:13-slim)"
+docker run --name "$NAME" --privileged --cgroupns=private --platform linux/amd64 \
   --mount "type=bind,source=$SOURCE,target=/acceptance,readonly" \
   --mount "type=bind,source=$FIXTURES,target=/fixture-inputs,readonly" \
   --mount "type=bind,source=$EVIDENCE,target=/evidence" \
   --env GITHUB_ACTIONS=true --env "GATEWAY_COMMIT=$GATEWAY_COMMIT" \
+  --env "DEBIAN_IMAGE=$DEBIAN_IMAGE" \
   --env "EVIDENCE_UID=$(id -u)" --env "EVIDENCE_GID=$(id -g)" \
-  debian:13-slim bash /acceptance/tests/deployment/inside_unified_server.sh
+  "$DEBIAN_IMAGE" bash /acceptance/tests/deployment/inside_unified_server.sh

@@ -87,6 +87,18 @@ is claimed for this attempt. The next test revision adds only fixed-project,
 read-only container-state and bounded daemon diagnostics, redacting all generated
 test secrets; no production implementation is changed to guess at the cause.
 
+The diagnostic run
+[39309184393](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39309184393)
+at `e75705eeeda7291ba4d158da3131442088ea019f` captured the actual OCI failure:
+the nested daemon's cgroup v2 `/docker` parent was in threaded mode, preventing
+the unchanged FileBrowser CPU/memory/pids limits from being applied. The next
+test-only revision enables delegation inside an explicit private cgroup namespace
+before starting the daemon, following the cgroup portion of
+[fixed official Moby DinD preparation](https://github.com/moby/moby/blob/4eee42c0243b1494b5df6411c1c208f7408461d8/hack/dind).
+Retries are bounded and a resource-limited smoke container must succeed before
+the application build. The test neither shares the host Docker socket/cgroup
+namespace nor removes any product resource, authentication or TLS constraint.
+
 The test uses a pristine Debian13 container, independent real dockerd (no host
 socket), real services and strict HTTPS, approximately 18 MB/12 synthetic members,
 ordinary scoped business credentials, an injected failure/resume, service

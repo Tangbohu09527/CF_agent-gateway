@@ -26,6 +26,25 @@ for asset in /opt/cf-agent-gateway /opt/cf-agent-wechat /opt/cf-filebrowser-ente
   /var/lib/cf-suite-install /var/lib/docker /srv/storage/cf-filebrowser-enterprise; do
   [ ! -e "$asset" ] || exit 2
 done
+# Enable cgroup-v2 delegation inside this container's private namespace, as in
+# Moby's DinD preparation. Root processes must move to a child before domain
+# controllers can be enabled. Bound the retry; never drop product resource limits.
+[ -f /sys/fs/cgroup/cgroup.controllers ] || exit 2
+for controller in cpu memory pids; do
+  grep -qw "$controller" /sys/fs/cgroup/cgroup.controllers || exit 2
+done
+mkdir -p /sys/fs/cgroup/init
+CGROUP_READY=false
+for attempt in $(seq 1 5); do
+  xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs || true
+  if sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers \
+      > /sys/fs/cgroup/cgroup.subtree_control; then
+    CGROUP_READY=true
+    break
+  fi
+  sleep 0.1
+done
+[ "$CGROUP_READY" = true ] || exit 2
 mkdir -p /root/suite-inputs /srv/storage /usr/local/bin
 # A real separate filesystem: records are explicitly test-disk, never RAID proof.
 mount -t tmpfs -o size=768m,mode=0755,nodev,nosuid tmpfs /srv/storage
@@ -62,6 +81,16 @@ done
 dockerd --host unix:///var/run/docker.sock --storage-driver vfs --exec-root /run/unified-docker \
   --data-root /var/lib/docker > /root/dockerd.private.log 2>&1 &
 DAEMON_PID=$!
+for attempt in $(seq 1 60); do
+  if docker info >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+docker info >/dev/null
+# Prove the nested daemon can apply the controls required by the unchanged
+# FileBrowser Compose before spending time on a source build.
+docker run --rm --pull always --network none --memory 64m --cpus 0.25 \
+  --pids-limit 32 "$DEBIAN_IMAGE" true > /root/cgroup-smoke.private.log 2>&1
+printf 'passed\n' > /root/cgroup-resource-smoke
 # Deliberately occupy only the selected disposable FileBrowser port. The real
 # validator must fail, preserve state, and resume after this fault is removed.
 python3 -c 'import socket,time; s=socket.socket(); s.bind(("0.0.0.0",18443)); s.listen(); time.sleep(7200)' &
