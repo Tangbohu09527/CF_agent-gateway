@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: native-mcp-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   native-boundary:
     runs-on: ubuntu-latest

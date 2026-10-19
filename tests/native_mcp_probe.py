@@ -53,6 +53,7 @@ class Planner:
         missing = [name for name in required if name not in schemas]
         if missing:
             return self.peer.tool_call("tool_describe", {"names": missing}, visible)
+        assert set(schemas[required[1]]["parameters"]["properties"]) == {"query"}
         results = json.dumps([m for m in messages if m.get("role") == "tool"])
         records = [
             o
@@ -343,6 +344,7 @@ def main():
                 for o in peer.objects(m.get("content"))
             ),
             "trusted_task_rejected": "trusted_task_context_missing" in json.dumps(tool_messages),
+            "task_gate": "diagnostic policy sentinel; no production endpoint enabled",
             "project_plugin_files": list((args.output / "home").glob("plugins/**/*")),
             "pythonpath_in_child": "PYTHONPATH" in env,
             "file_service": file_proof,
@@ -361,11 +363,15 @@ def main():
         calls
         and not result.get("failure")
         and not model.errors
+        and (not args.api or result.get("api_status") == [200, 200])
         and result["trusted_task_rejected"]
         and result["text_in_formal_tool_message"]
         and result["image_in_formal_tool_message"]
         and not result["project_plugin_files"]
         and all(not meta for meta in result["per_call_meta"])
+        and len(result["transport_sessions_for_task_calls"]) == 1
+        and sum(r["rpc"]["params"]["name"] == "query_current_task" for r in calls)
+        == (2 if args.api else 1)
         and (not args.filebridge_source or file_proof.get("members_bytes_verified"))
     )
     (args.output / "safe-summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
