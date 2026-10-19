@@ -35,6 +35,25 @@ def load_model():
     return module
 
 
+def result_objects(peer, value):
+    """Decode JSON tool payloads inside the official untrusted-content wrapper."""
+    if isinstance(value, str):
+        for offset, char in enumerate(value):
+            if char not in "{[":
+                continue
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(value, offset)
+            except ValueError:
+                continue
+            yield from peer.objects(parsed)
+    else:
+        for obj in peer.objects(value):
+            yield obj
+            for child in obj.values():
+                if isinstance(child, str):
+                    yield from result_objects(peer, child)
+
+
 class Planner:
     def __init__(self, peer, file_service=False):
         self.peer = peer
@@ -43,6 +62,7 @@ class Planner:
 
     def decide(self, body):
         self.calls.append(body)
+        assert len(self.calls) <= 24, "bounded synthetic model probe exhausted"
         messages = body.get("messages", [])
         if not body.get("tools"):
             return {"role": "assistant", "content": "Synthetic probe"}
@@ -59,7 +79,7 @@ class Planner:
             o
             for m in messages
             if m.get("role") == "tool"
-            for o in self.peer.objects(m.get("content"))
+            for o in result_objects(self.peer, m.get("content"))
         ]
         if TEXT not in results:
             return self.peer.tool_call(required[0], {}, visible)
@@ -314,7 +334,12 @@ def main():
     finally:
         if process and process.poll() is None:
             process.terminate()
-            process.wait(timeout=15)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                result["official_stop_required_kill"] = True
+                process.kill()
+                process.wait(timeout=10)
         server.should_exit = True
         thread.join(10)
         model.shutdown()
