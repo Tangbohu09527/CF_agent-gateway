@@ -25,14 +25,23 @@ class ArtifactReturnSettings:
     max_bytes: int = 1_048_576
     max_artifacts: int = 4
     ttl_seconds: int = 900
+    controlled_test_bindings: tuple = ()
 
     def __post_init__(self):
+        # account / private chat / sender / identity / immutable AgentProfile ID.
+        if not isinstance(self.controlled_test_bindings, (list, tuple)) or any(
+            not isinstance(row, (list, tuple))
+            or len(row) != 5
+            or any(not isinstance(value, str) or not value for value in row)
+            for row in self.controlled_test_bindings
+        ):
+            raise ValueError("invalid controlled test bindings")
         if not isinstance(self.enabled, bool) or not isinstance(self.host_contract_confirmed, bool):
             raise ValueError("artifact_return flags must be boolean")
         if not isinstance(self.signing_key_env, str) or not self.signing_key_env.isidentifier():
             raise ValueError("artifact_return signing key must name an environment variable")
         for name, maximum in (
-            ("max_bytes", 1_048_576),
+            ("max_bytes", 128 * 1024 * 1024),
             ("max_artifacts", 8),
             ("ttl_seconds", 3600),
             ("profile_revision", 2_147_483_647),

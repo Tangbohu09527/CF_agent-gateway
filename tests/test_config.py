@@ -39,7 +39,7 @@ def test_api_settings_are_fail_closed_and_bounded_by_default() -> None:
         ("token_env", "TOKEN=value"),
         ("admin_token_env", "ADMIN TOKEN"),
         ("max_request_body_bytes", 0),
-        ("max_request_body_bytes", 64 * 1024 * 1024 + 1),
+        ("max_request_body_bytes", 128 * 1024 * 1024 + 1),
     ],
 )
 def test_api_settings_reject_invalid_security_bounds(field: str, value: object) -> None:

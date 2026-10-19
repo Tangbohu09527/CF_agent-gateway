@@ -38,3 +38,10 @@ id = "generic-api-key"
   paths = ['''^tests/hermes_listener_probe/probe\.py$''']
   regexTarget = "secret"
   regexes = ['''^(5bd5e91fa2296f3c150a87845c047a6a69933c71|ca7f9357c1312171a3b0c28d8f053b874ed469b3)$''']
+
+  [[rules.allowlists]]
+  description = "Exact verified SHA256 of the non-secret 82-call file-service audit receipt"
+  condition = "AND"
+  paths = ['''^docs/validation/2026-10-18-enterprise-product-zip\.md$''']
+  regexTarget = "secret"
+  regexes = ['''^424359aeb1158ffd0c27a3802f9471f6567a8452d2502146f2de2ab255fc7dbd$''']

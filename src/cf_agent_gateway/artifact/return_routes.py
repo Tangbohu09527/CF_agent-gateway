@@ -1,15 +1,23 @@
 """Authenticated bytes, never an arbitrary path/URL or a caller-selected chat."""
 
 import hashlib
+import io
 import re
 from urllib.parse import quote, unquote
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError
 
 from cf_agent_gateway.adapters.wechat.inbound_media_http import MediaFetchError
 from cf_agent_gateway.adapters.wechat.media_http import _filename as validate_media_filename
+from cf_agent_gateway.artifact.enterprise_exports import (
+    EnterpriseExportTooLarge,
+    export_metadata,
+    fetch_verified,
+    permitted,
+)
 from cf_agent_gateway.artifact.errors import (
     ArtifactError,
     ArtifactIntegrityError,
@@ -26,6 +34,8 @@ from cf_agent_gateway.artifact.return_handoff import (
     slot_id,
     validate_artifact_constraint,
 )
+from cf_agent_gateway.hermes.return_bridge.zip_contract import verify_zip
+from cf_agent_gateway.message.models import Message
 
 router = APIRouter(prefix="/internal/hermes/returns", tags=["artifact-return"])
 NO_STORE = {"Cache-Control": "no-store"}
@@ -72,7 +82,10 @@ def _metadata(request, content):
             and content.startswith(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
             and content.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")
         )
-        if not (is_pdf or is_png):
+        is_zip = kind == "file" and mime == "application/zip" and filename.lower().endswith(".zip")
+        if is_zip:
+            verify_zip(io.BytesIO(content))
+        if not (is_pdf or is_png or is_zip):
             raise ValueError()
     except (ValueError, UnicodeError, KeyError):
         raise _error(422, "invalid artifact metadata or content") from None
@@ -189,6 +202,111 @@ def _put(request, settings, dispatch_id, slot, content):
             session.rollback()
             raise _error(409, "artifact unavailable") from None
     return JSONResponse(receipt, headers=NO_STORE)
+
+
+@router.post("/{dispatch_id}/artifacts/{slot}/enterprise-import")
+async def import_enterprise_artifact(dispatch_id: int, slot: int, request: Request):
+    """A generated output of this current task; never a replacement original."""
+    settings = _settings(request)
+    if not request.app.state.settings.enterprise_exports.enabled:
+        raise _error(404)
+    if request.query_params or request.headers.get("x-cf-return-intent") != "current-chat":
+        raise _error(422)
+    try:
+        export = export_metadata(await request.json())
+    except (ValueError, TypeError, KeyError):
+        raise _error(422) from None
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(_import_enterprise, request, settings, dispatch_id, slot, export)
+
+
+def _import_enterprise(request, settings, dispatch_id, slot, export):
+    with request.app.state.database_session_factory() as session:
+        try:
+            repository, response_id, artifact_id, constraint = _authorized_repository(
+                request, session, dispatch_id, slot, settings
+            )
+            # Original-file continuation is a different operation. It can never
+            # acquire generated-output authority by selecting another MIME.
+            if constraint is not None:
+                raise ReturnDenied()
+            record, _ = authorize_snapshot(
+                session, settings, dispatch_id, request.headers.get("authorization", "")
+            )
+            message = session.get(Message, record.message_id, populate_existing=True)
+            enterprise = request.app.state.settings.enterprise_exports
+            if message.conversation_type != "private":
+                raise ReturnDenied()
+            permitted(
+                enterprise,
+                export,
+                account=message.source_account_id,
+                chat=message.conversation_id,
+                identity=record.enterprise_identity_id,
+            )
+            if export["size_bytes"] > min(
+                settings.max_bytes, request.app.state.settings.wechat.max_media_bytes
+            ):
+                raise EnterpriseExportTooLarge()
+            expected = (
+                response_id,
+                export["name"],
+                "file",
+                "application/zip",
+                export["size_bytes"],
+                export["sha256"],
+                ArtifactStatus.READY,
+            )
+            existing = repository.get(artifact_id)
+            if existing is not None:
+                if (
+                    existing.response_id,
+                    existing.filename,
+                    existing.kind.value,
+                    existing.mime_type,
+                    existing.size,
+                    existing.sha256,
+                    existing.status,
+                ) != expected:
+                    raise _error(409, "artifact slot conflict")
+                repository.read(artifact_id)
+                artifact = existing
+            else:
+
+                def active():
+                    authorize(
+                        session, settings, dispatch_id, request.headers.get("authorization", "")
+                    )
+
+                with fetch_verified(enterprise, export, check_active=active) as content:
+                    artifact = repository.create(
+                        artifact_id=artifact_id,
+                        response_id=response_id,
+                        kind="file",
+                        filename=export["name"],
+                        mime_type="application/zip",
+                        content=content,
+                        expected_size=export["size_bytes"],
+                        expected_sha256=export["sha256"],
+                        commit=False,
+                    )
+            authorize(session, settings, dispatch_id, request.headers.get("authorization", ""))
+            receipt = _receipt(artifact)
+            session.commit()
+            return JSONResponse(receipt, headers=NO_STORE)
+        except (ReturnDenied, MediaFetchError):
+            session.rollback()
+            raise _error(403) from None
+        except EnterpriseExportTooLarge:
+            session.rollback()
+            raise _error(413, "enterprise export too large") from None
+        except (ValueError, TypeError, KeyError, ArtifactError):
+            session.rollback()
+            raise _error(409, "enterprise export unavailable or changed") from None
+        except (OSError, httpx.HTTPError):
+            session.rollback()
+            raise _error(503, "enterprise export temporarily unavailable") from None
 
 
 @router.get("/{dispatch_id}/artifacts/{slot}")

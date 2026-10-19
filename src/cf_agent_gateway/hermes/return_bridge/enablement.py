@@ -48,6 +48,8 @@ BUNDLE_FILES = (
     "hermes/tls.py",
     "hermes/return_bridge/__init__.py",
     "hermes/return_bridge/files.py",
+    "hermes/return_bridge/enterprise_files.py",
+    "hermes/return_bridge/zip_contract.py",
     "hermes/return_bridge/scope.py",
     "hermes/return_bridge/staging.py",
     "hermes/return_bridge/transport.py",

@@ -14,6 +14,7 @@ import socket
 import subprocess
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 
@@ -24,8 +25,14 @@ from test_artifact_return_http import rig as rig  # Reuse real auth/claim/SQLite
 from test_hermes_tls import _test_certificates
 
 from cf_agent_gateway.artifact import ArtifactRepository
+from cf_agent_gateway.artifact.enterprise_exports import EnterpriseExportSettings
 from cf_agent_gateway.hermes.return_bridge.enablement import EnablementError
 from cf_agent_gateway.hermes.return_bridge.site_nginx import (
+    ENTERPRISE_MAP_BEGIN,
+    ENTERPRISE_MAP_END,
+    ENTERPRISE_METHOD_PATH_EXPRESSION,
+    ENTERPRISE_ROUTE_BEGIN,
+    ENTERPRISE_ROUTE_END,
     MAP_BEGIN,
     MAP_END,
     ROUTE_BEGIN,
@@ -35,6 +42,32 @@ from cf_agent_gateway.hermes.return_bridge.site_nginx import (
 from cf_agent_gateway.hermes.tls import verified_ssl_context
 
 FIXTURE = Path(__file__).parent / "fixtures/return_site/nginx-complete-synthetic.conf"
+
+
+@pytest.fixture
+def enterprise_rig(rig):
+    # Configure the real ASGI app through its normal immutable settings type.
+    # The metadata-guard request below never downloads from this synthetic origin.
+    rig.app.state.settings = replace(
+        rig.settings,
+        enterprise_exports=EnterpriseExportSettings(
+            enabled=True,
+            base_url="https://filebrowser.invalid",
+            source="synthetic-source",
+            root="/products",
+            allowed_bindings=(("wxid-gateway", "wxid-alice", "synthetic-identity"),),
+            max_bytes=rig.settings.artifact_return.max_bytes,
+        ),
+    )
+    return rig
+
+
+def test_enterprise_metadata_fixture_uses_valid_immutable_settings(enterprise_rig):
+    rig = enterprise_rig
+    assert not rig.settings.enterprise_exports.enabled
+    assert rig.app.state.settings.enterprise_exports.enabled
+    assert rig.client.post(path(rig) + "/enterprise-import", json={}).status_code == 422
+    assert artifact_count(rig) == 0
 
 
 def _source(tmp_path, text=None):
@@ -84,6 +117,78 @@ def test_second_plan_is_byte_identical_and_line_endings_preserved(tmp_path):
     second = plan_nginx(target)
     assert second.changes[0].before == second.changes[0].after
     assert first.changes[0].after.count(b"\n") == first.changes[0].after.count(b"\r\n")
+
+
+@pytest.mark.parametrize("gate", [True, False])
+def test_enterprise_upgrade_only_changes_exact_managed_blocks(tmp_path, gate):
+    original = FIXTURE.read_text()
+    if not gate:
+        original = original.replace(
+            "        if ($request_method !~ ^(GET|POST)$) { return 405; }\n", ""
+        )
+    target = _source(tmp_path, original)
+    legacy = plan_nginx(target).changes[0].after
+    target.write_bytes(legacy)
+    upgraded = plan_nginx(target, enterprise_import=True).changes[0].after
+    assert target.read_bytes() == legacy
+    assert b"client_max_body_size 1m;" in upgraded
+    assert b"proxy_set_header Authorization $http_authorization;" in upgraded
+    assert b"proxy_request_buffering off;" in upgraded
+
+    def outside(raw, pairs):
+        text = raw.decode()
+        for begin, end in pairs:
+            if begin in text:
+                a = text.index(begin)
+                b = text.index(end) + len(end)
+                text = text[:a] + "MANAGED" + text[b:]
+        return text
+
+    assert outside(legacy, [(ROUTE_BEGIN, ROUTE_END), (MAP_BEGIN, MAP_END)]) == outside(
+        upgraded,
+        [
+            (ENTERPRISE_ROUTE_BEGIN, ENTERPRISE_ROUTE_END),
+            (ENTERPRISE_MAP_BEGIN, ENTERPRISE_MAP_END),
+        ],
+    )
+    target.write_bytes(upgraded)
+    assert plan_nginx(target, enterprise_import=True).changes[0].after == upgraded
+    with pytest.raises(EnablementError, match="requires_explicit_option"):
+        plan_nginx(target)
+
+
+@pytest.mark.parametrize(
+    "method,uri,allowed",
+    [
+        ("GET", "/internal/hermes/returns/1/artifacts/0", True),
+        ("PUT", "/internal/hermes/returns/56/artifacts/7", True),
+        ("POST", "/internal/hermes/returns/57/artifacts/0/enterprise-import", True),
+        ("POST", "/internal/hermes/returns/57/artifacts/0", False),
+        ("GET", "/internal/hermes/returns/57/artifacts/0/enterprise-import", False),
+        ("PUT", "/internal/hermes/returns/57/artifacts/0/enterprise-import", False),
+        ("POST", "/internal/hermes/returns/57/artifacts/0/enterprise-import?x=1", False),
+        ("POST", "/internal/hermes/returns/057/artifacts/0/enterprise-import", False),
+        ("POST", "/internal/hermes/returns/57/artifacts/8/enterprise-import", False),
+        ("POST", "/internal/hermes/returns/57/artifacts/0/enterprise-import/extra", False),
+    ],
+)
+def test_enterprise_method_uri_pairs_are_exact(method, uri, allowed):
+    import re
+
+    assert bool(re.fullmatch(ENTERPRISE_METHOD_PATH_EXPRESSION, method + ":" + uri)) is allowed
+
+
+def test_enterprise_upgrade_refuses_modified_legacy_or_new_block(tmp_path):
+    target = _source(tmp_path)
+    legacy = plan_nginx(target).changes[0].after
+    target.write_bytes(legacy.replace(b"proxy_cache off;", b"proxy_cache on;"))
+    with pytest.raises(EnablementError, match="managed_return_route_changed"):
+        plan_nginx(target, enterprise_import=True)
+    target.write_bytes(legacy)
+    upgraded = plan_nginx(target, enterprise_import=True).changes[0].after
+    target.write_bytes(upgraded.replace(b"GET|PUT", b"GET|PUT|POST"))
+    with pytest.raises(EnablementError):
+        plan_nginx(target, enterprise_import=True)
 
 
 def test_server_fragment_without_method_gate_needs_no_global_map(tmp_path):
@@ -300,7 +405,11 @@ def nginx_executable():
     return executable
 
 
-def test_real_nonroot_nginx_https_to_gateway_returns(nginx_executable, rig, tmp_path):
+@pytest.mark.parametrize("enterprise_import", [False, True])
+def test_real_nonroot_nginx_https_to_gateway_returns(
+    nginx_executable, enterprise_rig, tmp_path, enterprise_import
+):
+    rig = enterprise_rig
     executable = nginx_executable
     ca, certificate, key = _test_certificates(tmp_path)
     port = _free_port()
@@ -319,7 +428,11 @@ def test_real_nonroot_nginx_https_to_gateway_returns(nginx_executable, rig, tmp_
         source = source.replace("http {\n", "http {\n" + temporary_paths)
         target = _source(tmp_path, source)
         candidate = tmp_path / "candidate.conf"
-        candidate.write_bytes(plan_nginx(target, listen_port=port).changes[0].after)
+        candidate.write_bytes(
+            plan_nginx(target, listen_port=port, enterprise_import=enterprise_import)
+            .changes[0]
+            .after
+        )
         command = [executable, "-p", str(tmp_path) + "/", "-c", str(candidate)]
         check = subprocess.run([*command, "-t"], capture_output=True, timeout=10)
         assert check.returncode == 0, check.stderr.decode(errors="replace")
@@ -388,6 +501,15 @@ def test_real_nonroot_nginx_https_to_gateway_returns(nginx_executable, rig, tmp_
                     "/inbound-media/old", content=content
                 ).status_code
                 statuses["default_deny"] = client.get("/unchanged-default-deny").status_code
+                # The real backend sees the new metadata POST only after the
+                # explicit proxy upgrade. Missing intent is rejected by its
+                # own 422 guard; no generated-output authority is fabricated.
+                statuses["enterprise_metadata_guard"] = client.post(
+                    path(rig, 1) + "/enterprise-import", json={}
+                ).status_code
+                statuses["enterprise_wrong_get"] = client.get(
+                    path(rig, 1) + "/enterprise-import"
+                ).status_code
                 assert statuses == {
                     "unauthorized": 403,
                     "wrong_capability": 403,
@@ -399,6 +521,8 @@ def test_real_nonroot_nginx_https_to_gateway_returns(nginx_executable, rig, tmp_
                     "old_put_rejected": 405,
                     "old_16k_limit": 413,
                     "default_deny": 404,
+                    "enterprise_metadata_guard": 422 if enterprise_import else 404,
+                    "enterprise_wrong_get": 405 if enterprise_import else 404,
                 }
                 assert artifact_count(rig) == 1
                 assert not any((tmp_path / "client_body").rglob("*"))

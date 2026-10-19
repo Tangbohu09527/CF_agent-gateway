@@ -27,6 +27,15 @@ ROUTE_BEGIN = "# CF_ARTIFACT_RETURN_ROUTE_V1_BEGIN"
 ROUTE_END = "# CF_ARTIFACT_RETURN_ROUTE_V1_END"
 MAP_BEGIN = "# CF_ARTIFACT_RETURN_METHOD_V1_BEGIN"
 MAP_END = "# CF_ARTIFACT_RETURN_METHOD_V1_END"
+ENTERPRISE_ROUTE_BEGIN = "# CF_ARTIFACT_RETURN_ROUTE_V2_BEGIN"
+ENTERPRISE_ROUTE_END = "# CF_ARTIFACT_RETURN_ROUTE_V2_END"
+ENTERPRISE_MAP_BEGIN = "# CF_ARTIFACT_RETURN_METHOD_V2_BEGIN"
+ENTERPRISE_MAP_END = "# CF_ARTIFACT_RETURN_METHOD_V2_END"
+ENTERPRISE_PATH_EXPRESSION = PATH_EXPRESSION[:-1] + r"(/enterprise-import)?$"
+ENTERPRISE_METHOD_PATH_EXPRESSION = (
+    r"^((GET|PUT):/internal/hermes/returns/[1-9][0-9]*/artifacts/[0-7]"
+    r"|POST:/internal/hermes/returns/[1-9][0-9]*/artifacts/[0-7]/enterprise-import)$"
+)
 
 
 @dataclass(frozen=True)
@@ -371,7 +380,7 @@ def _upstream_and_headers(source, server, inherited):
     return upstream, copied
 
 
-def _route(upstream, copied, indent, newline):
+def _route(upstream, copied, indent, newline, *, enterprise_import=False):
     inner = indent + "    "
     body = [
         f'if ($request_uri !~ "{PATH_EXPRESSION}") {{ return 404; }}',
@@ -401,27 +410,45 @@ def _route(upstream, copied, indent, newline):
         "access_log off;",
         f"proxy_pass {upstream};",
     ]
+    if enterprise_import:
+        # Keep the existing ^~ location: a sibling regex location would be
+        # bypassed. Pair the method with the complete, unmodified request URI.
+        body[:2] = [
+            f'if ($request_uri !~ "{ENTERPRISE_PATH_EXPRESSION}") {{ return 404; }}',
+            'set $cf_artifact_return_method_path "$request_method:$request_uri";',
+            f'if ($cf_artifact_return_method_path !~ "{ENTERPRISE_METHOD_PATH_EXPRESSION}") '
+            "{ return 405; }",
+        ]
     return newline.join(
         [
-            indent + ROUTE_BEGIN,
+            indent + (ENTERPRISE_ROUTE_BEGIN if enterprise_import else ROUTE_BEGIN),
             indent + "location ^~ " + PREFIX + " {",
             *(inner + line for line in body),
             indent + "}",
-            indent + ROUTE_END,
+            indent + (ENTERPRISE_ROUTE_END if enterprise_import else ROUTE_END),
         ]
     )
 
 
-def _method_map(methods, variable, indent, newline):
+def _method_map(methods, variable, indent, newline, *, enterprise_import=False):
+    extra = (
+        [
+            indent + "    ~^POST:/internal/hermes/returns/[1-9][0-9]*/artifacts/[0-7]"
+            "/enterprise-import$ 0;"
+        ]
+        if enterprise_import
+        else []
+    )
     return newline.join(
         [
-            indent + MAP_BEGIN,
+            indent + (ENTERPRISE_MAP_BEGIN if enterprise_import else MAP_BEGIN),
             indent + f'map "$request_method:$request_uri" {variable} {{',
             indent + "    default 1;",
             indent + f"    ~^({'|'.join(methods)}): 0;",
             indent + "    ~^(GET|PUT):/internal/hermes/returns/[1-9][0-9]*/artifacts/[0-7]$ 0;",
+            *extra,
             indent + "}",
-            indent + MAP_END,
+            indent + (ENTERPRISE_MAP_END if enterprise_import else MAP_END),
         ]
     )
 
@@ -434,7 +461,9 @@ def _marked(source, beginning, ending):
     return start, end, source[start:end]
 
 
-def plan_nginx(config_path: str | Path, *, listen_port: int = 8443) -> Plan:
+def plan_nginx(
+    config_path: str | Path, *, listen_port: int = 8443, enterprise_import: bool = False
+) -> Plan:
     """Read complete local source and return a private-byte Plan for the shared journal.
 
     Preserve all other locations, limits, TLS, upstream variables and default deny.
@@ -442,6 +471,8 @@ def plan_nginx(config_path: str | Path, *, listen_port: int = 8443) -> Plan:
     """
     if type(listen_port) is not int or not 1 <= listen_port <= 65535:
         raise EnablementError("nginx_invalid_listener_port")
+    if type(enterprise_import) is not bool:
+        raise EnablementError("nginx_invalid_enterprise_import_option")
     path = _path(config_path)
     before = _read(path)
     if before is None:
@@ -470,24 +501,36 @@ def plan_nginx(config_path: str | Path, *, listen_port: int = 8443) -> Plan:
     server_start = _line_start(source, server.start)
     indent = source[server_start : server.start]
     close_start = _line_start(source, server.closing)
-    route = _route(upstream, copied, indent + "    ", newline)
+    route = _route(upstream, copied, indent + "    ", newline, enterprise_import=enterprise_import)
     variable = f"$cf_artifact_return_v1_{listen_port}_method_denied"
     gates = _named(server.children, "if")
     if len(gates) > 1:
         raise EnablementError("nginx_multiple_server_gates_require_review")
     mutations = []
-    managed = ROUTE_BEGIN in source or ROUTE_END in source
+    upgraded = ENTERPRISE_ROUTE_BEGIN in source or ENTERPRISE_ROUTE_END in source
+    if upgraded and not enterprise_import:
+        raise EnablementError("nginx_enterprise_route_requires_explicit_option")
+    if upgraded and (ROUTE_BEGIN in source or ROUTE_END in source):
+        raise EnablementError("nginx_managed_markers_conflict")
+    route_markers = (
+        (ENTERPRISE_ROUTE_BEGIN, ENTERPRISE_ROUTE_END) if upgraded else (ROUTE_BEGIN, ROUTE_END)
+    )
+    map_markers = (ENTERPRISE_MAP_BEGIN, ENTERPRISE_MAP_END) if upgraded else (MAP_BEGIN, MAP_END)
+    managed = upgraded or ROUTE_BEGIN in source or ROUTE_END in source
     existing = [
         loc
         for loc in _named(server.children, "location")
         if any(PREFIX.rstrip("/") in part for part in loc.arguments)
     ]
     if managed:
-        _, _, rendered = _marked(source, ROUTE_BEGIN, ROUTE_END)
-        if len(existing) != 1 or existing[0].arguments != ("^~", PREFIX) or rendered != route:
+        start, end, rendered = _marked(source, *route_markers)
+        expected = _route(upstream, copied, indent + "    ", newline, enterprise_import=upgraded)
+        if len(existing) != 1 or existing[0].arguments != ("^~", PREFIX) or rendered != expected:
             raise EnablementError("nginx_managed_return_route_changed")
+        if rendered != route:
+            mutations.append((start, end, route))
     else:
-        if existing or MAP_BEGIN in source or variable in source:
+        if existing or MAP_BEGIN in source or ENTERPRISE_MAP_BEGIN in source or variable in source:
             raise EnablementError("nginx_existing_return_route_requires_review")
         mutations.append((close_start, close_start, route + newline))
     if gates:
@@ -499,14 +542,21 @@ def plan_nginx(config_path: str | Path, *, listen_port: int = 8443) -> Plan:
                 for node in _named(nodes, "map")
                 if node.arguments == ("$request_method:$request_uri", variable)
             ]
-            if len(maps) != 1 or len(maps[0].children) != 3:
+            if len(maps) != 1 or len(maps[0].children) != (4 if upgraded else 3):
                 raise EnablementError("nginx_managed_method_gate_changed")
             allowed = re.fullmatch(r"~\^\(([A-Z|]+)\):", maps[0].children[1].name)
             if not allowed:
                 raise EnablementError("nginx_managed_method_gate_changed")
-            expected = _method_map(tuple(allowed.group(1).split("|")), variable, indent, newline)
-            if _marked(source, MAP_BEGIN, MAP_END)[2] != expected:
+            methods = tuple(allowed.group(1).split("|"))
+            expected = _method_map(methods, variable, indent, newline, enterprise_import=upgraded)
+            start, end, rendered = _marked(source, *map_markers)
+            if rendered != expected:
                 raise EnablementError("nginx_managed_method_gate_changed")
+            desired = _method_map(
+                methods, variable, indent, newline, enterprise_import=enterprise_import
+            )
+            if rendered != desired:
+                mutations.append((start, end, desired))
             if (
                 len(gate.children) != 1
                 or gate.children[0].name != "return"
@@ -517,11 +567,16 @@ def plan_nginx(config_path: str | Path, *, listen_port: int = 8443) -> Plan:
             methods = _simple_gate(source, gate)
             replacement = f"if ({variable}) {{ return 405; }}"
             mutations.append((gate.start, gate.end, replacement))
-            generated = _method_map(methods, variable, indent, newline)
+            generated = _method_map(
+                methods, variable, indent, newline, enterprise_import=enterprise_import
+            )
             mutations.append((server_start, server_start, generated + newline))
         else:
             raise EnablementError("nginx_managed_method_gate_changed")
-    elif MAP_BEGIN in source or MAP_END in source:
+    elif any(
+        marker in source
+        for marker in (MAP_BEGIN, MAP_END, ENTERPRISE_MAP_BEGIN, ENTERPRISE_MAP_END)
+    ):
         raise EnablementError("nginx_managed_method_gate_changed")
     for start, end, replacement in sorted(mutations, reverse=True):
         source = source[:start] + replacement + source[end:]
@@ -542,7 +597,12 @@ def plan_nginx(config_path: str | Path, *, listen_port: int = 8443) -> Plan:
                 "listen_port": listen_port,
                 "route": PREFIX,
                 "max_bytes": 1_048_576,
-                "methods": ["GET", "PUT"],
+                "method_paths": (
+                    {"slot": ["GET", "PUT"], "slot/enterprise-import": ["POST"]}
+                    if enterprise_import
+                    else {"slot": ["GET", "PUT"]}
+                ),
+                "methods": ["GET", "PUT", "POST"] if enterprise_import else ["GET", "PUT"],
                 "source_selector": " ".join(SOURCE_SELECTOR),
             },
             {

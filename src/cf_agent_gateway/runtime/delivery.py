@@ -39,7 +39,11 @@ def drain_wechat_delivery_outbox(
     """Drain available WeChat delivery jobs using an independent database session."""
 
     with session_factory() as session:
-        artifact_repository = ArtifactRepository(session, settings.artifact.storage_root)
+        artifact_repository = ArtifactRepository(
+            session,
+            settings.artifact.storage_root,
+            max_artifact_bytes=max(25 * 1024 * 1024, settings.artifact_return.max_bytes),
+        )
         worker = ChannelDeliveryWorker(
             session,
             sender_factory,
@@ -80,6 +84,7 @@ def run_wechat_delivery_once(
                 WechatHttpMediaSender,
                 base_url=settings.wechat.base_url,
                 token_env=settings.wechat.token_env,
+                max_media_bytes=settings.wechat.max_media_bytes,
                 environment_reader=lambda name: (
                     token if name == settings.wechat.token_env else None
                 ),

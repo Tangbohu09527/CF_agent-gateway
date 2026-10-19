@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from cf_agent_gateway.artifact.enterprise_exports import EnterpriseExportSettings
 from cf_agent_gateway.artifact.return_config import ArtifactReturnSettings
 from cf_agent_gateway.hermes_timeouts import HermesTimeoutSettings
 from cf_agent_gateway.inbound.host_binding_config import HostBindingSettings
@@ -70,9 +71,9 @@ class APISettings:
         if (
             isinstance(self.max_request_body_bytes, bool)
             or not isinstance(self.max_request_body_bytes, int)
-            or not 1 <= self.max_request_body_bytes <= 64 * 1024 * 1024
+            or not 1 <= self.max_request_body_bytes <= 128 * 1024 * 1024
         ):
-            raise ValueError("api.max_request_body_bytes must be between 1 and 67108864")
+            raise ValueError("api.max_request_body_bytes must be between 1 and 134217728")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +122,14 @@ class WechatSettings:
     token_env: str = "CF_AGENT_WECHAT_TOKEN"
     poll_source_account_id: str | None = field(default=None, repr=False)
     poll_conversation_id: str | None = field(default=None, repr=False)
+    max_media_bytes: int = 25 * 1024 * 1024
 
     def __post_init__(self) -> None:
+        if (
+            type(self.max_media_bytes) is not int
+            or not 1 <= self.max_media_bytes <= 128 * 1024 * 1024
+        ):
+            raise ValueError("wechat.max_media_bytes must be between 1 and 134217728")
         if not isinstance(self.enabled, bool):
             raise ValueError("wechat.enabled must be a boolean")
 
@@ -275,8 +282,11 @@ class InboundMediaSettings:
     public_base_url: str = ""
     wait_seconds: int = 900
     followup_enabled: bool = False
+    max_bytes: int = 10 * 1024 * 1024
 
     def __post_init__(self) -> None:
+        if type(self.max_bytes) is not int or not 1 <= self.max_bytes <= 128 * 1024 * 1024:
+            raise ValueError("inbound_media.max_bytes must be between 1 and 134217728")
         if not isinstance(self.enabled, bool):
             raise ValueError("inbound_media.enabled must be boolean")
         if type(self.followup_enabled) is not bool:
@@ -323,6 +333,7 @@ class Settings:
     inbound_media: InboundMediaSettings = InboundMediaSettings()
     host_binding: HostBindingSettings = HostBindingSettings()
     artifact_return: ArtifactReturnSettings = ArtifactReturnSettings()
+    enterprise_exports: EnterpriseExportSettings = EnterpriseExportSettings()
 
     def __post_init__(self):
         protected = {
@@ -345,6 +356,17 @@ class Settings:
             self.api.max_request_body_bytes
         ):
             raise ValueError("artifact_return exceeds the API body limit")
+        if self.enterprise_exports.enabled:
+            if not self.artifact_return.enabled:
+                raise ValueError("enterprise_exports requires artifact_return")
+            if self.enterprise_exports.max_bytes > self.artifact_return.max_bytes:
+                raise ValueError("enterprise_exports exceeds artifact_return limit")
+            if self.enterprise_exports.token_env in protected | {
+                self.host_binding.service_token_env,
+                self.host_binding.encryption_key_env,
+                self.artifact_return.signing_key_env,
+            }:
+                raise ValueError("enterprise_exports requires a separate file-service token")
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -371,6 +393,7 @@ def load_settings(path: str | Path) -> Settings:
     inbound_media = _mapping(raw, "inbound_media")
     host_binding = _mapping(raw, "host_binding")
     artifact_return = _mapping(raw, "artifact_return")
+    enterprise_exports = _mapping(raw, "enterprise_exports")
 
     if "api_key" in hermes:
         raise ValueError("hermes.api_key is not allowed; use hermes.api_key_env")
@@ -396,6 +419,7 @@ def load_settings(path: str | Path) -> Settings:
         inbound_media=InboundMediaSettings(**inbound_media),
         host_binding=HostBindingSettings(**host_binding),
         artifact_return=ArtifactReturnSettings(**artifact_return),
+        enterprise_exports=EnterpriseExportSettings(**enterprise_exports),
         server=ServerSettings(host=host, port=port),
         database=DatabaseSettings(url=database_url),
         logging=LoggingSettings(level=log_level),
@@ -421,6 +445,7 @@ def load_settings(path: str | Path) -> Settings:
             token_env=wechat.get("token_env", "CF_AGENT_WECHAT_TOKEN"),
             poll_source_account_id=wechat.get("poll_source_account_id"),
             poll_conversation_id=wechat.get("poll_conversation_id"),
+            max_media_bytes=wechat.get("max_media_bytes", 25 * 1024 * 1024),
         ),
         hermes=HermesSettings(
             enabled=hermes.get("enabled", False),

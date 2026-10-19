@@ -213,7 +213,12 @@ def _bound_from_manifest(fingerprint, manifest, data):
 
 
 def _mime(signature):
-    return {"pdf": "application/pdf", "jpeg": "image/jpeg", "png": "image/png"}.get(
+    return {
+        "pdf": "application/pdf",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "zip": "application/zip",
+    }.get(
         signature,
         "application/octet-stream",
     )

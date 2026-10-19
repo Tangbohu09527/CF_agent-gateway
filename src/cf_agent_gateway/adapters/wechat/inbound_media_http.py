@@ -170,7 +170,7 @@ class InboundMediaHTTPClient:
         base_url: str,
         token: str,
         *,
-        max_bytes: int = MAX_MEDIA_BYTES,
+        max_bytes: int = 10 * 1024 * 1024,
         deadline_seconds: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:

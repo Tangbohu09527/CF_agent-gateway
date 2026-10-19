@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, aliased
 
 from cf_agent_gateway.admission import AdmissionOutcome, AdmissionReason
 from cf_agent_gateway.inbound.models import TERMINAL_STATES, InboundMediaJob
+from cf_agent_gateway.message.models import Message
 from cf_agent_gateway.task.model.errors import (
     HermesDispatchAdmissionError,
     HermesDispatchStateConflictError,
@@ -147,6 +148,14 @@ class HermesDispatchRecordStore:
             statement = (
                 select(HermesDispatchRecord.id, HermesDispatchRecord.status)
                 .where(
+                    # Operator-controlled validation is executed only by its
+                    # exact-ID CLI, never picked by the ordinary live worker.
+                    ~exists(
+                        select(Message.id).where(
+                            Message.id == HermesDispatchRecord.message_id,
+                            Message.source == "cf-controlled-test",
+                        )
+                    ),
                     _claimable_predicate(
                         HermesDispatchRecord,
                         now=claimed_at,

@@ -38,6 +38,7 @@ from cf_agent_gateway.ingestion.models import (
     PersistedMessageSnapshot,
 )
 from cf_agent_gateway.message.models import Message
+from cf_agent_gateway.message.schemas import MessageEvent
 from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.task.model import (
     HermesDispatchRecord,
@@ -117,7 +118,12 @@ class MessageAdmissionService:
         )
 
     def process(self, message: NormalizedWechatMessage) -> MessageIngestionOutcome:
-        event = wechat_message_to_event(message)
+        return self.process_event(wechat_message_to_event(message))
+
+    def process_event(self, event: MessageEvent) -> MessageIngestionOutcome:
+        """Trusted channel adapters use the same durable admission path."""
+        if not isinstance(event, MessageEvent):
+            raise TypeError("a validated MessageEvent is required")
         stored_message, message_created = self._message_store.create(event)
         logger.info(
             "message persisted" if message_created else "message duplicate",
