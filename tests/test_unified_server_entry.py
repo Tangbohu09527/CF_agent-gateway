@@ -130,6 +130,40 @@ class ImageResumeTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "requires actual POSIX file modes; exercised by Linux CI")
 class CheckoutModeTests(unittest.TestCase):
+    def test_https_mount_is_traversable_under_protected_installer_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            state.chmod(0o700)
+            installer = object.__new__(module.Installer)
+            installer.lock = {"images": {"https": "nginx:fixed"}}
+            installer.raw = inputs()
+
+            def once(path, content, *, owner=(0, 0), mode=0o600):
+                path.write_bytes(content.encode() if isinstance(content, str) else content)
+                path.chmod(mode)
+
+            installer.core = SimpleNamespace(
+                safe_parents=lambda path: None,
+                pull_record=lambda *args: {"digest_reference": "nginx@sha256:" + "a" * 64},
+                administrator_input=lambda *args: b"synthetic test input",
+                once=once,
+            )
+            installer.manager = "deployoperator"
+            previous = os.umask(0o077)
+            try:
+                with (
+                    patch.object(module, "STATE", state),
+                    patch.object(module.os, "chown") as chown,
+                ):
+                    installer.https_prepare()
+                    chown.assert_called_once_with(state / "https", 0, 10001)
+            finally:
+                os.umask(previous)
+            self.assertEqual(stat.S_IMODE((state / "https").stat().st_mode), 0o750)
+            self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+            for name in ("server.key", "server.crt", "ca.crt", "nginx.conf"):
+                self.assertEqual(stat.S_IMODE((state / "https" / name).stat().st_mode), 0o440)
+
     def test_only_reviewed_entrypoint_becomes_executable_by_service_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -408,6 +408,9 @@ class Installer:
         else:
             directory.mkdir(mode=0o750)
             os.chown(directory, 0, 10001)
+            # mkdir honors the protected 077 installer umask. Only this
+            # fixed read-only mount needs traversal by the HTTPS service group.
+            os.chmod(directory, 0o750)
         for name, key in [
             ("server.crt", "certificate_file"),
             ("server.key", "private_key_file"),

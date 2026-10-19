@@ -120,37 +120,55 @@ observations are substituted, and storage is tmpfs test-disk. This cannot prove
 booted systemd, durable-host/RAID storage, OS reboot or a published production
 combination. Existing single-component clean-device A/B results are separate.
 
-## Official Hermes pure-configuration result
-
-Dependency audit correction: the older successful probe below installed a
-selected dependency subset, not official427's complete supported installation.
-Its Python3.12 Windows run is diagnostic only; official427 supports Python3.14.
-The independent PR23 is rerunning with its fixed official installer and full
-default extras. Transport observations remain evidence, but the older green
-probe alone does not prove an officially installed clean environment.
-
 Run39313438306 at `da369b579716c1dc825d729829c9f172e417df46` completed
 FileBrowser start/bootstrap-finish and Gateway build/configure/database/migrate/
-start. HTTPS prepare completed, but HTTPS start reported an unhealthy container;
-the next revision exports only that fixed project's bounded health/startup error
-fields to identify the actual fault. It does not infer a cause from this status.
+start. HTTPS prepare completed, but HTTPS start reported an unhealthy container.
 The same run showed unreadable public FileBrowser CSS/favicon assets under
 UID10001. FileBrowser PR7 commit `47876e3a3d62affe777de8623697f62791fa5fa4`
 normalizes only image-public asset modes and verifies the actual built image
 under UID/GID10001 without mounts/network/write access. Its13 image-workflow
-unit tests pass locally. The manifest now fixes this revision; production
+unit tests pass locally. The manifest fixes this revision; production
 ownership, secrets, data and application identity are unchanged.
+
+Run39316302951 at `045161992306e775d35eeaede66cc527df19b894`
+confirmed the FileBrowser asset fix: its ordinary service was healthy and the
+bounded startup permission-error list was empty. HTTPS actually restarted with
+`open() "/etc/cf-https/nginx.conf" failed (13: Permission denied)`.
+The new directory's requested0750 was masked to0700 by the unchanged protected
+umask077. The next fix explicitly sets0750 only on that fixed root:10001
+read-only mount directory. Parent state stays0700 and mounted files stay0440;
+there is no TLS or identity bypass. A real-POSIX umask regression covers this.
+The isolated revocation check now requires its generated management password to
+work through sudo before clearing its ticket, locking it and rejecting the same
+password; business credentials remain independent. Full-run outcome is indexed
+in the cross-repository closeout.
+
+## Official Hermes pure-configuration result
+
+Dependency audit correction: the earlier successful probe installed a
+selected dependency subset, not official427's complete supported installation.
+Its Python3.12 Windows run is diagnostic only; official427 supports Python3.14.
+PR23 then passed the fixed official installer's dependency stage and full
+default extras in CI39315976156 and final-head CI39317205768. Python3.14.7,
+53 applicable requirements, clean source and three lock/input hashes were
+actually audited. This is dependency-stage evidence, not all official install
+stages or new-Windows-machine acceptance. Earlier green subset probes do not
+prove the official environment.
 
 The independent Draft PR23 fixes official Hermes at
 `427d605d4985c2d49a795493ef6c5d66413057d1` and FileBrowser at product
 `3d556786068994826b8105ff4a1d11572b84b1b1` for its real scoped TLS HTTP fixture.
-[Final source/report](https://github.com/Tangbohu09527/CF_agent-gateway/blob/2ada096c8a30ecbde771fb32f7536790709b0cd9/docs/validation/2026-10-20-native-http-mcp.md)
-and [exact-head CI39302780142](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39302780142)
+[Final source/report](https://github.com/Tangbohu09527/CF_agent-gateway/blob/57bb2c2830f292d5167f0bda449afafbe0a528fd/docs/validation/2026-10-20-native-http-mcp.md)
+and [exact-head CI39317205768](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39317205768)
 passed the boundary probe. The official client is unchanged, with a clean HOME,
 no project plugin/EXE/PYTHONPATH and no production model key. The deterministic
 model substitute actually selects tools; native text/image tool messages and
 FileBrowser query/export execute. Twelve members of the approximately 18 MB
 export are verified against the selected input members.
+
+The official API, MCP and model substitute use isolated loopback HTTP. Real TLS
+applies to the FileBrowser leg. This does not prove cross-machine MCP HTTPS or a
+new Windows computer; those remain separate from the Linux dependency-stage test.
 
 Small native configuration shape, **only for the proved transport/content layer**:
 

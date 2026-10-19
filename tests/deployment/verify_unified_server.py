@@ -248,6 +248,25 @@ def acceptance():
     # Revoke an actual disposable Linux management password, not a business token.
     management_secret = secrets.token_urlsafe(32)
     run(["chpasswd"], input="deployoperator:" + management_secret + "\n")
+    management_command = [
+        "runuser",
+        "-u",
+        "deployoperator",
+        "--",
+        "sudo",
+        "-S",
+        "-k",
+        "-p",
+        "",
+        "--",
+        "id",
+        "-u",
+    ]
+    check(
+        run(management_command, input=management_secret + "\n") == "0",
+        "disposable-management-password-never-authorized",
+    )
+    run(["runuser", "-u", "deployoperator", "--", "sudo", "-K"])
     run(["usermod", "--lock", "deployoperator"])
     check(
         run(["passwd", "--status", "deployoperator"]).split()[1] == "L",
@@ -260,6 +279,14 @@ def acceptance():
         timeout=15,
     )
     check(denied.returncode != 0, "management-sudo-still-authorized")
+    rejected_password = subprocess.run(
+        management_command,
+        input=management_secret + "\n",
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    check(rejected_password.returncode != 0, "locked-management-password-still-works")
     check(downloaded() == payload, "business-credential-depends-on-management")
     # Recreate a real service container with the same image/mounts; do not call
     # this a database restart, OS reboot, backup restore, or native Hermes E2E.
@@ -383,7 +410,7 @@ def acceptance():
             "verified HTTPS upload/download",
             "whole ZIP and 12 member hashes",
             "ordinary scoped business credential",
-            "management password locked and sudo negative",
+            "management password sudo positive, locked, same password and sudo negative",
             "business credential still works",
             "real same-image service recreation retains file",
             "bad token and path rejected",
