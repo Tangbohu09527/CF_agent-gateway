@@ -9,7 +9,9 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
-      TZ: UTC
+      TZ: Asia/Shanghai
+    # Process/log display is local; SQL timestamp interpretation remains UTC.
+    command: [postgres, -c, timezone=UTC, -c, log_timezone=Asia/Shanghai]
     volumes:
       - data:/var/lib/postgresql/data
       - type: bind

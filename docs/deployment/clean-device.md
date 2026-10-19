@@ -26,7 +26,8 @@ Gateway 安装步骤及历史现场成功记录不能单独替代此验收：
 
 当前本机已安装 `afcd5c875905a849a7636ccc22057b47da419dfe` 的 FileBridge 插件及
 `filebrowser-agentctl.exe`、`filebridge-inbound.exe`，属于现有业务桥接状态，**尚未符合
-上述最终新机标准**。当前步骤未提供 FileBrowser/Gateway/微信的统一正式安装入口；
+上述最终新机标准**。本轮新增的[统一服务端候选入口](unified-server.md)尚需按其准确提交的
+隔离安装及新机证据判断，不能把候选存在写成正式交付完成；
 官方 Hermes 加少量参数的独立新机路径和撤销临时授权后的完整业务持续运行仍待验收。
 正式工具加载、受控 ZIP Artifact 成功或管理授权撤销记录均不能独自证明这些条件已满足。
 现场安装及其证据边界见[产品 ZIP 验收记录](../validation/2026-10-18-enterprise-product-zip.md)。

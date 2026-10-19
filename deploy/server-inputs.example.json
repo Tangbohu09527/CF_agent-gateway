@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "manager": "deployoperator",
+  "storage_evidence": "raid-confirmed",
+  "gateway": {
+    "version": 1,
+    "hermes_url": "https://ai.example.internal:8642",
+    "hermes_model": "approved-model-name",
+    "database": {"mode": "managed"}
+  },
+  "filebrowser": {
+    "image": null,
+    "mode": "staging"
+  },
+  "https": {
+    "bind_address": "192.0.2.10",
+    "gateway_port": 18444,
+    "filebrowser_port": 18443,
+    "allowed_cidrs": ["192.0.2.0/24"],
+    "server_name": "files.example.internal",
+    "certificate_file": "/root/cf-install-inputs/server.crt",
+    "private_key_file": "/root/cf-install-inputs/server.key",
+    "ca_file": "/root/cf-install-inputs/ca.crt"
+  }
+}

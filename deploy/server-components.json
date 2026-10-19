@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "platform": "debian-13-amd64-systemd",
+  "timezone": "Asia/Shanghai",
+  "database_timezone": "UTC",
+  "gateway": {
+    "repository": "https://github.com/Tangbohu09527/CF_agent-gateway.git",
+    "revision_input": "--gateway-commit: full SHA of this entry checkout"
+  },
+  "filebrowser": {
+    "repository": "https://github.com/Tangbohu09527/CF_filebrowser-enterprise.git",
+    "revision": "e9fc639d1916eb2d1aa61e869737bee2b38b8601"
+  },
+  "wechat": {
+    "repository": "https://github.com/Tangbohu09527/CF_agent-wechat.git",
+    "revision": "e56c7e4b606f1614e54210a391906f4be7440f5e",
+    "image": "ghcr.io/thisnick/agent-wechat@sha256:97d5a99f933592c15897a7579b4e2b2cbbb5f4dda856228f8271f91dd7cafb43",
+    "runtime_uid": 1000,
+    "runtime_gid": 1000,
+    "protocol_source_observed": "96c2e90c497d999bf5189a134a9b3b293731f42e",
+    "note": "Management source includes PR9; the selected upstream image does not enable the filename candidate. No login or runtime is created by base installation."
+  },
+  "hermes": {
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "revision": "427d605d4985c2d49a795493ef6c5d66413057d1",
+    "configuration_only_business": "unproven: trusted per-task MCP context requires separate acceptance"
+  },
+  "images": {
+    "python": "python:3.12-slim-bookworm",
+    "postgres": "postgres:16-bookworm",
+    "https": "nginx:1.28-alpine"
+  }
+}

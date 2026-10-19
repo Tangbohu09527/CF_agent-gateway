@@ -55,7 +55,12 @@ def fail(code: str) -> None:
 
 
 def run(
-    args: list[str | Path], *, timeout: int = 300, cwd: Path | None = None, data: str | None = None
+    args: list[str | Path],
+    *,
+    timeout: int = 300,
+    cwd: Path | None = None,
+    data: str | None = None,
+    log_path: Path | None = None,
 ) -> str:
     # Do not inherit Compose overrides, proxy credentials, Python injection or
     # caller-controlled Docker endpoints. Output can contain secrets: never echo.
@@ -78,11 +83,16 @@ def run(
         start_new_session=True,
     )
     try:
-        output, _ = process.communicate(data, timeout=timeout)
+        output, error_output = process.communicate(data, timeout=timeout)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
         fail("command_timeout:" + Path(args[0]).name)
+    if log_path is not None:
+        # Optional unified-installer diagnostics are protected root-only files.
+        # They can contain generated installation credentials; never print or
+        # publish them. The caller must sanitize any separate evidence export.
+        once(log_path, output + "\n" + error_output)
     if process.returncode:
         fail("command_failed:" + Path(args[0]).name)
     return output.strip()
