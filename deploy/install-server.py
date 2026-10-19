@@ -190,10 +190,9 @@ class Installer:
             ["git", "-C", SOURCE, "status", "--porcelain", "--untracked-files=normal"]
         ):
             raise SuiteError("entry checkout is dirty; retained without replacement")
-        if (
-            self.core.run(["git", "-C", SOURCE, "remote", "get-url", "origin"]).removesuffix(".git")
-            != self.lock["gateway"]["repository"].removesuffix(".git")
-        ):
+        if self.core.run(["git", "-C", SOURCE, "remote", "get-url", "origin"]).removesuffix(
+            ".git"
+        ) != self.lock["gateway"]["repository"].removesuffix(".git"):
             raise SuiteError("entry origin differs from the fixed repository")
         # Validate Gateway schema before a journal/package/credential is created.
         settings = dict(raw["gateway"])
