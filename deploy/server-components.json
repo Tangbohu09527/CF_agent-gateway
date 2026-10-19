@@ -9,7 +9,7 @@
   },
   "filebrowser": {
     "repository": "https://github.com/Tangbohu09527/CF_filebrowser-enterprise.git",
-    "revision": "e9fc639d1916eb2d1aa61e869737bee2b38b8601"
+    "revision": "47876e3a3d62affe777de8623697f62791fa5fa4"
   },
   "wechat": {
     "repository": "https://github.com/Tangbohu09527/CF_agent-wechat.git",

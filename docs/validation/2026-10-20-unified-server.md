@@ -10,7 +10,7 @@ PDF/PNG and October 19 normal ZIP acceptance remain in the
 
 The server candidate is Draft PR24, based on product PR21
 `91a235fca08362d8c1440e808df56946be3cc1e8`. FileBrowser PR7 fixes source
-`e9fc639d1916eb2d1aa61e869737bee2b38b8601` (product PR5 plus timezone PR6 and
+`47876e3a3d62affe777de8623697f62791fa5fa4` (product PR5 plus timezone PR6 and
 interrupted-prepare preservation); WeChat PR11 fixes management source
 `e56c7e4b606f1614e54210a391906f4be7440f5e` (timezone PR10 plus explicit root
 base preparation). Their own repositories contain the implementation.
@@ -121,6 +121,25 @@ booted systemd, durable-host/RAID storage, OS reboot or a published production
 combination. Existing single-component clean-device A/B results are separate.
 
 ## Official Hermes pure-configuration result
+
+Dependency audit correction: the older successful probe below installed a
+selected dependency subset, not official427's complete supported installation.
+Its Python3.12 Windows run is diagnostic only; official427 supports Python3.14.
+The independent PR23 is rerunning with its fixed official installer and full
+default extras. Transport observations remain evidence, but the older green
+probe alone does not prove an officially installed clean environment.
+
+Run39313438306 at `da369b579716c1dc825d729829c9f172e417df46` completed
+FileBrowser start/bootstrap-finish and Gateway build/configure/database/migrate/
+start. HTTPS prepare completed, but HTTPS start reported an unhealthy container;
+the next revision exports only that fixed project's bounded health/startup error
+fields to identify the actual fault. It does not infer a cause from this status.
+The same run showed unreadable public FileBrowser CSS/favicon assets under
+UID10001. FileBrowser PR7 commit `47876e3a3d62affe777de8623697f62791fa5fa4`
+normalizes only image-public asset modes and verifies the actual built image
+under UID/GID10001 without mounts/network/write access. Its13 image-workflow
+unit tests pass locally. The manifest now fixes this revision; production
+ownership, secrets, data and application identity are unchanged.
 
 The independent Draft PR23 fixes official Hermes at
 `427d605d4985c2d49a795493ef6c5d66413057d1` and FileBrowser at product

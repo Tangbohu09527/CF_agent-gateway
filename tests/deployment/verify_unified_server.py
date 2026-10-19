@@ -494,6 +494,44 @@ def failure():
                 if re.search(r"Permission denied|exec .*failed|exec .*not found", line, re.I)
             ][:4]
         value["filebrowser_container_states"] = states
+        https_identifiers = run(
+            ["docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cf-suite-https"]
+        ).split()
+        https_states = []
+        for identifier in https_identifiers[:2]:
+            state = json.loads(
+                run(["docker", "inspect", "--format", "{{json .State}}", identifier])
+            )
+            health = state.get("Health", {})
+            lines = subprocess.run(
+                ["docker", "logs", "--tail", "30", identifier],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=True,
+                text=True,
+                timeout=15,
+            ).stdout.splitlines()
+            https_states.append(
+                {
+                    "status": state.get("Status"),
+                    "exit_code": state.get("ExitCode"),
+                    "error": redact(str(state.get("Error", "")))[:1000],
+                    "health": health.get("Status"),
+                    "health_checks": [
+                        {
+                            "exit_code": item.get("ExitCode"),
+                            "output": redact(str(item.get("Output", "")))[:2000],
+                        }
+                        for item in health.get("Log", [])[-3:]
+                    ],
+                    "startup_error_lines": [
+                        redact(line)[:1000]
+                        for line in lines
+                        if re.search(r"emerg|crit|Permission denied|Read-only|failed", line, re.I)
+                    ][:6],
+                }
+            )
+        value["https_container_states"] = https_states
         daemon = Path("/root/dockerd.private.log")
         if daemon.exists():
             errors = [
