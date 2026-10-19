@@ -2,7 +2,24 @@
 
 This report covers the Gateway candidate on PR20's `ef3119aeecd987165255c066218441f6aef8fb0a` base. Product source, later test/documentation commits, built images and observed production versions are separate identities. The isolated candidate evidence below is not a production deployment or real-model/WeChat acceptance. The in-progress operator snapshot at the end records which later production operations actually happened.
 
-## Latest verified position — 18:53 UTC / October 19 02:53 Beijing
+## Latest verified position — October 19 10:36 UTC / 18:36 Beijing
+
+**Normal WeChat ZIP outbound acceptance passed.** New Message4320 / Dispatch59 queried
+and exported the existing enterprise product version using formal Hermes, created a fresh
+Artifact and Response, and Delivery50 sent both text and ZIP to the original private chat.
+The user opened the ZIP; independent receiver and stored-Artifact checks matched all 12
+members and the full 18,167,063-byte ZIP SHA256. This is not replay of controlled capture57.
+The accidental earlier ZIP (4319/58) timed out and is not an inbound success.
+
+The six core services were healthy, Poll/Delivery closed and no in-flight task remained at
+18:36 Beijing. Temporary management access was revoked and its encrypted password deleted,
+with negative checks. No product deployment, migration or Hermes change occurred in this test.
+Outer filename preservation remains unpassed, and archive-path cleanup is deferred.
+See [the full current execution record](#normal-wechat-zip-outbound-acceptance--october-19-completed)
+at the end for actual calls, receipt/member evidence, changes and cleanup times. Earlier
+snapshots below are preserved historical observations, not the current business outcome.
+
+## Historical verified position — October 19 02:53 Beijing
 
 | Area | Latest verified fact, superseding earlier chronological snapshots |
 | --- | --- |
@@ -467,3 +484,90 @@ At **02:10:50.525020 UTC / 10:10:50.525020 Beijing**, the final read-only CFserv
 The task's fixed management window was revoked early at **02:11:09.159245 UTC / 10:11:09.159245 Beijing**, and the guard's negative check returned authorization denied. No task key/sudoers had been newly installed; the old task key count remained zero and old sudoers were absent. The revocation receipt is `2cc1706e60671b93804fddffa0a6bcfa0e65f14185543c70b911dea69e2b60fc`. At **02:11:22.491431 UTC / 10:11:22.491431 Beijing**, the existing local credential utility deleted this task's encrypted password and verified `credential_missing`; cleanup receipt `ea1b1cbbfa486e5a494d2e4ddc3c4b4430cebb03b4e795b6d1f74b95a71e25c4`. Business service credentials, evidence and the user's account password were retained. All management transports closed; no further remote operation is planned under this revoked window.
 
 **Remaining acceptance boundary:** the installed tools are ready for the next authorized business task. ZIP packaging, fresh return authority, Response and stored Artifact passed in controlled Dispatch57, including all 12 member hashes. There is no WeChat ZIP Delivery or receiver-file verification. WeChat login/sending is still paused by the user; it requires deliberate resumption and a normal new task, not replay of 57. The filename-preservation protocol candidate remains undeployed. Do not reinstall these identical files or repeat already-passed PDF/PNG acceptance merely to resume that final business check.
+
+最终新机交付统一按[干净设备部署文档的最终验收条件](../deployment/clean-device.md#最终新机交付验收条件尚未全部满足)判断。本节的 `afcd` 插件与两个 EXE 已安装/加载属于业务桥接状态，尚未符合“AI 电脑仅官方 Hermes 加少量接入参数”的最终新机标准；临时管理授权已撤销也不等于完整业务持续运行已验收。
+
+
+## Normal WeChat ZIP outbound acceptance — October 19, completed
+
+This later acceptance supersedes the earlier “no WeChat ZIP Delivery or receiver verification” boundary for **outbound export only**. The operator did not reinstall plugins, change models, rebuild images, migrate, repeat PDF/PNG tests, or switch the filename-preservation protocol candidate. The user had already restarted CFserver and logged the original Bot in; no operator login, QR scan or runtime reset occurred here.
+
+### Current versions and actual changes
+
+The actual October 19 checks retained Gateway product `b0517d2222fcf5a08dc6aed079ffbb8baa133203` / image `sha256:0bbbb3c29b8117b000027adda522bdecbfb73c1756d44c08431fd1ee43fc1049`, schema `20261018_01`; FileBrowser server `d505fc6599608b219f3494979b0a5f197fdf356f` / image `sha256:1e6ccdc7ff1854e1a98821a9623136315845a10e5d9a3b5cfbc2d163b4ba5fb0`; Hermes `427d605d4985c2d49a795493ef6c5d66413057d1`; and formal FileBridge product/client `afcd5c875905a849a7636ccc22057b47da419dfe`. This documentation head is not an application build.
+
+At **10:01:47 UTC / 18:01:47 Beijing**, authenticated formal HTTPS `/v1/toolsets` returned the same six-tool inventory, SHA256 `32f8e7f5fdc40cc944af61139d63dba71fc169ecab79b3c08c0fac617afaa2e2`. Hermes ran as ordinary `AITEST\Admin`, PID18140, with the expected 18642/8642 listeners; the older PID39988 is historical. The real task below subsequently executed the product and return handlers on this formal host.
+
+The proxy configuration remained `d83d861b3bf9c6eec4ab0062dabd7fd71624298e9a958b1993a85c1c30c00a78` and its image remained `sha256:43d9d8c1f8968f09df8c1aa6c136ecc617e62d64fe4c0b24c97de4eb210bd973`. An initial read-only comparison stopped because Docker's `HostConfig.Dns`, `DnsOptions` and `DnsSearch` were `[]` after the host reboot rather than the previous `null`. Independent comparison found the same container ID, image, actual configuration, mounts, effective inputs and all other compared fields. This precise normalization was recorded, not “fixed” by changing production.
+
+The unchanged WeChat image was `sha256:3b14e58c908ec11e9163ef0bbb51522bea15c1568c8e1012a29890b9adadc48e`, digest `ghcr.io/thisnick/agent-wechat@sha256:97d5a99f933592c15897a7579b4e2b2cbbb5f4dda856228f8271f91dd7cafb43`. The preserved versioned OCI provenance links binary SHA256 `4f07107800d8c6a592f8a0c50bb0cf683e7d454d10b383e87078ed59009715db` to source `96c2e90c497d999bf5189a134a9b3b293731f42e`. This does not identify it as the undeployed PR9 filename candidate.
+
+Actual writes were limited to separate operator authorization/evidence records, the original Controller's bounded Poll/Delivery lifecycle, normal task/return/delivery persistence, and one task-scoped enterprise export. The six core container identities were unchanged. The Controller may recreate its two worker containers when starting them; this was not a core application deployment. No original source scan, reclassification, re-import, archive reorganization, source overwrite/delete, owner/DACL change or production configuration change occurred in this acceptance.
+
+### Authentication and finite windows
+
+The existing masked input/DPAPI procedure was used once by ordinary Admin. Actual SSH and sudo succeeded through the operator's execution tools, with the pinned host identity and existing source/command restrictions retained. The new fixed management window began **10:06:48.117733 UTC / 18:06:48.117733 Beijing** and was capped at **22:01:33.897246 UTC / October 20 06:01:33.897246 Beijing** by the earlier credential timestamp, less than twelve hours. Server-side installed metadata and guard hashes were checked. This window used the existing password/fixed-helper mode: no task public key or sudoers rule was newly installed, the old task-key count was zero, and old task sudoers were absent. It was revoked early as recorded below; the cap was never extended.
+
+A first local metadata extraction failed before networking; its correction read only protected timestamp metadata. A new-window local receipt-name collision also stopped before networking and was resolved with a distinct r2 receipt without overwriting the old evidence. Neither was a server authentication failure or a second remote installation. No secret was printed or committed.
+
+The first bounded Controller window opened **10:10:29 UTC / 18:10:29 Beijing**, with an eight-minute server guardian. The original chat's actual poll succeeded before the user was notified. The user sent a ZIP rather than the requested text; the guardian detected the unexpected input and completed stop/Collect at **10:12:25.867765 UTC / 18:12:25.867765 Beijing**. At that point the pending media task was explicitly not described as cancelled.
+
+The second window opened **10:28:46.403156 UTC / 18:28:46.403156 Beijing**, with an absolute guardian deadline **10:36:46.403156 UTC / 18:36:46.403156 Beijing**. It first completed the existing expired media notice through normal code, then verified the original account/chat poll at **10:28:48 UTC** and ready/quiet state at **10:29:01.776101 UTC / 18:29:01.776101 Beijing**. The user had confirmed immediate availability. No other chat was enabled, no checkpoint was cleared, and no synthetic WeChat input was inserted.
+
+### Separate accidental inbound ZIP: not an inbound success
+
+The first real input was **Message4319 / Dispatch58 / media job7**, original account/private chat/sender, raw `app/49`, 23-character metadata. The user confirmed a 16.4 MB ZIP upload and provided its screenshot. It was not the pre-agreed text, had no downloaded manifest or attachment, and made no Hermes/model call. The original media deadline **10:27:01.112146 UTC / 18:27:01.112146 Beijing** was retained. Poll/Delivery remained closed while that deadline elapsed, rather than using this narrower outbound test to perform another import.
+
+The next controlled window ran the existing expired/no-manifest branch: job7 became `timed_out / media_wait_expired`, with two media attempts. Dispatch58's one `success` attempt denotes only the local failure-notice pipeline, not ZIP processing. Response `inbound-media-notice:7` had text only, zero Artifact, and **Delivery49 delivered once**. The user saw that notice. The actual container source hashes matched fixed b0517d2: `inbound/worker.py` `766685ca6b7fc12c5faeb14c9107d7b39b0b165c7572113f82a719f8e7677128`, `hermes/service.py` `35a2c11d93c7354c55a14eb3009e8cda7802b58200510d18b63f3a3497677f56`; that branch returns before the Hermes request. No unsupported-format, damaged-file or historical HTTP diagnosis is inferred. Message4319 and its timeout remain preserved; inbound ZIP acceptance remains unpassed.
+
+### Actual employee request, formal model calls and fresh return
+
+The user next sent a normal text request in the original Bot private chat: retrieve the already archived named product/specification's latest main and detail images as ZIP, preserving existing files without reclassification, overwrite or deletion. Product/customer account identifiers and the full body stay in private evidence. The actual text's UTF-8 SHA256 is `fa9fec2cd1327245e0d8792cbed9d5596af1464617f12f8df30d3c15c37f3e56`; this matches the requested instruction. This is actual WeChat input, not merely an instruction in the Codex chat.
+
+| Stage | Actual result |
+| --- | --- |
+| Input/admission | **Message4320**, original account/private chat/sender, local27, raw text/1, `allowed` via routing v2. Received **10:29:31.856967 UTC**. |
+| Execution | **Dispatch59**, source `wechat`, existing managed conversation, one attempt. Claimed **10:29:32.183832 UTC**, completed **10:30:40.621358 UTC**. No controlled capture source or replay of 57/58. |
+| Selected enterprise version | Existing complete version `20261019-归档-c952c907`, four main images plus eight detail assets. Preflight found one published version under this product/specification. |
+| Product operations | Actual `filebrowser_product_materials`: search, list, list, export, then checksum. All five business results reported success. The export created a new task59 ZIP from selected enterprise files; it did not forward the accidental incoming ZIP. |
+| Fresh return | One actual `cf_return_current_chat` call succeeded with the export's new current-task reference. **Artifact `36860c4b-d207-5f6d-a6ce-db337e1a0441`**, kind `file`, MIME `application/zip`, ready; 18,167,063 bytes. |
+| Response | Fresh `return:59:` response, two ordered parts: ordinal0 text (353 bytes), ordinal1 `artifact_ref` for this Artifact. |
+| Delivery | **Delivery50**, one attempt per part, both delivered. Text attempt52 completed **10:30:43.883870 UTC**; ZIP attempt53 completed **10:30:46.176464 UTC / 18:30:46.176464 Beijing**. |
+| Recipient | User confirmed the received ZIP opens and its contents are correct, supplied a screenshot and the exact authorized local received-file path. The operator then independently opened and streamed that actual received ZIP. |
+
+The exact formal-HOME turn trace was collected read-only at **10:37:00 UTC / 18:37:00 Beijing**, after remote credential removal. It is bound to Dispatch59's exact session hash, claim/completion interval, matching user row and paired results, rows477–494, with no unmatched tool result. It records **eight calls**: native `tool_search`, native `tool_describe`, five product calls above, and one return. Each result has a later assistant row; this establishes tool results entered the formal turn, rather than merely existing as standalone operator output. No Skill/config-edit tool call appears in this exact turn. The export is the expected persistent business write. This trace is not a complete filesystem-diff proof.
+
+The generic trace projection labels the discovery wrappers `success_reported=false` because their native schemas do not require top-level `ok/success`. It also projects absent `ok/success` keys in the export's return descriptor as false. These defaults are **not recorded business failures**: the export and actual return top-level results succeeded, and the Artifact/Delivery/recipient checks independently passed. Nested discovery `errors/not_found` were not retained by this projection, so no claim is made that every discovered tool entry was valid. The original projection is preserved with a separate interpretation rather than rewritten. The native discovery implementation can conditionally record shared metrics; whether that option persisted a metric during this turn was not established by the projection. The generic mutation flag also omits export from its action list, so its false value does not negate the real new export file.
+
+### Independent byte and member verification; filename remains separate
+
+The current published manifest fingerprint is `7a801c8bbd4e4924edaecffcfb0a60111462e713bf44d4ea3e23caf80691df16`. At **10:33:12.898502 UTC / 18:33:12.898502 Beijing**, the operator read the actual recipient ZIP from the user's authorized saved location. It opened successfully and contained exactly **12** expected member paths, sizes and SHA256 values, matching the independently preserved published selection. The file was not extracted into or written over the source.
+
+At **10:34:00.762291 UTC / 18:34:00.762291 Beijing**, a separate read-only Gateway check, using its ordinary UID10001 and configured artifact storage boundary, streamed the actual stored task59 Artifact and checked its ZIP and all twelve members. The task/export result, stored Gateway Artifact and receiver file all had **18,167,063 bytes** and identical SHA256:
+
+```text
+239fe0ddf1570553ae9fb09639ce3236f09e2fc0af843b7e1f0cc41ed48f3e42
+```
+
+The export's canonical twelve-member path/size/hash projection is `04907a6e3e3aa2b61e5135fa8009c880d885ad14a5d0776d511b9ef4199798a3`. Internal relative Chinese names and subdirectories matched the selected member manifest. A newly generated ZIP is not required to equal the original inbound package's outer hash. Its equality with the earlier deterministic capture57 export does not mean the old Artifact or authorization was reused: the stored task59 Artifact, export path, return and Delivery are independently linked above.
+
+**Outer filename preservation did not pass.** The intended exported business filename retained Chinese product text; the actual recipient name was `send_file_1792405844312________1kg__-____-20261019-__-c952c907.zip`. This timestamp prefix/character replacement is separate from the passed ZIP/member bytes. The unchanged live protocol and undeployed filename candidate are not conflated. The user also noted the existing enterprise archive path is awkward and explicitly deferred it. This test did not reorganize that path or rename existing business files.
+
+### Final safety closure and evidence boundary
+
+The guardian stopped Poll/Delivery after the result, at **10:30:53 UTC / 18:30:53 Beijing**, and finished Collect at **10:30:57.125787 UTC / 18:30:57.125787 Beijing**, before the eight-minute deadline. A fresh final snapshot at **10:36:00.125022 UTC / 18:36:00.125022 Beijing** confirmed all six core containers healthy, unchanged expected images, the original Bot still logged in, both gates closed, and **zero nonterminal or claimed Dispatch, Delivery or media jobs; zero pending admission**. Upstream inspection of the original chat saw 29 visible messages, zero pending inbound and two pending self/outbound messages. The normal checkpoint anchor matched local27/generation7; no manual checkpoint write or claim cancellation occurred. These are observed-at-time facts, not a promise of perpetual queue emptiness.
+
+At **10:36:04.975237 UTC / 18:36:04.975237 Beijing**, the task's limited management authorization was revoked early; the fixed helper's negative check was denied. Old task-key occurrences remained zero and old sudoers absent. At **10:36:05.033682 UTC / 18:36:05.033682 Beijing**, the original local utility deleted the temporary encrypted password and verified negative load `credential_missing`. Business credentials, the user's password, evidence, login data and service configuration were retained; all management transports closed. The earlier transport receipt's “retained until task end” flag describes its pre-cleanup state and is superseded by this separate actual deletion receipt. No new server operation followed revocation.
+
+Sanitized execution facts are shared above; original receipts, exact account/session identifiers, raw message/tool data and receiver path remain private. The following SHA256 index identifies the preserved originals without suggesting those originals were uploaded:
+
+| Private evidence | SHA256 / boundary |
+| --- | --- |
+| Independent stored Artifact/task59 readback | `0c9a5e424513f43faf924e4e29ebf4fbe566f22365572e3ecebad6d162347d0e` |
+| Final server health/queues/upstream snapshot | `be5a8a175de5f807983ca531e4273c9c1a35f9c2ce99cff949b27b3c8f7512d2` |
+| Delivery50 receipt fingerprint | `f1ea07a1e51a389c8de07120ae5c2e432e9dd8f4fbd6f92489f185b0523a3fd4` |
+| Server authorization revocation record | `70834bfe6f00f3aa12563f0b9e68f1eb651420889e696f371530509c9d309236` |
+
+The recipient verification, formal trace, interpretation, complete revocation/deletion envelopes and operator-file fingerprints are additionally indexed in the existing private handoff. No ZIP, image, credential, complete business message or full production log is committed. This documentation-only update introduces no new runtime code, image or migration. Its CI must be attributed to its own resulting commit; the eight successful workflow runs on prior report `3439c034b3a169ce536edee88a67479e267a6651` do not prove a later documentation commit green.
+
+**Completed:** normal employee text → formal model query/export → fresh return/Artifact → real WeChat text/ZIP Delivery → user-opened ZIP and independently matching twelve members/whole bytes. **Still separate:** the accidental inbound ZIP timed out; filename preservation is not deployed; archive-path cleanup is deferred; final clean-machine deployment criteria remain unfulfilled. No further user action is required for this completed outbound acceptance. Future window-ready notices should use a separate visible input notification with send content and deadline, as the user requested, rather than relying only on commentary.
