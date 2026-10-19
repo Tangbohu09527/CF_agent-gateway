@@ -79,6 +79,14 @@ sanitized result. Automatic push/PR concurrency now shares a branch group to
 avoid duplicate matrices. Accurate final CI is indexed in the cross-repository
 closeout; these retained failures are not rewritten as success.
 
+Run [39306797027 attempt2](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39306797027)
+at `71c802da233cfd855d0b7436da543c823a937098` proved the intended port
+rejection, then resumed preparation successfully. The next FileBrowser start
+failed with a suppressed Docker error. No business-transfer or repeat success
+is claimed for this attempt. The next test revision adds only fixed-project,
+read-only container-state and bounded daemon diagnostics, redacting all generated
+test secrets; no production implementation is changed to guess at the cause.
+
 The test uses a pristine Debian13 container, independent real dockerd (no host
 socket), real services and strict HTTPS, approximately 18 MB/12 synthetic members,
 ordinary scoped business credentials, an injected failure/resume, service

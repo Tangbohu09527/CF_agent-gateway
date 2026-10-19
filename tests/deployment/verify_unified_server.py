@@ -378,6 +378,7 @@ def failure():
     hidden = []
     for path in [
         *(STATE / "secrets").glob("*"),
+        *Path("/etc/cf-filebrowser-enterprise/secrets").glob("*"),
         Path("/srv/storage/cf-agent-wechat/secrets/auth-token"),
     ]:
         if path.is_file():
@@ -385,16 +386,50 @@ def failure():
     generated = Path("/var/lib/cf-agent-gateway-install/secrets.json")
     if generated.exists():
         hidden.extend(json.loads(generated.read_bytes()).values())
+
+    def redact(text):
+        for secret in hidden:
+            if secret:
+                text = text.replace(secret, "[redacted generated test secret]")
+        return re.sub(
+            r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", "[redacted PEM]", text, flags=re.S
+        )
+
+    # Read-only, fixed-project diagnostics. Never export container configuration,
+    # environment or complete application/daemon logs (they can contain secrets).
+    try:
+        identifiers = run(
+            ["docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cf-filebrowser"]
+        ).split()
+        states = []
+        for identifier in identifiers[:4]:
+            state = json.loads(
+                run(["docker", "inspect", "--format", "{{json .State}}", identifier])
+            )
+            states.append(
+                {
+                    "status": state.get("Status"),
+                    "exit_code": state.get("ExitCode"),
+                    "oom_killed": state.get("OOMKilled"),
+                    "error": redact(str(state.get("Error", "")))[:3000],
+                    "health": state.get("Health", {}).get("Status"),
+                }
+            )
+        value["filebrowser_container_states"] = states
+        daemon = Path("/root/dockerd.private.log")
+        if daemon.exists():
+            errors = [
+                line
+                for line in daemon.read_text(errors="replace").splitlines()
+                if re.search(r"level=(error|warning)\b", line)
+            ]
+            value["daemon_error_excerpt"] = redact("\n".join(errors[-12:]))[-6000:]
+    except Exception as error:
+        value["diagnostic_failure"] = type(error).__name__
     logs = sorted(STATE.glob("command-*.private.log"), key=lambda p: p.stat().st_mtime)
     if logs:
         excerpt = "\n".join(logs[-1].read_text(errors="replace").splitlines()[-70:])[-12000:]
-        for secret in hidden:
-            if secret:
-                excerpt = excerpt.replace(secret, "[redacted generated test secret]")
-        excerpt = re.sub(
-            r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", "[redacted PEM]", excerpt, flags=re.S
-        )
-        value["last_component_error_excerpt"] = excerpt
+        value["last_component_error_excerpt"] = redact(excerpt)
     save(value)
 
 
