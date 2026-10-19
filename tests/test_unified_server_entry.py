@@ -6,6 +6,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
     "unified_server", Path(__file__).resolve().parents[1] / "deploy/install-server.py"
@@ -81,6 +83,43 @@ class JournalTests(unittest.TestCase):
             changed = copy.deepcopy(original)
             changed["versions"][key] = "c" * 40
             self.assertNotEqual(module.fingerprint(original), module.fingerprint(changed))
+
+
+class ImageResumeTests(unittest.TestCase):
+    def test_recorded_image_is_reused_after_interruption_before_stage_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            revision = "b" * 40
+            reference = "cf-filebrowser-unified:" + revision
+            saved = {"source_sha": revision, "reference": reference, "image_id": "sha256:old"}
+            (state / "filebrowser-image.json").write_text(json.dumps(saved))
+            installer = object.__new__(module.Installer)
+            installer.lock = {"filebrowser": {"revision": revision}}
+            installer.raw = {"filebrowser": {"image": None}}
+            installer.core = SimpleNamespace(read_json=lambda p: json.loads(p.read_bytes()))
+            commands = []
+
+            def inspect_only(command):
+                commands.append(command)
+                self.assertEqual(command, ["docker", "image", "inspect", reference])
+                return json.dumps(
+                    [
+                        {
+                            "Id": "sha256:old",
+                            "Config": {"Labels": {"org.opencontainers.image.revision": revision}},
+                        }
+                    ]
+                )
+
+            installer.command = inspect_only
+            with patch.object(module, "STATE", state):
+                installer.filebrowser_image()
+                self.assertEqual(len(commands), 1)
+                saved["image_id"] = "sha256:different"
+                (state / "filebrowser-image.json").write_text(json.dumps(saved))
+                with self.assertRaises(module.SuiteError):
+                    installer.filebrowser_image()
+            self.assertEqual(len(commands), 2)
 
 
 if __name__ == "__main__":

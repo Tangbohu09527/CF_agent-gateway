@@ -28,7 +28,7 @@ for asset in /opt/cf-agent-gateway /opt/cf-agent-wechat /opt/cf-filebrowser-ente
 done
 mkdir -p /root/suite-inputs /srv/storage /usr/local/bin
 # A real separate filesystem: records are explicitly test-disk, never RAID proof.
-mount -t tmpfs -o size=768m,nodev,nosuid tmpfs /srv/storage
+mount -t tmpfs -o size=768m,mode=0755,nodev,nosuid tmpfs /srv/storage
 cp /fixture-inputs/server.crt /fixture-inputs/server.key /fixture-inputs/ca.crt /root/suite-inputs/
 chmod 600 /root/suite-inputs/*
 install -m 755 /acceptance/tests/deployment/systemd-a-substitute.sh /usr/local/bin/cf-a-systemctl

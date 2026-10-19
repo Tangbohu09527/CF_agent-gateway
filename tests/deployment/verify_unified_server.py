@@ -400,6 +400,11 @@ def main():
             "failure-occurred-before-port-conflict-validation",
         )
         check("filebrowser-start" not in journal()["completed"], "continued-after-failure")
+        logs = sorted(STATE.glob("command-*.private.log"), key=lambda p: p.stat().st_mtime)
+        check(
+            bool(logs) and "validator rejected phase port" in logs[-1].read_text(),
+            "injected-port-conflict-was-not-the-actual-failure",
+        )
     elif action == "acceptance":
         acceptance()
     elif action == "repeat":
