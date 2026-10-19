@@ -3,6 +3,8 @@
 import copy
 import importlib.util
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,6 +126,45 @@ class ImageResumeTests(unittest.TestCase):
                 with self.assertRaises(module.SuiteError):
                     installer.filebrowser_image()
             self.assertEqual(len(commands), 2)
+
+
+@unittest.skipUnless(os.name == "posix", "requires actual POSIX file modes; exercised by Linux CI")
+class CheckoutModeTests(unittest.TestCase):
+    def test_only_reviewed_entrypoint_becomes_executable_by_service_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            entrypoint = root / "scripts/container-entrypoint.sh"
+            entrypoint.write_text("#!/bin/sh\nexit 0\n")
+            entrypoint.chmod(0o700)
+            private = root / "private"
+            private.write_text("synthetic fixture secret")
+            private.chmod(0o600)
+            installer = object.__new__(module.Installer)
+            installer.lock = {
+                "filebrowser": {"repository": "fixed-repository", "revision": "b" * 40}
+            }
+            checks = []
+
+            def regular(path, *, mode):
+                checks.append((path, mode))
+                self.assertFalse(path.is_symlink())
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                return path.read_bytes()
+
+            installer.core = SimpleNamespace(fixed_checkout=lambda *a, **k: None, regular=regular)
+            with patch.object(module, "FB", root):
+                installer.checkout_filebrowser()
+                self.assertEqual(entrypoint.stat().st_mode & 0o777, 0o755)
+                installer.checkout_filebrowser()
+                self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(private.read_text(), "synthetic fixture secret")
+                before = len(checks)
+                entrypoint.chmod(0o777)
+                with self.assertRaises(module.SuiteError):
+                    installer.checkout_filebrowser()
+                self.assertEqual(len(checks), before)
+                self.assertEqual(entrypoint.stat().st_mode & 0o777, 0o777)
 
 
 if __name__ == "__main__":

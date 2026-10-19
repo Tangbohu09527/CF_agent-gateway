@@ -99,6 +99,19 @@ Retries are bounded and a resource-limited smoke container must succeed before
 the application build. The test neither shares the host Docker socket/cgroup
 namespace nor removes any product resource, authentication or TLS constraint.
 
+Run [39311006559](https://github.com/Tangbohu09527/CF_agent-gateway/actions/runs/39311006559)
+at `0d057c8c7f717e240ab0ad7f5fab8a7df37bf803` passed the private namespace
+CPU/memory/pids smoke and no longer reported the OCI cgroup failure. FileBrowser
+instead restarted with exit126. Its fixed bind-mounted entrypoint was checked
+out under the root installer's 077 umask; Git executable mode therefore became
+0700, incompatible with the unchanged runtime user10001. The next revision
+validates and sets0755 on only that reviewed regular code file after the fixed
+checkout. The global umask, other checkout files, credentials, ownership and
+runtime identity remain unchanged. Unknown modes/symlinks/hardlinks stop.
+Five portable checks pass locally; the new real-POSIX narrow-mode regression is
+explicitly skipped on Windows and must run in Linux. The same service-start
+reproduction and runtime identity/mode assertions remain in the unified job.
+
 The test uses a pristine Debian13 container, independent real dockerd (no host
 socket), real services and strict HTTPS, approximately 18 MB/12 synthetic members,
 ordinary scoped business credentials, an injected failure/resume, service

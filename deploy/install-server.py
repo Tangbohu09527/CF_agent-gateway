@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import sys
 import time
 from pathlib import Path
@@ -287,6 +288,25 @@ class Installer:
                 self.core.once(target, secrets.token_urlsafe(36) + "\n")
             self.core.regular(target)
         self.core.once(STATE / "gateway-inputs.json", canonical(self.gateway_settings))
+
+    def checkout_filebrowser(self):
+        self.core.fixed_checkout(
+            FB,
+            self.lock["filebrowser"]["repository"],
+            self.lock["filebrowser"]["revision"],
+            mode=0o755,
+        )
+        # This one reviewed code file is bind-mounted and executed as 10001.
+        # Git honors the installer's 077 umask; leave every credential/private
+        # file unchanged rather than relaxing the checkout or global umask.
+        entrypoint = FB / "scripts/container-entrypoint.sh"
+        mode = stat.S_IMODE(entrypoint.lstat().st_mode)
+        if mode not in (0o700, 0o755):
+            raise SuiteError("unexpected FileBrowser entrypoint mode; retained")
+        self.core.regular(entrypoint, mode=mode)
+        if mode != 0o755:
+            os.chmod(entrypoint, 0o755)
+        self.core.regular(entrypoint, mode=0o755)
 
     def filebrowser_image(self):
         revision = self.lock["filebrowser"]["revision"]
@@ -562,12 +582,7 @@ class Installer:
             stage("credentials", self.credentials)
             stage(
                 "filebrowser-checkout",
-                lambda: self.core.fixed_checkout(
-                    FB,
-                    self.lock["filebrowser"]["repository"],
-                    self.lock["filebrowser"]["revision"],
-                    mode=0o755,
-                ),
+                self.checkout_filebrowser,
             )
             stage("filebrowser-image", self.filebrowser_image)
             stage("filebrowser-prepare", self.prepare_filebrowser)

@@ -12,6 +12,7 @@ import random
 import re
 import secrets
 import ssl
+import stat
 import subprocess
 import sys
 import urllib.parse
@@ -74,6 +75,22 @@ def request(client, method, endpoint, expected=(200,), **kwargs):
 
 
 def acceptance():
+    check(
+        stat.S_IMODE(
+            Path("/opt/cf-filebrowser-enterprise/scripts/container-entrypoint.sh").stat().st_mode
+        )
+        == 0o755,
+        "reviewed-entrypoint-not-executable-by-service",
+    )
+    file_service_ids = run(
+        ["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cf-filebrowser"]
+    ).split()
+    check(len(file_service_ids) == 1, "expected-one-file-service")
+    check(
+        run(["docker", "inspect", "--format", "{{.Config.User}}", file_service_ids[0]])
+        == "10001:10001",
+        "ordinary-file-service-identity",
+    )
     api, client = file_client()
     password = (STATE / "secrets/filebrowser-admin").read_text().strip()
 
@@ -311,6 +328,8 @@ def acceptance():
         status="acceptance-passed-awaiting-repeat",
         bytes=len(payload),
         members=12,
+        filebrowser_runtime_user="10001:10001",
+        reviewed_entrypoint_mode="0755",
         sha256=private["file_sha256"],
         true_components=["Gateway", "PostgreSQL", "FileBrowser", "HTTPS", "WeChat base installer"],
         passed=[
@@ -415,6 +434,19 @@ def failure():
                     "health": state.get("Health", {}).get("Status"),
                 }
             )
+            lines = subprocess.run(
+                ["docker", "logs", "--tail", "30", identifier],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=True,
+                text=True,
+                timeout=15,
+            ).stdout.splitlines()
+            states[-1]["startup_error_lines"] = [
+                redact(line)[:1000]
+                for line in lines
+                if re.search(r"Permission denied|exec .*failed|exec .*not found", line, re.I)
+            ][:4]
         value["filebrowser_container_states"] = states
         daemon = Path("/root/dockerd.private.log")
         if daemon.exists():
