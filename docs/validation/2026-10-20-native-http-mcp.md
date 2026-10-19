@@ -73,6 +73,9 @@ Windows 独立 Python 3.12 环境的官方进程完成以下步骤：
   每次调用没有把官方本地 task/session 上下文或 Gateway 请求身份转换为远程授权上下文。
 - `tools/mcp_tool_content.py:176` 的 `_mcp_result_with_native_images` 是图像进入
   正式工具消息的原生路径；本实验实际经过此路径。
+- `agent/tool_dispatch_helpers.py:467` 起将 MCP 工具识别为不可信内容，`:555` 的
+  `_maybe_wrap_untrusted` 包装结果文本；模型替身解析包装内的结构化回执，
+  只有真实 `employee_query/export: complete` 回执才推进下一步。
 
 MCP transport session 属于复用的服务连接，不能当成某次 Gateway 任务 ID。
 静态 Profile 可用于服务器配置的身份分区；它不能区分同一 Profile 下并发的两个任务。
@@ -86,10 +89,26 @@ MCP transport session 属于复用的服务连接，不能当成某次 Gateway �
 查询、导出和实际远程下载，核对完整 ZIP 大小、SHA-256 以及每个成员大小与 SHA-256。
 该测试用户没有管理员标志；fixture 的 source scope 是 `/`，没有宣称额外覆盖员工子目录授权矩阵。
 
-首轮 Linux 检查 `39300941923` 成功完成 18,156,370 字节 ZIP 的真实 TLS 上传、inspect 和 import，
-并再次证明图文消息/并发会话/缺失上下文。它准确报红，因为探针错误地把工具描述中的名字当作
-已完成查询/导出的回执，实际计数为零。已改为解析结构化成功回执，保留下载/成员核对断言。
-最终大文件检查结果须结合本候选最新提交的 `safe-summary.json` 读取。
+Linux 检查 `39302151607` 于 2026-10-20 02:26（Asia/Shanghai）成功，
+适用探针提交 `1f3a1c2978bcc0b4803e6246e309fc77a7865c51`。
+已下载并核对该次工作流的 `safe-summary.json`，结果为：
+
+- `boundary_probe_passed: true`；两路 API 均为 200，模型调用 14 次、错误为空。
+- `content_probe`、`employee_query_probe`、`employee_export_probe`、
+  `query_current_task` 各实际执行两次；查询、导出均经过固定 FileBrowser 的真实 HTTP 处理器。
+- 输入 ZIP 为 18,156,370 字节，本次 SHA-256 为
+  `12a212577a83c38bf410e3512036da61955f1af66afe9e0e114f882493db5f29`。
+- 实际下载导出 ZIP 为 18,156,942 字节，本次 SHA-256 为
+  `c37cd162e6ec1432a843891685c544a8ada64760cf55e1319a711fc74fa4bb4d`；
+  下载字节数和哈希符合服务端导出结果，全部 12 个成员的大小与 SHA-256 符合输入清单。
+  ZIP 重新打包后的字节与哈希可以不同，断言并不要求两个 ZIP 容器逐字节相等。
+- 正式工具消息包含文本与原生图片；插件文件列表为空，子进程无 `PYTHONPATH`。
+- 两次当前任务调用共用一个 transport session，全部 8 次工具调用的 `_meta` 均为 `{}`，
+  拒绝哨兵结果 `trusted_task_context_missing` 被实际观察到。
+
+输入样本内容由固定生成器产生，ZIP 容器包含打包时间；以上哈希只标识该次检查的完整字节。
+最初的探针曾把工具描述误作完成回执，后续又未解析官方不可信文本包装，均准确报红。
+最终检查改为解析真实工具结果回执，并继续保留实际下载、完整 ZIP 和逐成员校验断言。
 
 当前共享官方 API 缺少必要的远程每任务可信关联，因而本候选没有进入当前任务 Artifact/Response
 发布与微信协议替身交付。业务身份错配、过期、跨会话和重放的完整端到端矩阵也未宣称通过。
