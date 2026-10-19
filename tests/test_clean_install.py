@@ -719,6 +719,33 @@ def test_core_operations_do_not_apply_or_recheck_business_identity(
         assert "business_read_only" in calls
 
 
+def test_base_diagnosis_checks_database_and_core_without_external_hermes(
+    installer, monkeypatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(installer, "database_ready", lambda: calls.append("database"))
+    monkeypatch.setattr(installer, "core_ready", lambda: calls.append("core"))
+    monkeypatch.setattr(installer, "business_status", lambda: calls.append("business_read_only"))
+    monkeypatch.setattr(
+        installer, "compose", lambda *a, **kw: pytest.fail("external Hermes diagnostic invoked")
+    )
+    installer.diagnose_base()
+    assert calls == ["database", "core", "business_read_only"]
+
+
+@pytest.mark.parametrize("failure", ["database_ready", "core_ready", "business_status"])
+def test_base_diagnosis_preserves_real_readiness_errors(installer, monkeypatch, failure) -> None:
+    for name in ("database_ready", "core_ready", "business_status"):
+        monkeypatch.setattr(installer, name, lambda: None)
+
+    def unavailable():
+        raise installer.InstallError("real-base-failure")
+
+    monkeypatch.setattr(installer, failure, unavailable)
+    with pytest.raises(installer.InstallError, match="real-base-failure"):
+        installer.diagnose_base()
+
+
 @pytest.mark.parametrize("invalid_identity", [None, [], False, {}, {"version": 1}])
 def test_explicit_bad_identity_is_rejected_before_configuration_is_saved(
     installer, tmp_path, monkeypatch, invalid_identity

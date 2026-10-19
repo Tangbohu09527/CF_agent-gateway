@@ -630,7 +630,7 @@ class Installer:
         if not FB.is_dir():
             raise SuiteError("FileBrowser component is not installed; status does not install it")
         self.fb("validate")
-        self.gateway("diagnose")
+        self.gateway("diagnose-base")
         print(
             json.dumps(
                 {
@@ -639,6 +639,7 @@ class Installer:
                     "employee": "pending-explicit-authorization",
                     "poll_delivery": "not-opened-by-installer",
                     "hermes_configuration_only_business": "not-yet-proven",
+                    "hermes_connectivity": "not-checked-by-base-installation",
                     "evidence_layer": "Debian-container-real-services-systemd-substitute"
                     if self.container_test
                     else "booted-Debian-host",

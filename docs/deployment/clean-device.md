@@ -190,6 +190,10 @@ Gateway/Dispatch，不要求员工、群聊或路由，不打开 Poll/Delivery�
 在空配置时报告 `business_state=awaiting_configuration`；这不是安装失败或业务链验收成功。
 数据库/迁移/配置损坏仍失败，`/ready` 及 Controller v1 原有含义不变。
 
+统一服务端入口使用 `diagnose-base`，只检查数据库、核心健康和业务配置；
+它不会在AI电脑尚未接入时发起Hermes连接。原 `diagnose` 仍执行独立Hermes网络检查，
+不会因基础安装成功而自动获得Hermes业务验收。
+
 可选 `initialize` 阶段保留给显式业务开通；无输入时只查数据库并报告待配置，有输入时沿用
 原业务服务和事务校验，错误绑定、冲突或已停用策略仍失败。基础 configure/database/migrate/start/
 diagnose/boot-service 不会重新应用它，也不会恢复后来停用的员工。业务文件路径不作为基础

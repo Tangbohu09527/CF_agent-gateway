@@ -128,6 +128,18 @@ class ImageResumeTests(unittest.TestCase):
             self.assertEqual(len(commands), 2)
 
 
+class BaseStatusTests(unittest.TestCase):
+    def test_base_readiness_does_not_require_an_external_hermes_connection(self):
+        installer = object.__new__(module.Installer)
+        installer.container_test = True
+        calls = []
+        installer.fb = lambda action: calls.append(("filebrowser", action))
+        installer.gateway = lambda stage: calls.append(("gateway", stage))
+        with patch.object(module, "FB", Path(__file__).parent):
+            installer.status()
+        self.assertEqual(calls, [("filebrowser", "validate"), ("gateway", "diagnose-base")])
+
+
 @unittest.skipUnless(os.name == "posix", "requires actual POSIX file modes; exercised by Linux CI")
 class CheckoutModeTests(unittest.TestCase):
     def test_https_mount_is_traversable_under_protected_installer_umask(self):

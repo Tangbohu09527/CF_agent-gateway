@@ -67,7 +67,11 @@ sudo bash deploy/install-server.sh status \
 ```
 
 Status does not clone missing components, log in or open gates. It invokes
-component diagnosis and may save a protected log. Private command logs may
+FileBrowser validation and Gateway's `diagnose-base` (database, core health and
+business configuration), and may save a protected log. It does not require or
+probe an AI computer before base installation can finish; Hermes connectivity
+and business acceptance remain separate. The original Gateway `diagnose` still
+performs its explicit external connectivity check. Private command logs may
 contain installation secrets: never publish them. Export only bounded, reviewed,
 redacted facts. Existing component backup/restore and upgrade runbooks remain
 authoritative; there is no destructive reset option.

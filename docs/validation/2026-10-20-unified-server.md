@@ -145,6 +145,20 @@ in the cross-repository closeout.
 
 ## Official Hermes pure-configuration result
 
+Run39318893826 at `89c1f046099fed77c9cffea7c8efbbd724c99270`
+completed all recorded install stages, including healthy HTTPS and FileBrowser.
+It then failed in Gateway `diagnose`, before the acceptance/repeat checks.
+The retained command excerpt reports the empty business configuration followed
+by `command_failed:docker`; it does not contain the nested diagnostic JSON.
+Source/input tracing shows that full `diagnose` always opens an external
+Hermes connection, while this base-install test deliberately configures an
+unavailable `.test` AI endpoint. A base installation must not depend on that
+separate AI-side acceptance. The next revision adds `diagnose-base`, reusing
+the same database/core/business checks without the external call; full
+`diagnose` keeps its existing behavior. A failing boundary regression was
+observed before the change; actual corrected installation is checked separately.
+No readiness, TLS or business-identity guard is bypassed.
+
 Dependency audit correction: the earlier successful probe installed a
 selected dependency subset, not official427's complete supported installation.
 Its Python3.12 Windows run is diagnostic only; official427 supports Python3.14.

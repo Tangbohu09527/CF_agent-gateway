@@ -42,6 +42,7 @@ STAGES = (
     "initialize",
     "start",
     "diagnose",
+    "diagnose-base",
     "boot-service",
 )
 
@@ -1080,10 +1081,14 @@ def start() -> None:
     once(STATE / "started.json", encoded({"gateway": "ready", "dispatch": "ready"}))
 
 
-def diagnose() -> None:
+def diagnose_base() -> None:
     database_ready()
     core_ready()
     business_status()
+
+
+def diagnose() -> None:
+    diagnose_base()
     # Default diagnostic makes no HTTP/business/model request.
     output = compose(["exec", "-T", "gateway", "python", "-m", "cf_agent_gateway.hermes.diagnose"])
     print(output)
@@ -1229,6 +1234,8 @@ def main(argv: list[str] | None = None) -> int:
                         start()
                     elif options.stage == "diagnose":
                         diagnose()
+                    elif options.stage == "diagnose-base":
+                        diagnose_base()
                     elif options.stage == "boot-service":
                         boot_service(options)
 
