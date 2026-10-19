@@ -68,6 +68,51 @@ def file_client():
     return api, api.Client("https://suite.test:18443", "/root/suite-inputs/ca.crt")
 
 
+def public_filebrowser_build(receipt):
+    records = [
+        json.loads(path.read_bytes()) for path in STATE.glob("filebrowser-build-*/image.json")
+    ]
+    selected = [
+        item
+        for item in records
+        if item.get("image_id") == receipt["image_id"]
+        and item.get("source_sha") == receipt["source_sha"]
+    ]
+    check(bool(selected), "fixed-source-build-receipt-missing")
+    record = selected[-1]
+    expected_bases = {
+        "FFMPEG_IMAGE": "gtstef/ffmpeg:8.1-decode",
+        "GO_IMAGE": "golang:alpine",
+        "NODE_IMAGE": "node:jod-slim",
+        "RUNTIME_IMAGE": "alpine:latest",
+    }
+    check(set(record["bases"]) == set(expected_bases), "unexpected-build-base-fields")
+    for key, reference in expected_bases.items():
+        base = record["bases"][key]
+        check(set(base) == {"requested", "digest", "image_id"}, "unexpected-build-base-receipt")
+        check(base["requested"] == reference, "unexpected-build-base-reference")
+        check(
+            re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", base["digest"])
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", base["image_id"]),
+            "invalid-public-base-digest",
+        )
+    check(
+        set(record["inputs"])
+        == {
+            "backend/go.mod",
+            "backend/go.sum",
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "_docker/Dockerfile",
+            "deploy/shared-host/compose.build.yaml",
+        }
+        and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in record["inputs"].values()),
+        "unexpected-build-input-receipt",
+    )
+    check(record["platform"] == "linux/amd64", "unexpected-build-platform")
+    return {key: record[key] for key in ("source_sha", "image_id", "platform", "bases", "inputs")}
+
+
 def request(client, method, endpoint, expected=(200,), **kwargs):
     reply = client.request(method, endpoint, **kwargs)
     check(reply.status in expected, "unexpected-api-status-" + str(reply.status))
@@ -325,6 +370,7 @@ def acceptance():
         public_receipts[name] = data
     result.update(
         image_receipts=public_receipts,
+        filebrowser_build=public_filebrowser_build(public_receipts["filebrowser"]),
         status="acceptance-passed-awaiting-repeat",
         bytes=len(payload),
         members=12,
