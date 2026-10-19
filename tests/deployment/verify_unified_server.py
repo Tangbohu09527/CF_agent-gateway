@@ -153,6 +153,7 @@ def acceptance():
         )
 
     admin = login("admin", password)
+    admin_self = request(client, "GET", "/api/users", token=admin, query={"id": "self"}).json()
     request(
         client,
         "POST",
@@ -193,6 +194,7 @@ def acceptance():
     ).json()["token"]
     who = request(client, "GET", "/api/users", token=session, query={"id": "self"}).json()
     check(who["permissions"]["admin"] is False, "ordinary-business-user-required")
+    check(who["id"] != admin_self["id"], "distinct-business-and-admin-identities")
     # About 18 MB, 12 deterministic non-business members. No real materials or model key.
     generator = random.Random(20261020)
     members = {f"商品测试/主图 ({i:02d}).bin": generator.randbytes(1_513_910) for i in range(12)}
@@ -229,13 +231,33 @@ def acceptance():
                 hashlib.sha256(archive.read(name)).digest() == hashlib.sha256(value).digest(),
                 "zip-member-bytes",
             )
+    # Preserve completed byte evidence even if a later, independent check fails.
+    result = json.loads(RESULT.read_bytes())
+    result.update(
+        status="acceptance-in-progress",
+        checkpoint="verified-HTTPS-ZIP-and-12-members",
+        bytes=len(payload),
+        members=12,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    save(result)
     request(
         client,
         "GET",
         "/api/resources",
         token=token,
-        expected=api.DENIED,
+        expected=(400,),
         query={"source": api.SOURCE, "path": "/../not-authorized"},
+    )
+    # A syntactically valid request for an existing different user must also
+    # fail authorization; a malformed path's 400 is not this separate proof.
+    request(
+        client,
+        "GET",
+        "/api/users",
+        token=token,
+        expected=(403,),
+        query={"id": str(admin_self["id"])},
     )
     request(
         client,
@@ -413,7 +435,7 @@ def acceptance():
             "management password sudo positive, locked, same password and sudo negative",
             "business credential still works",
             "real same-image service recreation retains file",
-            "bad token and path rejected",
+            "malformed path 400, wrong token denied, other existing user 403",
             "Poll/Delivery closed",
             "no WeChat runtime/login",
             "SQL UTC and log Asia/Shanghai",

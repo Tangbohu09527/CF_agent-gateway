@@ -159,6 +159,17 @@ the same database/core/business checks without the external call; full
 observed before the change; actual corrected installation is checked separately.
 No readiness, TLS or business-identity guard is bypassed.
 
+Run39321391785 at `5f3b63f167ecac825e014775aba2d0b925d1d19e`
+passed base diagnosis and reached actual strict-HTTPS upload/download and all
+12 member hashes. It then rejected the harness's traversal path with HTTP400,
+as the fixed FileBrowser resource handler specifies; the harness incorrectly
+allowed only401/403/404. The next test-only change requires exactly400 for
+this malformed input, separately requires403 for an ordinary token requesting
+the existing Admin user's record, and retains wrong-token rejection.
+Completed transfer facts are checkpointed before later independent checks.
+It does not change FileBrowser authorization, remove the traversal assertion,
+or count this failed run as complete revocation/recreation/repeat acceptance.
+
 Dependency audit correction: the earlier successful probe installed a
 selected dependency subset, not official427's complete supported installation.
 Its Python3.12 Windows run is diagnostic only; official427 supports Python3.14.
