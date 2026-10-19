@@ -1,0 +1,37 @@
+name: Unified server candidate
+on:
+  push:
+    paths: ['deploy/**', 'tests/deployment/*unified*', 'tests/test_unified_server_entry.py', '.github/workflows/unified-server.yml']
+  pull_request:
+    paths: ['deploy/**', 'tests/deployment/*unified*', 'tests/test_unified_server_entry.py', '.github/workflows/unified-server.yml']
+permissions:
+  contents: read
+concurrency:
+  group: unified-server-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  isolated-debian:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Targeted input and resume checks
+        run: python3 -m unittest discover -s tests -p test_unified_server_entry.py -v
+      - name: Run one formal entry in pristine Debian with an independent daemon
+        env:
+          GATEWAY_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVIDENCE_DIR: ${{ runner.temp }}/unified-server-evidence
+        run: bash tests/deployment/run_unified_server.sh
+      - name: Upload only bounded sanitized result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-server-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/unified-server-evidence/result.json
+            ${{ runner.temp }}/unified-server-evidence/debian-image.json
+            ${{ runner.temp }}/unified-server-evidence/container-progress.log
+          retention-days: 14

@@ -8,6 +8,7 @@ x-runtime: &runtime
   env_file:
     - ${CF_GATEWAY_ENV_FILE:-.env}
   environment: &runtime-environment
+    TZ: Asia/Shanghai
     CF_GATEWAY_CONFIG: /app/config/production.yaml
     CF_AGENT_GATEWAY_DATABASE_URL: ${CF_AGENT_GATEWAY_DATABASE_URL:?Set CF_AGENT_GATEWAY_DATABASE_URL to the production PostgreSQL URL}
     CF_GATEWAY_STARTUP_MIGRATION_MODE: check
@@ -33,7 +34,8 @@ services:
     <<: *runtime
     user: "0:0"
     env_file: []
-    environment: {}
+    environment:
+      TZ: Asia/Shanghai
     volumes:
       - runtime-heartbeats:/run/cf-agent-gateway
     tmpfs: []

@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: clean-device-${{ github.ref }}
+  group: clean-device-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

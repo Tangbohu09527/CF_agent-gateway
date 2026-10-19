@@ -6,7 +6,8 @@
 数据库资产仍由本仓库管理。已有安装升级请走 [production runbook](production.md)，
 不要用本安装器切换版本或重置凭据。
 
-当前 Hermes 安装来源、版本及包装层尚未核实，详见 [Hermes LAN 教程与缺少的输入](hermes-lan.md)。
+当前正式安装仍含项目桥接插件/EXE；本轮独立官方原生接入与缺口见[统一入口说明](unified-server.md)。
+历史通用配置入口见[Hermes LAN 教程](hermes-lan.md)，不能用旧未知段落否定后续固定证据。
 Gateway 的准备和下述 A 层隔离回归可以独立完成；真实 AI 主机安装和业务验收不能据此写成已完成。
 本页是后续新设备操作入口，不是已经现场部署的记录。
 
@@ -26,7 +27,8 @@ Gateway 安装步骤及历史现场成功记录不能单独替代此验收：
 
 当前本机已安装 `afcd5c875905a849a7636ccc22057b47da419dfe` 的 FileBridge 插件及
 `filebrowser-agentctl.exe`、`filebridge-inbound.exe`，属于现有业务桥接状态，**尚未符合
-上述最终新机标准**。当前步骤未提供 FileBrowser/Gateway/微信的统一正式安装入口；
+上述最终新机标准**。本轮新增的[统一服务端候选入口](unified-server.md)尚需按其准确提交的
+隔离安装及新机证据判断，不能把候选存在写成正式交付完成；
 官方 Hermes 加少量参数的独立新机路径和撤销临时授权后的完整业务持续运行仍待验收。
 正式工具加载、受控 ZIP Artifact 成功或管理授权撤销记录均不能独自证明这些条件已满足。
 现场安装及其证据边界见[产品 ZIP 验收记录](../validation/2026-10-18-enterprise-product-zip.md)。
@@ -187,6 +189,10 @@ managed 数据库由 `deploy/postgres/compose.yml` 的独立 `cf-agent-gateway-d
 Gateway/Dispatch，不要求员工、群聊或路由，不打开 Poll/Delivery。`diagnose` 读取当前业务服务，
 在空配置时报告 `business_state=awaiting_configuration`；这不是安装失败或业务链验收成功。
 数据库/迁移/配置损坏仍失败，`/ready` 及 Controller v1 原有含义不变。
+
+统一服务端入口使用 `diagnose-base`，只检查数据库、核心健康和业务配置；
+它不会在AI电脑尚未接入时发起Hermes连接。原 `diagnose` 仍执行独立Hermes网络检查，
+不会因基础安装成功而自动获得Hermes业务验收。
 
 可选 `initialize` 阶段保留给显式业务开通；无输入时只查数据库并报告待配置，有输入时沿用
 原业务服务和事务校验，错误绑定、冲突或已停用策略仍失败。基础 configure/database/migrate/start/

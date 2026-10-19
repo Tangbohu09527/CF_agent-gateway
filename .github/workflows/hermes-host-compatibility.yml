@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: hermes-host-${{ github.workflow }}-${{ github.ref }}
+  group: hermes-host-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

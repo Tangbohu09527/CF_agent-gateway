@@ -198,7 +198,7 @@ def test_production_heartbeat_volume_initializer_is_bounded_and_least_privilege(
     assert initializer["network_mode"] == "none"
     assert initializer["read_only"] is True
     assert initializer["env_file"] == []
-    assert initializer["environment"] == {}
+    assert initializer["environment"] == {"TZ": "Asia/Shanghai"}
     assert initializer["volumes"] == ["runtime-heartbeats:/run/cf-agent-gateway"]
     assert initializer["cap_drop"] == ["ALL"]
     assert set(initializer["cap_add"]) == {"CHOWN", "FOWNER"}

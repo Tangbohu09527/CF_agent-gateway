@@ -42,6 +42,7 @@ STAGES = (
     "initialize",
     "start",
     "diagnose",
+    "diagnose-base",
     "boot-service",
 )
 
@@ -55,7 +56,12 @@ def fail(code: str) -> None:
 
 
 def run(
-    args: list[str | Path], *, timeout: int = 300, cwd: Path | None = None, data: str | None = None
+    args: list[str | Path],
+    *,
+    timeout: int = 300,
+    cwd: Path | None = None,
+    data: str | None = None,
+    log_path: Path | None = None,
 ) -> str:
     # Do not inherit Compose overrides, proxy credentials, Python injection or
     # caller-controlled Docker endpoints. Output can contain secrets: never echo.
@@ -78,11 +84,16 @@ def run(
         start_new_session=True,
     )
     try:
-        output, _ = process.communicate(data, timeout=timeout)
+        output, error_output = process.communicate(data, timeout=timeout)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
         fail("command_timeout:" + Path(args[0]).name)
+    if log_path is not None:
+        # Optional unified-installer diagnostics are protected root-only files.
+        # They can contain generated installation credentials; never print or
+        # publish them. The caller must sanitize any separate evidence export.
+        once(log_path, output + "\n" + error_output)
     if process.returncode:
         fail("command_failed:" + Path(args[0]).name)
     return output.strip()
@@ -1070,10 +1081,14 @@ def start() -> None:
     once(STATE / "started.json", encoded({"gateway": "ready", "dispatch": "ready"}))
 
 
-def diagnose() -> None:
+def diagnose_base() -> None:
     database_ready()
     core_ready()
     business_status()
+
+
+def diagnose() -> None:
+    diagnose_base()
     # Default diagnostic makes no HTTP/business/model request.
     output = compose(["exec", "-T", "gateway", "python", "-m", "cf_agent_gateway.hermes.diagnose"])
     print(output)
@@ -1219,6 +1234,8 @@ def main(argv: list[str] | None = None) -> int:
                         start()
                     elif options.stage == "diagnose":
                         diagnose()
+                    elif options.stage == "diagnose-base":
+                        diagnose_base()
                     elif options.stage == "boot-service":
                         boot_service(options)
 
