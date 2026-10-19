@@ -56,11 +56,46 @@ Python 3.14.7 下 `tests/hermes_return_probe/requirements.txt` 加
 但 `PyJWT 2.15.1`、`httpx2 2.14.0`、`starlette 1.9.0` 分别偏离官方的
 `2.13.0`、`2.7.0`、`1.3.1`。同时缺少多项官方 core 包。
 因此不能说旧探针满足完整官方依赖或证明正式官方安装通过；它只证明所记录子集环境中的
-真实源码加载、处理器执行与链路边界。新正式依赖环境的准确 CI 结果须另列。
+真实源码加载、处理器执行与链路边界。下节另列修正后的官方完整依赖环境结果。
 
 固定官方 `pyproject.toml:10–15` 明确只支持 Python 3.14 运行时；
 `requires-python >=3.11,<3.15` 是旧安装升级兼容桥。下面 Windows Python 3.12 的结果
 只保留为非标准运行时诊断，不作为官方支持基线验收。
+
+## 官方完整依赖环境的复核结果
+
+Linux 检查 `39315976156` 于 2026-10-20 04:06（Asia/Shanghai）成功，适用代码提交
+`eac246359e8baa7fe97c253cd13cd9f0667949b0`。CI 检出的 PR 合并提交为
+`cf46b38970e05b6c58b7e263df9e92afee0d0d8b`；通过 GitHub Git API 核对，两者 tree
+均为 `b3903ee0e14a5636779dd1fdebb0c001e00113df`。重复触发的 `39315969085`
+被并发策略取消，不计作通过。
+
+已下载并检查本次 `dependency-summary.json` 与 `safe-summary.json`：
+
+- 官方依赖安装阶段退出码为 0，使用 PM 锁定的 Python `3.14.7+20260901` 和默认 `[all]`。
+  递归展开包含 `acp/all/cron/google/mcp/pty/sms/uvloop/web/youtube`；53 条适用需求
+  全部满足，`missing`、`mismatches` 均为空，官方源码干净。
+- 实际版本包括 MCP `2.0.0`、`httpx2 2.7.0`、`starlette 1.3.1`、`PyJWT 2.13.0`、
+  Pillow `12.3.0`、OpenAI `2.24.0`、Pydantic `2.13.4`，完整实际包版本记录在依赖摘要。
+- 官方输入 SHA-256：`pyproject.toml` 为
+  `62541c282d5d4b1c4b43c02f3072477597ef024b28a3d1bd3acadd29934f050d`，
+  `uv.lock` 为 `7f337b67943cbb287651761c8b40a2d8e1e595b5aff47dd7deb2683717c3be41`，
+  `pm/lock.json` 为 `49b79259220160f147255078a19af541a5f328d3871c8041cc1eb909d19eb549`。
+- `boundary_probe_passed: true`，两路 API 均为 200，模型调用 14 次、错误为空；
+  `content_probe`、`employee_query_probe`、`employee_export_probe`、`query_current_task`
+  各经官方实际处理器执行两次，合成文本和原生 PNG 进入正式工具消息。
+- 查询、导出均各两次经过固定 FileBrowser 的普通用户 TLS HTTP fixture；本次输入 ZIP
+  为 18,156,370 字节，SHA-256
+  `2f63163f6265c9d7026f8fd5793ad6e099182eedb42ecede55bc9a0237e90a74`。
+  下载导出 ZIP 为 18,156,942 字节，SHA-256
+  `c37cd162e6ec1432a843891685c544a8ada64760cf55e1319a711fc74fa4bb4d`；
+  全部 12 个成员的大小与 SHA-256 符合输入清单，`members_bytes_verified: true`。
+- 项目插件为空、子进程无 `PYTHONPATH`；两个当前任务调用仍共用一个 MCP transport，
+  全部 8 次 `tools/call` 的 `_meta` 仍为 `{}`，实际收到 `trusted_task_context_missing`。
+  `task_return_authorized: false`，微信阶段未进入。
+
+本次结果补齐官方完整 Python 依赖基线，但仍只执行安装器依赖阶段；不代表完整安装器、
+新电脑安装、当前 Gateway 任务回传或微信交付验收通过。
 
 ## 已直接证明的边界
 
