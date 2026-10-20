@@ -35,6 +35,7 @@ _MODEL_MODULES = (
     "cf_agent_gateway.context.snapshot_models",
     "cf_agent_gateway.inbound.models",
     "cf_agent_gateway.inbound.host_binding_models",
+    "cf_agent_gateway.profile_b.models",
 )
 
 
@@ -49,7 +50,7 @@ class DatabaseSchemaError(RuntimeError):
 _POSTGRES_MIGRATION_LOCK_ID = int.from_bytes(b"CFAGMIGR", byteorder="big", signed=True)
 _SQLITE_MIGRATION_THREAD_LOCK = Lock()
 _PACKAGED_SCRIPT_LOCATION = "cf_agent_gateway:migrations"
-_EXPECTED_MIGRATION_HEAD = "20261018_01"
+_EXPECTED_MIGRATION_HEAD = "20261020_01"
 
 
 def create_database_engine(url: str) -> Engine:
