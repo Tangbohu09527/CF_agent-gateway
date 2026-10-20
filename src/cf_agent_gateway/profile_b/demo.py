@@ -24,6 +24,7 @@ def isolated_environment(home: Path, tools: Path, os_home: Path):
         for k in (
             "SYSTEMROOT",
             "SYSTEMDRIVE",
+            "LD_LIBRARY_PATH",
             "WINDIR",
             "COMSPEC",
             "PATHEXT",
@@ -140,7 +141,7 @@ def main():
             raise RuntimeError("official Hermes readiness timeout")
         client.close()
         if not args.node_only:
-            web_env = dict(os.environ)
+            web_env = dict(env)
             web_env.update(
                 {
                     "CF_PROFILE_B_RUNTIME": str(runtime),

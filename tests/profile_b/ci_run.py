@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -65,6 +66,27 @@ def main():
             except subprocess.TimeoutExpired:
                 process.terminate()
                 process.wait(timeout=15)
+            if sys.exc_info()[0] is not None:
+                secrets_file = runtime / "demo-secrets.json"
+                keys = (
+                    json.loads(secrets_file.read_text(encoding="utf-8"))
+                    if secrets_file.exists()
+                    else {}
+                )
+                diagnostics = {}
+                for name in ("supervisor.log", "gateway.log", "hermes.log"):
+                    file = runtime / name
+                    if file.exists():
+                        text = "\n".join(
+                            file.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]
+                        )
+                        for secret in keys.values():
+                            text = text.replace(secret, "[REDACTED_TEST_CREDENTIAL]")
+                        diagnostics[name] = text
+                (runtime / "diagnostics.json").write_text(
+                    json.dumps(diagnostics, indent=2), encoding="utf-8"
+                )
+                print(json.dumps(diagnostics))
     return 0
 
 
