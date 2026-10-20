@@ -29,7 +29,7 @@ cd D:\Tangbohu09527\.cf-worktrees\profile-b-management\CF_agent-gateway
 & D:\Tangbohu09527\.cf-worktrees\profile-b-management\CF_agent-gateway\scripts\profile-b\stop.ps1
 ```
 
-停止脚本仅写本轮运行目录的停止信号，由监督器关闭自己记录的子进程。`owned-processes.json`、`stopped.json` 可核对 PID 和结果。源码、数据库、官方依赖都保留；无需重新安装。不要删除 `runtime/hermes-home/installs`，它是已核验的隔离依赖。要另做空白演示可用 `start.ps1 -Runtime <新的绝对目录>`，不删除当前数据。
+停止脚本仅写本轮运行目录的停止信号，由监督器关闭自己记录的子进程。`owned-processes.json`、`stopped.json` 可核对 PID 和结果。源码、数据库、官方依赖都保留；无需重新安装。不要删除 `..\runtime\hermes-home\installs`，它是已核验的隔离依赖。要另做空白演示，先停止默认演示，再用 `start.ps1 -Runtime <新的绝对目录>`，不删除当前数据；停止该演示时也须传 `stop.ps1 -Runtime <同一绝对目录>`。
 
 默认端口：管理 Web/Gateway 18760、模型替身 18761、官方 Hermes serve 18762，全部绑定 127.0.0.1。它们都是本轮前台监督器的资源。默认 Gateway 主入口不启用新管理路由、不自动启用微信，也不迁移员工或会话。
 
@@ -56,7 +56,10 @@ cd D:\Tangbohu09527\.cf-worktrees\profile-b-management\CF_agent-gateway
 # 已准备的隔离 Gateway 环境
 & .\.venv\Scripts\python.exe -m pytest -q tests\profile_b
 
-# browser.cjs 要求空白隔离数据库；restart.cjs 使用已完成 native 检查的数据
+# browser.cjs 要求空白隔离数据库；restart.cjs 使用已完成 native 检查的数据。
+# 先停止默认演示，在另一终端运行以下命令，等待 ready 后再执行浏览器测试：
+# & .\scripts\profile-b\start.ps1 -Runtime '<空白演示运行目录>'
+# 此后停止也传同一目录：stop.ps1 -Runtime '<空白演示运行目录>'
 $env:NODE_PATH='C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
 $env:CF_BROWSER_CHANNEL='msedge'
 $env:CF_PROFILE_B_RUNTIME='<空白演示运行目录>'
