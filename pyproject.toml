@@ -17,6 +17,7 @@ dependencies = [
   "PyYAML>=6.0,<7.0",
   "SQLAlchemy>=2.0,<3.0",
   "uvicorn[standard]>=0.34,<1.0",
+  "websockets>=15,<18",
 ]
 
 [project.scripts]
@@ -45,6 +46,7 @@ where = ["src"]
   "script.py.mako",
   "versions/*.py",
 ]
+"cf_agent_gateway.profile_b" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

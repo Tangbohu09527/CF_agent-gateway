@@ -1,0 +1,62 @@
+name: Profile B official Hermes and real browser
+on:
+  push:
+    branches: [codex/feat-profile-b-management]
+  pull_request:
+    paths: ['src/cf_agent_gateway/profile_b/**', 'tests/profile_b/**', '.github/workflows/profile-b-native.yml']
+permissions:
+  contents: read
+concurrency:
+  group: profile-b-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  official-profile-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 427d605d4985c2d49a795493ef6c5d66413057d1
+          path: .pytest_cache/profile-b/official
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.7'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare isolated Gateway and browser
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          npm install --prefix "$RUNNER_TEMP/profile-browser" playwright@1.56.1
+          "$RUNNER_TEMP/profile-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Official installer and full locked dependency audit
+        run: .venv/bin/python tests/profile_b/ci_install.py .pytest_cache/profile-b/official .pytest_cache/profile-b/deps
+      - name: Actual management page, Profile routing, persistence and failure recovery
+        env:
+          NODE_PATH: ${{ runner.temp }}/profile-browser/node_modules
+        run: >-
+          .venv/bin/python tests/profile_b/ci_run.py
+          --runtime .pytest_cache/profile-b/demo
+          --hermes-source .pytest_cache/profile-b/official
+          --hermes-python "$CF_OFFICIAL_PROFILE_PYTHON"
+      - name: Preserve sanitized evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-b-real-components-${{ github.sha }}
+          path: |
+            .pytest_cache/profile-b/deps/dependency-summary.json
+            .pytest_cache/profile-b/demo/browser-evidence/*.png
+            .pytest_cache/profile-b/demo/browser-evidence/result.json
+            .pytest_cache/profile-b/demo/browser-evidence/failure.json
+            .pytest_cache/profile-b/demo/native-result.json
+            .pytest_cache/profile-b/demo/stopped.json
+            .pytest_cache/profile-b/demo/diagnostics.json
+          if-no-files-found: warn
+          retention-days: 14
