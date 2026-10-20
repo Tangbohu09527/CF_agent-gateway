@@ -1,0 +1,3 @@
+# Exact historical false positive: SQLAlchemy parameter names after a generated DB lease token.
+# No credential literal exists at this line; all other commits/files/rules remain scanned.
+24769287bfb636bc92f6a5b03b3793be581be028:src/cf_agent_gateway/profile_b/service.py:generic-api-key:372

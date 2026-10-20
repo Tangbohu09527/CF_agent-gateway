@@ -369,7 +369,7 @@ class Service:
             update(DerivedProfile)
             .where(DerivedProfile.id == binding_id, DerivedProfile.operation_token.is_(None))
             .values(
-                operation_token=token, operation_until=now + timedelta(minutes=10), status=status
+                operation_until=now + timedelta(minutes=10), status=status, operation_token=token
             )
         )
         self.commit()
