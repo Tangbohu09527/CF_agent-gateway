@@ -106,7 +106,7 @@ def main():
     try:
         child = subprocess.Popen(
             [
-                str(args.hermes_python.resolve()),
+                str(args.hermes_python.absolute()),
                 "-B",
                 "-m",
                 "hermes_cli.main",

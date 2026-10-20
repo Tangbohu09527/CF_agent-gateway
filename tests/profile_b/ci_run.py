@@ -19,6 +19,23 @@ def main():
     parser.add_argument("--hermes-source", type=Path, required=True)
     parser.add_argument("--hermes-python", type=Path, required=True)
     args = parser.parse_args()
+    # On POSIX the venv entrypoint is a symlink: resolving it selects base Python.
+    hermes_python = args.hermes_python.absolute()
+    interpreter = json.loads(
+        subprocess.check_output(
+            [
+                str(hermes_python),
+                "-I",
+                "-c",
+                "import json, sys; import ruamel.yaml; "
+                "print(json.dumps({'prefix': sys.prefix, 'base_prefix': sys.base_prefix}))",
+            ],
+            text=True,
+            timeout=30,
+        )
+    )
+    assert Path(interpreter["prefix"]).resolve() == hermes_python.parent.parent.resolve()
+    assert interpreter["prefix"] != interpreter["base_prefix"]
     runtime = args.runtime.resolve()
     runtime.mkdir(parents=True, exist_ok=True)
     with (runtime / "supervisor.log").open("w", encoding="utf-8") as log:
@@ -32,7 +49,7 @@ def main():
                 "--hermes-source",
                 str(args.hermes_source.resolve()),
                 "--hermes-python",
-                str(args.hermes_python.resolve()),
+                str(hermes_python),
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
