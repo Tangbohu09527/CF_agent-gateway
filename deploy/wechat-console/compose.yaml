@@ -48,6 +48,11 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]
+    healthcheck:
+      test: [CMD, nginx, -t]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 networks:
   upstream_read:
     external: true

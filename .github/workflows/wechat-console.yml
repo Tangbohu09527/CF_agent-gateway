@@ -26,11 +26,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CF_CONSOLE_RUNTIME: ${{ runner.temp }}/wechat-console-demo
       CF_CONSOLE_ORIGIN: http://127.0.0.1:18770
       CF_BROWSER_CHANNEL: chromium
-      NODE_PATH: ${{ runner.temp }}/wechat-console-browser/node_modules
     steps:
+      - name: Initialize isolated runner paths
+        shell: bash
+        run: |
+          export CF_CONSOLE_RUNTIME="$RUNNER_TEMP/wechat-console-demo"
+          export NODE_PATH="$RUNNER_TEMP/wechat-console-browser/node_modules"
+          printf '%s\n' "CF_CONSOLE_RUNTIME=$CF_CONSOLE_RUNTIME" "NODE_PATH=$NODE_PATH" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -183,19 +187,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      CF_CONSOLE_HTTPS_ROOT: ${{ runner.temp }}/wechat-console-https
       CANDIDATE_REVISION: ${{ github.sha }}
       CONSOLE_PROJECT: cf-console-https-${{ github.run_id }}-${{ github.run_attempt }}
       CONSOLE_NETWORK: cf-console-https-${{ github.run_id }}-${{ github.run_attempt }}
-      CONSOLE_RUNTIME: ${{ runner.temp }}/wechat-console-https/runtime
-      CONSOLE_SECRET_ENV: ${{ runner.temp }}/wechat-console-https/empty.env
-      CONSOLE_TLS_DIRECTORY: ${{ runner.temp }}/wechat-console-https/tls
       CONSOLE_BIND_IP: 127.0.0.1
       CONSOLE_PORT: '18770'
       CONSOLE_TLS_BIND_IP: 127.0.0.1
       CONSOLE_TLS_PORT: '18445'
       CONSOLE_PROXY_IMAGE: nginx:stable
     steps:
+      - name: Initialize isolated HTTPS runner paths
+        shell: bash
+        run: |
+          export CF_CONSOLE_HTTPS_ROOT="$RUNNER_TEMP/wechat-console-https"
+          export CONSOLE_RUNTIME="$CF_CONSOLE_HTTPS_ROOT/runtime"
+          export CONSOLE_SECRET_ENV="$CF_CONSOLE_HTTPS_ROOT/empty.env"
+          export CONSOLE_TLS_DIRECTORY="$CF_CONSOLE_HTTPS_ROOT/tls"
+          printf '%s\n' "CF_CONSOLE_HTTPS_ROOT=$CF_CONSOLE_HTTPS_ROOT" \
+            "CONSOLE_RUNTIME=$CONSOLE_RUNTIME" "CONSOLE_SECRET_ENV=$CONSOLE_SECRET_ENV" \
+            "CONSOLE_TLS_DIRECTORY=$CONSOLE_TLS_DIRECTORY" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
