@@ -107,7 +107,9 @@ def test_supervisor_stopped_exit_three_can_start_only_fixed_program(monkeypatch)
 
 def test_login_requires_fresh_observed_upstream_guard_not_operator_flag(h):
     from datetime import timedelta
+
     from fastapi import HTTPException
+
     from cf_agent_gateway.management_console.live_models import LiveObservation
     from cf_agent_gateway.management_console.service import now
 
