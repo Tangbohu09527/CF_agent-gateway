@@ -1,0 +1,6 @@
+# Optional, only after the root-owned fixed controller is explicitly installed.
+# The Web gets this narrow socket directory, never Docker's socket.
+services:
+  console:
+    volumes:
+      - /run/cf-wechat-console-control:/run/cf-wechat-console-control:ro

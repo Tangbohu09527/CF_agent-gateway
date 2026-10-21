@@ -1,0 +1,12 @@
+{
+  "socket": "/run/cf-wechat-console-control/controller.sock",
+  "allowed_uid": 10001,
+  "allowed_gid": 10001,
+  "wechat_container": "cf-agent-wechat",
+  "wechat_image_id": "replace-with-verified-exact-sha256-image-id",
+  "workers": {
+    "poll": "cf-agent-gateway-worker-1",
+    "dispatch": "cf-agent-gateway-dispatch-worker-1",
+    "delivery": "cf-agent-gateway-delivery-worker-1"
+  }
+}

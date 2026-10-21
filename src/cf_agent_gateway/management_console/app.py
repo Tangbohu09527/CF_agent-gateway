@@ -18,8 +18,11 @@ from cf_agent_gateway.admin.auth import enforce_admin_request_body_limit, requir
 from cf_agent_gateway.database import get_database_session
 from cf_agent_gateway.management_console import auth
 from cf_agent_gateway.management_console.avatars import fetch_avatar
+from cf_agent_gateway.management_console.live import install_live_routes
 from cf_agent_gateway.management_console.models import DirectorySource
+from cf_agent_gateway.management_console.nodes import install_node_routes
 from cf_agent_gateway.management_console.service import ConsoleService
+from cf_agent_gateway.management_console.service_control import install_service_routes
 from cf_agent_gateway.management_console.upstream import SourceError
 from cf_agent_gateway.profile_b.app import install_management
 from cf_agent_gateway.profile_b.models import ManagementAudit
@@ -63,6 +66,9 @@ def install_console(app, config):
         allow_test_messages=False,
     )
     profile_state = app.state.profile_b_state
+    live = install_live_routes(app, config)
+    install_service_routes(app, config, live)
+    install_node_routes(app, config)
     database_session = Depends(get_database_session)
     failed_logins = {}
 

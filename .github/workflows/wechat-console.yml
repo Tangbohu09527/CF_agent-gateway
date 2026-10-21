@@ -3,7 +3,7 @@ name: WeChat console synthetic source and real browser
 on:
   workflow_dispatch:
   push:
-    branches: [codex/feat-wechat-management-console]
+    branches: [codex/feat-wechat-management-console, codex/feat-console-live-operations]
   pull_request:
     paths:
       - src/cf_agent_gateway/management_console/**
@@ -47,7 +47,7 @@ jobs:
       - name: Install isolated Gateway and pinned browser dependencies
         run: |
           python -m venv "$RUNNER_TEMP/wechat-console-python"
-          "$RUNNER_TEMP/wechat-console-python/bin/python" -m pip install -e .
+          "$RUNNER_TEMP/wechat-console-python/bin/python" -m pip install -e ".[dev]"
           npm install --prefix "$RUNNER_TEMP/wechat-console-browser" playwright@1.56.1
           test "$(node -p "require('playwright/package.json').version")" = "1.56.1"
           "$RUNNER_TEMP/wechat-console-browser/node_modules/.bin/playwright" install --with-deps chromium
@@ -142,6 +142,34 @@ jobs:
                       assert audit['owned_children_stopped'], 'owned synthetic peer cleanup unconfirmed'
                       assert read_only, 'native source request exceeded read-only allowlist'
           PY
+      - name: AI host wizard and live archive through real candidate pages
+        shell: bash
+        run: |
+          CF_CONSOLE_RUNTIME="$RUNNER_TEMP/console-nodes" CF_CONSOLE_ORIGIN=http://127.0.0.1:18870 \
+            "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/nodes_browser_runner.py
+          CF_CONSOLE_RUNTIME="$RUNNER_TEMP/console-live" \
+            "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/live_browser_runner.py
+          docker pull python:3.12-slim
+          "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/controller_linux_smoke.py
+      - name: Preserve allowlisted nodes and live synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-live-and-nodes-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/console-control-result.json
+            ${{ runner.temp }}/console-nodes/nodes-browser-evidence/nodes-result.json
+            ${{ runner.temp }}/console-nodes/nodes-browser-evidence/peer-summary.json
+            ${{ runner.temp }}/console-nodes/nodes-browser-evidence/nodes-1920-synthetic.png
+            ${{ runner.temp }}/console-nodes/nodes-browser-evidence/node-wizard-current-1440-synthetic.png
+            ${{ runner.temp }}/console-nodes/nodes-browser-evidence/node-check-1440-synthetic.png
+            ${{ runner.temp }}/console-live/live-browser-evidence/live-result.json
+            ${{ runner.temp }}/console-live/live-browser-evidence/peer-summary.json
+            ${{ runner.temp }}/console-live/live-browser-evidence/live-history-1440-synthetic.png
+            ${{ runner.temp }}/console-live/live-browser-evidence/live-system-1440-synthetic.png
+            ${{ runner.temp }}/console-live/live-browser-evidence/live-chat-1920-synthetic.png
+          if-no-files-found: warn
+          retention-days: 14
       - name: Confirm evidence contains no generated administrator secret
         if: always()
         shell: python

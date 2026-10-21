@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -504,12 +506,118 @@ class ConsoleService:
     def messages(
         self, key, source_id, *, q="", sender="", date_from=None, date_to=None, offset=0, limit=40
     ):
+        values = dict(q=q, sender=sender, date_from=date_from, date_to=date_to)
+        if self.config.mode == "demo":
+            return self.archive_messages(key, source_id, offset=offset, limit=limit, **values)
+        historical = self.archive_messages(key, source_id, offset=0, limit=offset + limit, **values)
+        suffix = self.archive_messages(
+            key,
+            source_id,
+            offset=0,
+            limit=offset + limit,
+            local=True,
+            exclude_events=self.history_overlap(key, source_id),
+            **values,
+        )
+        # The candidate archive owns only newly observed messages; formal history
+        # remains a read-only partition. Preserve physical identity when reconciling.
+        combined = {x.get("event_id") or x["id"]: x for x in historical["items"]}
+        combined.update({x.get("event_id") or x["id"]: x for x in suffix["items"]})
+        # Match each partition's stable at DESC / kind ASC / id ASC ordering,
+        # including multiple distinct messages in the same second.
+        items = sorted(
+            combined.values(),
+            key=lambda x: (
+                x["id"].startswith("r:"),
+                x["id"].split(":", 1)[-1],
+                x["id"],
+            ),
+        )
+        items.sort(key=lambda x: x["occurred_at"], reverse=True)
+        senders = {
+            x["id"]: x
+            for x in historical.get("sender_options", []) + suffix.get("sender_options", [])
+        }
+        total = historical["total"] + suffix["total"]
+        return {
+            **historical,
+            "items": items[offset : offset + limit],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "sender_options": list(senders.values()),
+            "status": "ok" if total else historical["status"],
+            "coverage": ARCHIVE_COVERAGE + " 候选仅归档增量与正式只读历史合并；不改变正式派发。",
+        }
+
+    def history_overlap(self, key, source_id):
+        """Compare stable event identities, never message bodies or display names.
+
+        The normal owner guard keeps partitions disjoint. If formal collection
+        resumes later, count and paginate duplicates across the whole partition,
+        rather than subtracting only the currently displayed page.
+        """
+        entry = self.entry(key)
+        rows = self.s.scalars(
+            select(Message.event_id).where(
+                Message.source == self.platform,
+                Message.source_account_id == entry.account_id,
+                Message.conversation_id == entry.username,
+            )
+        ).yield_per(400)
+        overlap = []
+        with self.config.archive(source_id, self.s) as archive:
+            if archive is None:
+                return overlap
+            batch = []
+            for event in rows:
+                batch.append(event)
+                if len(batch) == 400:
+                    overlap.extend(
+                        archive.scalars(
+                            select(Message.event_id).where(
+                                Message.source == self.platform,
+                                Message.source_account_id == entry.account_id,
+                                Message.conversation_id == entry.username,
+                                Message.event_id.in_(batch),
+                            )
+                        )
+                    )
+                    batch = []
+            if batch:
+                overlap.extend(
+                    archive.scalars(
+                        select(Message.event_id).where(
+                            Message.source == self.platform,
+                            Message.source_account_id == entry.account_id,
+                            Message.conversation_id == entry.username,
+                            Message.event_id.in_(batch),
+                        )
+                    )
+                )
+        return overlap
+
+    def archive_messages(
+        self,
+        key,
+        source_id,
+        *,
+        q="",
+        sender="",
+        date_from=None,
+        date_to=None,
+        offset=0,
+        limit=40,
+        local=False,
+        exclude_events=(),
+    ):
         entry = self.entry(key)
         if entry.source_id != source_id:
             raise ManagementError("source_conversation_binding_mismatch", 403)
         if self.source(source_id).last_sync_at is None:
             return page_result([], 0, offset, limit, coverage=ARCHIVE_COVERAGE, status="not_synced")
-        with self.config.archive(source_id, self.s) as archive:
+        context = nullcontext(self.s) if local else self.config.archive(source_id, self.s)
+        with context as archive:
             if archive is None:
                 return page_result(
                     [], 0, offset, limit, coverage=ARCHIVE_COVERAGE, status="archive_not_configured"
@@ -519,6 +627,14 @@ class ConsoleService:
                 Message.source_account_id == entry.account_id,
                 Message.conversation_id == entry.username,
             ]
+            if exclude_events:
+                # The candidate runtime uses SQLite. One JSON parameter avoids
+                # SQLite's bind-variable ceiling after a long overlap interval.
+                if archive.bind.dialect.name == "sqlite":
+                    excluded = func.json_each(json.dumps(exclude_events)).table_valued("value")
+                    conditions.append(Message.event_id.not_in(select(excluded.c.value)))
+                else:
+                    conditions.append(Message.event_id.not_in(exclude_events))
             sender_rows = archive.execute(
                 select(Message.sender_id, func.max(Message.sender_name))
                 .where(*conditions, Message.sender_id.is_not(None))
@@ -625,6 +741,9 @@ class ConsoleService:
             items = [
                 self.message_view(archive, entry, kind, identity) for kind, identity, _ in rows
             ]
+            if local:
+                for item in items:
+                    item["id"] = "live:" + item["id"].removeprefix("m:")
             return page_result(
                 items,
                 total,
@@ -659,6 +778,7 @@ class ConsoleService:
             ]
             return {
                 "id": "m:" + identity,
+                "event_id": message.event_id,
                 "content": message.content,
                 "message_type": message.message_type,
                 "sender_id": message.sender_id,

@@ -1,7 +1,7 @@
 """Allowlisted native read operations only; never open chats, fetch media or send."""
 
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -52,6 +52,23 @@ class NativeReader:
         if isinstance(value, dict) and (value.get("success") is False or value.get("error")):
             raise SourceError("source_read_failed")
         return value
+
+    def messages(self, chat_id, limit=200):
+        """Metadata/text only. Never opens a chat, clears unread or fetches media."""
+        if not isinstance(chat_id, str) or not 0 < len(chat_id) <= 255:
+            raise SourceError("source_chat_identity_invalid")
+        try:
+            response = self.client.get(
+                "api/messages/" + quote(chat_id, safe=""), params={"limit": limit, "offset": 0}
+            )
+            if response.status_code != 200:
+                raise SourceError("source_messages_read_failed")
+            value = response.json()
+            if not isinstance(value, list) or len(value) > limit:
+                raise SourceError("source_messages_contract_invalid")
+            return value
+        except (httpx.HTTPError, ValueError):
+            raise SourceError("source_messages_connection_failed") from None
 
     def account(self, *, allow_stored=False):
         value = self.read("api/status/auth")

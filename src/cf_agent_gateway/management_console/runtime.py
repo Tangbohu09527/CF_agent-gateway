@@ -43,6 +43,11 @@ def build_config(runtime, mode, peer_port, browser_test=False):
     if mode == "demo":
         token = secrets.token_urlsafe(36)
         peer = DemoPeer(peer_port, token)
+        if browser_test:
+            (runtime / "browser-peer.json").write_text(
+                json.dumps({"url": f"http://127.0.0.1:{peer_port}", "token": token}),
+                encoding="utf-8",
+            )
         sources = {
             "demo-primary": SourceConnection(
                 "演示 Bot · 合成数据", f"http://127.0.0.1:{peer_port}/", token
@@ -132,7 +137,11 @@ def main():
                 if peer:
                     seed_archive(session)
                     ConsoleService(session, config).sync("demo-primary")
-            yield
+            app.state.console_live.start()
+            try:
+                yield
+            finally:
+                app.state.console_live.stop()
 
     app.router.lifespan_context = candidate_lifespan
 
