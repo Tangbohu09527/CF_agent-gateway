@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "deployed_revision": "caabee739f92ea2c927d318be88264a00de90a20",
+  "strict_https_after_restart": true,
+  "same_cookie_session_survives": true,
+  "candidate_configuration_retained": true,
+  "directory_identity_and_details_retained": true,
+  "production_container_identities_unchanged": true
+}
