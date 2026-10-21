@@ -73,6 +73,7 @@ SCHEMA_TABLES = (
     | DISPATCH_RECOVERY_TABLES
     | ADMISSION_TABLES
     | {"inbound_media_jobs", "inbound_host_bindings"}
+    | {"console_sources", "console_directory", "console_sessions"}
     | {
         "profile_b_templates",
         "profile_b_template_versions",
@@ -103,7 +104,7 @@ RUNTIME_RECOVERY_REVISION = "20260823_04"
 def _head_revision() -> str:
     migration_config = migration.create_migration_config()
     head_revision = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert head_revision == "20261020_01"
+    assert head_revision == "20261021_01"
     return head_revision
 
 

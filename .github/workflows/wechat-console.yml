@@ -1,0 +1,480 @@
+name: WeChat console synthetic source and real browser
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/feat-wechat-management-console]
+  pull_request:
+    paths:
+      - src/cf_agent_gateway/management_console/**
+      - src/cf_agent_gateway/profile_b/**
+      - src/cf_agent_gateway/database.py
+      - src/cf_agent_gateway/migrations/**
+      - tests/management_console/**
+      - .github/workflows/wechat-console.yml
+      - pyproject.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wechat-console-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-console-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CF_CONSOLE_RUNTIME: ${{ runner.temp }}/wechat-console-demo
+      CF_CONSOLE_ORIGIN: http://127.0.0.1:18770
+      CF_BROWSER_CHANNEL: chromium
+      NODE_PATH: ${{ runner.temp }}/wechat-console-browser/node_modules
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install isolated Gateway and pinned browser dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/wechat-console-python"
+          "$RUNNER_TEMP/wechat-console-python/bin/python" -m pip install -e .
+          npm install --prefix "$RUNNER_TEMP/wechat-console-browser" playwright@1.56.1
+          test "$(node -p "require('playwright/package.json').version")" = "1.56.1"
+          "$RUNNER_TEMP/wechat-console-browser/node_modules/.bin/playwright" install --with-deps chromium
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
+      - name: Real Web and database with loopback synthetic native HTTP source
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/wechat-console-python/bin/python" - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+          from collections import Counter
+          from pathlib import Path
+
+          import httpx
+
+          runtime = Path(os.environ['CF_CONSOLE_RUNTIME'])
+          runtime.mkdir(mode=0o700, parents=True, exist_ok=False)
+          evidence = runtime / 'browser-evidence'
+          evidence.mkdir()
+          browser_status = 'not_started'
+          process = None
+          with (runtime / 'candidate.log').open('w', encoding='utf-8') as log:
+              try:
+                  process = subprocess.Popen([
+                      sys.executable, '-m', 'cf_agent_gateway.management_console.runtime',
+                      'serve', '--runtime', str(runtime), '--mode', 'demo',
+                      '--host', '127.0.0.1', '--port', '18770', '--peer-port', '18771',
+                      '--browser-test',
+                  ], stdout=log, stderr=subprocess.STDOUT)
+                  with httpx.Client(trust_env=False, timeout=2) as client:
+                      for _ in range(120):
+                          if process.poll() is not None:
+                              raise RuntimeError('synthetic candidate exited before readiness')
+                          try:
+                              if client.get(os.environ['CF_CONSOLE_ORIGIN'] + '/console').status_code == 200:
+                                  break
+                          except httpx.HTTPError:
+                              pass
+                          time.sleep(0.5)
+                      else:
+                          raise RuntimeError('synthetic candidate readiness timeout')
+                  env = dict(os.environ)
+                  env.pop('CF_CONSOLE_UX_ONLY', None)
+                  env.pop('CF_CONSOLE_SCREENSHOTS_ONLY', None)
+                  browser_status = 'running_full_flow'
+                  subprocess.run(['node', 'tests/management_console/browser.cjs'],
+                                 env=env, check=True, timeout=300)
+                  browser_status = 'running_targeted_ux'
+                  env['CF_CONSOLE_UX_ONLY'] = '1'
+                  subprocess.run(['node', 'tests/management_console/browser.cjs'],
+                                 env=env, check=True, timeout=180)
+                  browser_status = 'passed'
+              finally:
+                  if process is not None:
+                      (runtime / 'stop-requested').write_text('stop', encoding='utf-8')
+                      try:
+                          process.wait(timeout=20)
+                      except subprocess.TimeoutExpired:
+                          process.terminate()
+                          try:
+                              process.wait(timeout=10)
+                          except subprocess.TimeoutExpired:
+                              process.kill()
+                              process.wait(timeout=10)
+                  stopped_file = runtime / 'stopped.json'
+                  stopped = json.loads(stopped_file.read_text()) if stopped_file.exists() else {}
+                  calls_file = runtime / 'native-read-calls.json'
+                  calls = json.loads(calls_file.read_text()) if calls_file.exists() else []
+                  read_only = bool(calls) and all(
+                      call['method'] == 'GET' and call['path'] in {
+                          '/api/status/auth', '/api/contacts', '/api/chats'
+                      } for call in calls
+                  )
+                  audit = {
+                      'synthetic_data': True,
+                      'source': 'loopback native HTTP protocol peer',
+                      'real_gateway_and_sqlite': True,
+                      'browser_status': browser_status,
+                      'hermes': 'not started; ungrouped and unavailable-node failure paths only',
+                      'all_native_requests_read_only': read_only,
+                      'native_path_counts': dict(Counter(call['path'] for call in calls)),
+                      'owned_candidate_exit_code': process.returncode if process else None,
+                      'owned_children_stopped': bool(stopped.get('children_stopped')),
+                  }
+                  (evidence / 'ci-lifecycle.json').write_text(
+                      json.dumps(audit, ensure_ascii=False, indent=2), encoding='utf-8')
+                  if browser_status == 'passed':
+                      assert process.returncode == 0, 'owned candidate did not stop cleanly'
+                      assert audit['owned_children_stopped'], 'owned synthetic peer cleanup unconfirmed'
+                      assert read_only, 'native source request exceeded read-only allowlist'
+          PY
+      - name: Confirm evidence contains no generated administrator secret
+        if: always()
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          runtime = Path(os.environ['CF_CONSOLE_RUNTIME'])
+          evidence = runtime / 'browser-evidence'
+          credentials = runtime / 'browser-login.json'
+          if credentials.exists():
+              password = json.loads(credentials.read_text(encoding='utf-8'))['password']
+              for item in evidence.glob('*.json'):
+                  assert password not in item.read_text(encoding='utf-8'), 'credential in evidence'
+          for name in ('result.json', 'ux-checks.json'):
+              item = evidence / name
+              if item.exists():
+                  result = json.loads(item.read_text(encoding='utf-8'))
+                  assert result.get('synthetic_data') is True, 'non-synthetic evidence rejected'
+          print('Allowlisted evidence checked; runtime credentials and database are not uploaded.')
+      - name: Preserve allowlisted synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wechat-console-synthetic-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/result.json
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/ux-checks.json
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/ci-lifecycle.json
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/contacts-1440-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/contact-detail-1440-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/contact-permissions-1440-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/groups-1440-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/group-detail-1440-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/chat-1920-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/chat-430-synthetic.png
+            ${{ runner.temp }}/wechat-console-demo/browser-evidence/system-1440-synthetic.png
+          if-no-files-found: warn
+          retention-days: 14
+
+  synthetic-container-https:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CF_CONSOLE_HTTPS_ROOT: ${{ runner.temp }}/wechat-console-https
+      CANDIDATE_REVISION: ${{ github.sha }}
+      CONSOLE_PROJECT: cf-console-https-${{ github.run_id }}-${{ github.run_attempt }}
+      CONSOLE_NETWORK: cf-console-https-${{ github.run_id }}-${{ github.run_attempt }}
+      CONSOLE_RUNTIME: ${{ runner.temp }}/wechat-console-https/runtime
+      CONSOLE_SECRET_ENV: ${{ runner.temp }}/wechat-console-https/empty.env
+      CONSOLE_TLS_DIRECTORY: ${{ runner.temp }}/wechat-console-https/tls
+      CONSOLE_BIND_IP: 127.0.0.1
+      CONSOLE_PORT: '18770'
+      CONSOLE_TLS_BIND_IP: 127.0.0.1
+      CONSOLE_TLS_PORT: '18445'
+      CONSOLE_PROXY_IMAGE: nginx:stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare candidate-only runtime, network and trusted test CA
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$CONSOLE_RUNTIME" "$CONSOLE_TLS_DIRECTORY" "$CF_CONSOLE_HTTPS_ROOT/evidence"
+          touch "$CONSOLE_SECRET_ENV"
+          printf 'CONSOLE_UID=%s\nCONSOLE_GID=%s\n' "$(id -u)" "$(id -g)" >> "$GITHUB_ENV"
+          cat > "$CF_CONSOLE_HTTPS_ROOT/compose.demo.yaml" <<'YAML'
+          services:
+            console:
+              command: [serve, --runtime, /runtime, --mode, demo, --host, 0.0.0.0, --port, '8080', --peer-port, '18771']
+          YAML
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -sha256 \
+            -subj '/CN=CF synthetic CI CA' \
+            -addext 'basicConstraints=critical,CA:TRUE' \
+            -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+            -keyout "$CONSOLE_TLS_DIRECTORY/ca.key" \
+            -out "$CONSOLE_TLS_DIRECTORY/ca.crt" 2>/dev/null
+          openssl req -new -newkey rsa:2048 -nodes -sha256 -subj '/CN=127.0.0.1' \
+            -keyout "$CONSOLE_TLS_DIRECTORY/server.key" \
+            -out "$CONSOLE_TLS_DIRECTORY/server.csr" 2>/dev/null
+          printf '%s\n' 'subjectAltName=IP:127.0.0.1' 'extendedKeyUsage=serverAuth' \
+            > "$CONSOLE_TLS_DIRECTORY/server.ext"
+          openssl x509 -req -days 1 -sha256 \
+            -in "$CONSOLE_TLS_DIRECTORY/server.csr" \
+            -CA "$CONSOLE_TLS_DIRECTORY/ca.crt" -CAkey "$CONSOLE_TLS_DIRECTORY/ca.key" \
+            -CAcreateserial -extfile "$CONSOLE_TLS_DIRECTORY/server.ext" \
+            -out "$CONSOLE_TLS_DIRECTORY/server.crt" 2>/dev/null
+          docker network create --label "cf.synthetic-project=$CONSOLE_PROJECT" "$CONSOLE_NETWORK"
+      - name: Build real candidate image and generate isolated administrator
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -p "$CONSOLE_PROJECT" \
+            -f deploy/wechat-console/compose.yaml \
+            -f "$CF_CONSOLE_HTTPS_ROOT/compose.demo.yaml" --profile https build console
+          image="cf-wechat-console-candidate:$CANDIDATE_REVISION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$CANDIDATE_REVISION"
+          docker run --rm -i --network none --user "$CONSOLE_UID:$CONSOLE_GID" \
+            --volume "$CONSOLE_RUNTIME:/runtime" --entrypoint python "$image" - <<'PY'
+          import json
+          import secrets
+          from pathlib import Path
+          from cf_agent_gateway.management_console.auth import password_record
+
+          root = Path('/runtime')
+          password = secrets.token_urlsafe(36)
+          credentials = {'username': 'https-synthetic-admin', 'password': password}
+          for name, value in (
+              ('admin.json', password_record(credentials['username'], password)),
+              ('ci-login.json', credentials),
+          ):
+              target = root / name
+              with target.open('x', encoding='utf-8') as output:
+                  json.dump(value, output)
+              target.chmod(0o600)
+          PY
+      - name: Start only the dedicated synthetic Compose project
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -p "$CONSOLE_PROJECT" \
+            -f deploy/wechat-console/compose.yaml \
+            -f "$CF_CONSOLE_HTTPS_ROOT/compose.demo.yaml" --profile https \
+            up --detach --no-build --wait --wait-timeout 180
+      - name: Verify trusted HTTPS, same-origin writes and restart persistence
+        shell: python
+        run: |
+          import http.cookiejar
+          import json
+          import os
+          import ssl
+          import subprocess
+          import time
+          import urllib.error
+          import urllib.request
+          from http.cookies import SimpleCookie
+          from pathlib import Path
+
+          root = Path(os.environ['CF_CONSOLE_HTTPS_ROOT'])
+          runtime = Path(os.environ['CONSOLE_RUNTIME'])
+          credentials = json.loads((runtime / 'ci-login.json').read_text())
+          origin = 'https://127.0.0.1:' + os.environ['CONSOLE_TLS_PORT']
+          context = ssl.create_default_context(cafile=str(root / 'tls/ca.crt'))
+          jar = http.cookiejar.CookieJar()
+          opener = urllib.request.build_opener(
+              urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context),
+              urllib.request.HTTPCookieProcessor(jar))
+          checks = []
+          report = {'synthetic_data': True, 'real_docker_compose': True,
+                    'candidate_revision': os.environ['CANDIDATE_REVISION'],
+                    'hermes': 'not started', 'passed': False, 'checks': checks}
+
+          def check(name, condition):
+              assert condition, name
+              checks.append({'name': name, 'passed': True})
+
+          def request(path, method='GET', body=None, headers=None, expected=200):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(origin + path, data=data, method=method,
+                  headers={'Content-Type': 'application/json', **(headers or {})})
+              try:
+                  response = opener.open(req, timeout=15)
+              except urllib.error.HTTPError as error:
+                  response = error
+              with response:
+                  raw = response.read().decode('utf-8')
+                  assert response.status == expected, 'unexpected HTTP status: ' + str(response.status)
+                  assert credentials['password'] not in raw, 'password leaked in HTTP body'
+                  value = json.loads(raw) if 'application/json' in response.headers.get('Content-Type', '') else raw
+                  return response.headers, value
+
+          def ready():
+              for _ in range(90):
+                  try:
+                      request('/ready')
+                      request('/console')
+                      return
+                  except (OSError, urllib.error.URLError, AssertionError):
+                      time.sleep(1)
+              raise AssertionError('candidate HTTPS readiness timeout')
+
+          try:
+              check('TLS verifies the CI CA and 127.0.0.1 SAN',
+                    context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED)
+              ready()
+              check('Candidate health and actual console HTML are reachable over trusted HTTPS',
+                    '<html' in request('/console')[1].lower())
+              request('/admin/console/state', expected=401)
+              check('Unauthenticated management request is rejected', True)
+              headers, login = request('/admin/console/login', 'POST', credentials,
+                                       {'Origin': origin})
+              cookie = SimpleCookie()
+              cookie.load(headers['Set-Cookie'])
+              morsel = cookie['cf_console_session']
+              check('HTTPS login sets Secure HttpOnly SameSite=Strict session cookie',
+                    bool(morsel['secure']) and bool(morsel['httponly'])
+                    and morsel['samesite'].lower() == 'strict'
+                    and any(item.name == 'cf_console_session' and item.secure for item in jar))
+              csrf = login['csrf_token']
+              mutation_headers = {'Origin': origin, 'X-CSRF-Token': csrf}
+              _, missing = request('/admin/console/sources/demo-primary/sync', 'POST', {},
+                                   {'Origin': origin}, expected=403)
+              check('Cookie-authenticated write without CSRF is rejected', missing['detail'] == 'csrf_required')
+              _, cross = request('/admin/console/sources/demo-primary/sync', 'POST', {},
+                    {'Origin': 'https://different.invalid', 'X-CSRF-Token': csrf}, expected=403)
+              check('Cross-origin write is rejected even with a valid CSRF token',
+                    cross['detail'] == 'cross_origin_rejected')
+              _, sync = request('/admin/console/sources/demo-primary/sync', 'POST', {}, mutation_headers)
+              check('Same-origin Host with HTTPS port passes Origin and CSRF validation',
+                    sync['account_id'] == 'demo-bot-a' and sync['status'] == 'synced')
+              _, contacts = request('/admin/console/contacts?source=demo-primary&kind=individual&limit=100')
+              check('Real container Gateway reads all 247 synthetic native contacts', contacts['total'] == 247)
+              _, selected = request('/admin/console/contacts?source=demo-primary&q=wxid_demo_0000')
+              contact = selected['items'][0]
+              check('Native camelCase fields normalize into actual cached contact details',
+                    selected['total'] == 1 and contact['nick_name'] == '林溪'
+                    and contact['remark'] == '林溪 · 运营' and contact['alias'] == 'linxi_demo'
+                    and contact['contact_type'] == 'individual')
+              _, enrolled = request('/admin/console/contacts/' + contact['id'] + '/employee', 'POST',
+                    {'name': 'CI HTTPS 合成员工', 'employee_id': 'CI-HTTPS-EMPLOYEE',
+                     'enabled': True, 'bot_allowed': True, 'group_allowed': False, 'group_id': None},
+                    mutation_headers)
+              identity = enrolled['id']
+              check('Permission changes use the real management backend and candidate database',
+                    enrolled['contact']['employee']['id'] == identity
+                    and enrolled['contact']['employee']['bot_allowed'] is True
+                    and enrolled['contact']['employee']['group_allowed'] is False)
+              _, messages = request('/admin/console/conversations/' + contact['conversation_id']
+                                    + '/messages?source=demo-primary')
+              check('Synthetic persisted message archive is actually readable',
+                    messages['status'] == 'ok' and messages['total'] == 95)
+              before = request('/admin/console/state')[1]
+              check('Ungrouped employee does not acquire a derived Profile',
+                    enrolled['contact']['employee']['group_id'] is None and not before['profile']['derived'])
+              compose = ['docker', 'compose', '-p', os.environ['CONSOLE_PROJECT'],
+                         '-f', 'deploy/wechat-console/compose.yaml',
+                         '-f', str(root / 'compose.demo.yaml'), '--profile', 'https']
+              subprocess.run(compose + ['restart', '--timeout', '25', 'console'], check=True, timeout=60)
+              ready()
+              check('Restart stopped the first owned candidate cleanly',
+                    json.loads((runtime / 'stopped.json').read_text())['children_stopped'] is True)
+              # A fresh acknowledgement is required for the final cleanup, not this restart's.
+              (runtime / 'stopped.json').unlink()
+              _, me = request('/admin/console/me')
+              check('Database-backed login session survives candidate restart',
+                    me['username'] == credentials['username'] and me['csrf_token'] == csrf)
+              _, after = request('/admin/console/contacts/' + contact['id'])
+              check('Stable contact and employee permission survive restart without duplication',
+                    after['id'] == contact['id'] and after['employee']['id'] == identity
+                    and after['employee']['bot_allowed'] is True
+                    and after['employee']['group_allowed'] is False)
+              after_state = request('/admin/console/state')[1]
+              check('Restart retains one employee and the original candidate-only management scope',
+                    len(after_state['profile']['employees']) == len(before['profile']['employees']) == 1
+                    and after_state['candidate_only'] is True and after_state['production_effective'] is False)
+              request('/admin/console/sources/demo-primary/sync', 'POST', {}, mutation_headers)
+              report['passed'] = True
+          finally:
+              content = json.dumps(report, ensure_ascii=False, indent=2)
+              assert credentials['password'] not in content, 'password leaked in evidence'
+              (root / 'evidence/https-result.json').write_text(content, encoding='utf-8')
+      - name: Stop and remove only this CI candidate and network
+        if: always()
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ['CF_CONSOLE_HTTPS_ROOT'])
+          runtime = Path(os.environ['CONSOLE_RUNTIME'])
+          evidence = root / 'evidence'
+          evidence.mkdir(parents=True, exist_ok=True)
+          project = os.environ['CONSOLE_PROJECT']
+          network = os.environ['CONSOLE_NETWORK']
+          assert project.startswith('cf-console-https-') and network == project
+          report = {'synthetic_data': True, 'owned_project': project, 'cleanup_passed': False}
+          compose = ['docker', 'compose', '-p', project, '-f', 'deploy/wechat-console/compose.yaml',
+                     '-f', str(root / 'compose.demo.yaml'), '--profile', 'https']
+          failures = []
+
+          def owned_command(arguments, timeout):
+              try:
+                  return subprocess.run(arguments, check=False, timeout=timeout).returncode
+              except (OSError, subprocess.TimeoutExpired):
+                  return -1
+
+          if (root / 'compose.demo.yaml').exists():
+              stop = owned_command(compose + ['stop', '--timeout', '25'], 90)
+              report['compose_stop_returncode'] = stop
+              stopped_file = runtime / 'stopped.json'
+              stopped = json.loads(stopped_file.read_text()) if stopped_file.exists() else {}
+              report['owned_children_stopped'] = bool(stopped.get('children_stopped'))
+              calls_file = runtime / 'native-read-calls.json'
+              calls = json.loads(calls_file.read_text()) if calls_file.exists() else []
+              report['all_native_requests_read_only'] = bool(calls) and all(
+                  item['method'] == 'GET' and item['path'] in
+                  {'/api/status/auth', '/api/contacts', '/api/chats'} for item in calls)
+              for name in ('owned_children_stopped', 'all_native_requests_read_only'):
+                  if not report[name]:
+                      failures.append(name)
+              down = owned_command(compose + ['down', '--remove-orphans', '--timeout', '25'], 90)
+              if stop or down:
+                  failures.append('compose_stop_or_down')
+          inspect = subprocess.run(['docker', 'network', 'inspect', network],
+                                   capture_output=True, text=True, check=False, timeout=15)
+          if inspect.returncode == 0:
+              metadata = json.loads(inspect.stdout)[0]
+              assert metadata.get('Labels', {}).get('cf.synthetic-project') == project
+              removal = subprocess.run(['docker', 'network', 'rm', network], check=False, timeout=30)
+              if removal.returncode:
+                  failures.append('network_remove')
+          remaining = subprocess.run(['docker', 'ps', '-aq', '--filter',
+                                     'label=com.docker.compose.project=' + project],
+                                    capture_output=True, text=True, check=True, timeout=15)
+          report['owned_containers_removed'] = not remaining.stdout.strip()
+          if not report['owned_containers_removed']:
+              failures.append('owned_containers_remain')
+          report['cleanup_passed'] = not failures
+          report['failures'] = failures
+          (evidence / 'https-lifecycle.json').write_text(
+              json.dumps(report, indent=2), encoding='utf-8')
+          assert not failures, 'owned candidate cleanup verification failed'
+      - name: Preserve credential-free HTTPS container results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wechat-console-container-https-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/wechat-console-https/evidence/https-result.json
+            ${{ runner.temp }}/wechat-console-https/evidence/https-lifecycle.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -58,8 +58,10 @@ class Service:
         connections: dict[str, Connection],
         actor="test-administrator",
         accounts=frozenset({"isolated-bot"}),
+        source=SOURCE,
     ):
         self.s, self.connections, self.actor, self.accounts = session, connections, actor, accounts
+        self.source = source
 
     def audit(self, action, object_id, result="ok", version=None):
         self.s.add(
@@ -124,7 +126,7 @@ class Service:
                 raise ManagementError("employee_already_enrolled")
             mapping = self.s.scalar(
                 select(SourceIdentityMapping).where(
-                    SourceIdentityMapping.platform == SOURCE,
+                    SourceIdentityMapping.platform == self.source,
                     SourceIdentityMapping.account_id == body.account_id,
                     SourceIdentityMapping.sender_id == body.sender_id,
                 )
@@ -135,7 +137,7 @@ class Service:
                 self.s.add(
                     SourceIdentityMapping(
                         id=new_id(),
-                        platform=SOURCE,
+                        platform=self.source,
                         account_id=body.account_id,
                         sender_id=body.sender_id,
                         enterprise_identity_id=identity.id,
@@ -284,14 +286,14 @@ class Service:
             self.account(body.account_id)
             conv = self.s.scalar(
                 select(Conversation).where(
-                    Conversation.source == SOURCE,
+                    Conversation.source == self.source,
                     Conversation.source_account_id == body.account_id,
                     Conversation.conversation_id == body.conversation_id,
                 )
             )
             if conv is None:
                 conv = Conversation(
-                    source=SOURCE,
+                    source=self.source,
                     source_account_id=body.account_id,
                     conversation_id=body.conversation_id,
                     conversation_type="group",
@@ -504,7 +506,7 @@ class Service:
         self.account(body.account_id)
         mapping = self.s.scalar(
             select(SourceIdentityMapping).where(
-                SourceIdentityMapping.platform == SOURCE,
+                SourceIdentityMapping.platform == self.source,
                 SourceIdentityMapping.account_id == body.account_id,
                 SourceIdentityMapping.sender_id == body.sender_id,
                 SourceIdentityMapping.enabled.is_(True),
@@ -518,14 +520,14 @@ class Service:
             raise ManagementError("bot_not_mentioned", 403)
         conversation = self.s.scalar(
             select(Conversation).where(
-                Conversation.source == SOURCE,
+                Conversation.source == self.source,
                 Conversation.source_account_id == body.account_id,
                 Conversation.conversation_id == body.conversation_id,
             )
         )
         if conversation is None and body.kind == "private":
             conversation = Conversation(
-                source=SOURCE,
+                source=self.source,
                 source_account_id=body.account_id,
                 conversation_id=body.conversation_id,
                 conversation_type="private",
@@ -548,7 +550,7 @@ class Service:
         if message is None:
             message = Message(
                 event_id=event_id,
-                source=SOURCE,
+                source=self.source,
                 source_account_id=body.account_id,
                 source_message_id=body.event_id,
                 conversation_id=body.conversation_id,
@@ -623,7 +625,7 @@ class Service:
                     ThreadSourceBinding(
                         id=new_id(),
                         ai_thread_id=thread.id,
-                        platform=SOURCE,
+                        platform=self.source,
                         account_id=body.account_id,
                         physical_conversation_id=body.conversation_id,
                         sender_id=body.sender_id if body.kind == "private" else None,

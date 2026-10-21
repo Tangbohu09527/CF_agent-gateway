@@ -1,0 +1,93 @@
+{
+  "passed": true,
+  "synthetic_data": true,
+  "real_page": true,
+  "real_gateway": true,
+  "checks": [
+    {
+      "name": "Invalid password is rejected visibly",
+      "passed": true
+    },
+    {
+      "name": "Cookie login opens synthetic candidate",
+      "passed": true
+    },
+    {
+      "name": "Stable username is visible as ordinary readonly metadata",
+      "passed": true
+    },
+    {
+      "name": "Bot account and exact update time are ordinary metadata",
+      "passed": true
+    },
+    {
+      "name": "Copy provides real clipboard success or selectable-text fallback",
+      "passed": true
+    },
+    {
+      "name": "Database diagnosis remains collapsed",
+      "passed": true
+    },
+    {
+      "name": "Group list shows configured template and computer names",
+      "passed": true
+    },
+    {
+      "name": "Group list shows recent activity summary",
+      "passed": true
+    },
+    {
+      "name": "Updated group list has no document overflow",
+      "passed": true
+    },
+    {
+      "name": "Group stable username is labeled accurately",
+      "passed": true
+    },
+    {
+      "name": "Group detail resolves current template and target computer",
+      "passed": true
+    },
+    {
+      "name": "Group detail has recent activity and summary",
+      "passed": true
+    },
+    {
+      "name": "Sender filter is a named selector, without an internal-ID text input",
+      "passed": true
+    },
+    {
+      "name": "Named sender selection filters actual archived sender identities",
+      "passed": true
+    },
+    {
+      "name": "Speaker coverage is explicitly distinct from group members",
+      "passed": true
+    },
+    {
+      "name": "Named sender UI fits 1920px",
+      "passed": true
+    },
+    {
+      "name": "Named sender UI fits narrow viewport",
+      "passed": true
+    },
+    {
+      "name": "UX additions have no JavaScript page exceptions",
+      "passed": true
+    }
+  ],
+  "pageErrors": [],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "screenshots": [
+    "contact-detail-1440-synthetic.png",
+    "contact-permissions-1440-synthetic.png",
+    "groups-1440-synthetic.png",
+    "group-detail-1440-synthetic.png",
+    "chat-1920-synthetic.png",
+    "chat-430-synthetic.png"
+  ]
+}

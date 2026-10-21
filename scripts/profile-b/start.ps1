@@ -1,4 +1,4 @@
-param([string]$Runtime, [string]$HermesSource, [string]$HermesPython)
+﻿param([string]$Runtime, [string]$HermesSource, [string]$HermesPython)
 $ErrorActionPreference = 'Stop'
 $candidateRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $taskRoot = Split-Path $candidateRoot -Parent

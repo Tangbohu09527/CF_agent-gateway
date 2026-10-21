@@ -47,6 +47,7 @@ where = ["src"]
   "versions/*.py",
 ]
 "cf_agent_gateway.profile_b" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg"]
+"cf_agent_gateway.management_console" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

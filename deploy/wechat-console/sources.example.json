@@ -1,0 +1,8 @@
+{
+  "company-bot": {
+    "label": "企业 Bot（真实只读）",
+    "url": "http://APPROVED_EXISTING_WECHAT_SERVICE:6174/",
+    "token_env": "CONSOLE_WECHAT_READ_TOKEN",
+    "archive_url_env": "CONSOLE_ARCHIVE_READONLY_URL"
+  }
+}

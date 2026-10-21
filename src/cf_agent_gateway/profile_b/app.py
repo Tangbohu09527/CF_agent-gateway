@@ -49,7 +49,14 @@ from cf_agent_gateway.task.model.models import HermesDispatchRecord, HermesDispa
 from cf_agent_gateway.workspace.models import AIThread
 
 
-def install_management(app, connections: dict[str, Connection]):
+def install_management(
+    app,
+    connections: dict[str, Connection],
+    *,
+    source=SOURCE,
+    accounts=None,
+    allow_test_messages=True,
+):
     """Only the operator can install connection refs; URLs and secrets never enter the UI."""
     router = APIRouter(
         prefix="/admin/profile-b",
@@ -99,7 +106,10 @@ def install_management(app, connections: dict[str, Connection]):
             credential = request.headers.get("authorization", "trusted-role-middleware")
             actor = "admin:" + hashlib.sha256(credential.encode()).hexdigest()[:16]
         request.state.profile_b_actor = actor
-        return Service(session, connections, actor=actor)
+        options = {"source": source}
+        if accounts is not None:
+            options["accounts"] = accounts(session) if callable(accounts) else accounts
+        return Service(session, connections, actor=actor, **options)
 
     admin_service = Depends(service)
 
@@ -124,7 +134,7 @@ def install_management(app, connections: dict[str, Connection]):
             )
             mapping = s.s.scalar(
                 select(SourceIdentityMapping).where(
-                    SourceIdentityMapping.platform == SOURCE,
+                    SourceIdentityMapping.platform == source,
                     SourceIdentityMapping.enterprise_identity_id == identity.id,
                 )
             )
@@ -173,8 +183,8 @@ def install_management(app, connections: dict[str, Connection]):
             )
         )
         return {
-            "test_data": True,
-            "source": SOURCE,
+            "test_data": source != "wechat",
+            "source": source,
             "connection_refs": sorted(connections),
             "employees": employees,
             "rooms": rooms,
@@ -283,8 +293,11 @@ def install_management(app, connections: dict[str, Connection]):
 
     @router.post("/test-messages")
     def test_message(body: TestMessage, s: Service = admin_service):
+        if not allow_test_messages:
+            raise ManagementError("candidate_dispatch_disabled", 403)
         return s.send(body)
 
+    app.state.profile_b_state = state
     app.include_router(router)
     static = Path(__file__).with_name("static")
     app.mount("/manage/assets", StaticFiles(directory=static), name="profile-b-assets")
