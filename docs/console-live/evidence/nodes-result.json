@@ -1,0 +1,106 @@
+{
+  "passed": true,
+  "synthetic_data": true,
+  "actual_gateway": true,
+  "actual_page": true,
+  "model_called": false,
+  "checks": [
+    {
+      "name": "Existing candidate connection appears without reconfiguration",
+      "passed": true
+    },
+    {
+      "name": "Tutorial explains prerequisites and official Gateway loading",
+      "passed": true
+    },
+    {
+      "name": "Existing management credential remains editable for a new business connection",
+      "passed": true
+    },
+    {
+      "name": "Missing existing management credential is rejected without creating draft",
+      "passed": true
+    },
+    {
+      "name": "Page creates backend draft before displaying setup values",
+      "passed": true
+    },
+    {
+      "name": "New business and explicit existing management share one pending node",
+      "passed": true
+    },
+    {
+      "name": "New random credential is masked in a real input",
+      "passed": true
+    },
+    {
+      "name": "Only the newly generated business key can be revealed",
+      "passed": true
+    },
+    {
+      "name": "List never exposes generated key",
+      "passed": true
+    },
+    {
+      "name": "Copy either succeeds or gives selectable text",
+      "passed": true
+    },
+    {
+      "name": "Mask action clears secret from page",
+      "passed": true
+    },
+    {
+      "name": "Bad address returns actual connection failure, not ready",
+      "passed": true
+    },
+    {
+      "name": "Pending node registers but remains unavailable",
+      "passed": true
+    },
+    {
+      "name": "Existing API key is not revealed",
+      "passed": true
+    },
+    {
+      "name": "Business-only node explicitly says management missing",
+      "passed": true
+    },
+    {
+      "name": "Add management keeps one node and original identity",
+      "passed": true
+    },
+    {
+      "name": "Server checks actual REST and WebSocket RPC",
+      "passed": true
+    },
+    {
+      "name": "Read-only test does not claim profile creation",
+      "passed": true
+    },
+    {
+      "name": "Explicit profile action reports real synthetic-peer create/readback",
+      "passed": true
+    },
+    {
+      "name": "Refresh preserves saved host configuration",
+      "passed": true
+    },
+    {
+      "name": "1920 desktop layout fits",
+      "passed": true
+    },
+    {
+      "name": "Narrow layout has no severe overflow",
+      "passed": true
+    },
+    {
+      "name": "Module cleanup closes and clears sensitive dialogs",
+      "passed": true
+    },
+    {
+      "name": "Browser has no JavaScript exceptions",
+      "passed": true
+    }
+  ],
+  "pageErrors": []
+}

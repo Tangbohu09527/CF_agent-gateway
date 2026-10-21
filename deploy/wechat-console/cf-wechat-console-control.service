@@ -1,0 +1,25 @@
+[Unit]
+Description=CF console fixed WeChat status and start controller
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/cf-wechat-console-control/control.py --config /etc/cf-wechat-console-control.json
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=cf-wechat-console-control
+RuntimeDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/run/cf-wechat-console-control
+
+[Install]
+WantedBy=multi-user.target

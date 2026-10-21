@@ -71,7 +71,16 @@ class HermesNode:
             raise NodeError("unsupported_hermes_api")
         with self.rpc() as rpc:
             rpc.call("gateway.ping", {})
-        return {"rest": True, "rpc": True, "profile_create": True, "soul": True}
+        # These reads prove interface availability, not that a create/write has
+        # been performed successfully on this node. Provisioning records its own
+        # actual result after the official operation and readback.
+        return {
+            "rest": True,
+            "rpc": True,
+            "profile_create": "not_tested",
+            "soul": "not_tested",
+            "read_only": True,
+        }
 
     def profiles(self):
         return self.request("GET", "/api/profiles")["profiles"]

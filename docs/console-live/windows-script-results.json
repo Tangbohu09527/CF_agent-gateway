@@ -1,0 +1,24 @@
+{
+  "synthetic_data": true,
+  "results": [
+    {
+      "shell": "windows-powershell-5.1",
+      "version": "5.1.26100.9711",
+      "start": true,
+      "page": true,
+      "login": true,
+      "stop": true,
+      "port_closed": true
+    },
+    {
+      "shell": "development-pwsh",
+      "version": "7.6.5",
+      "start": true,
+      "page": true,
+      "login": true,
+      "stop": true,
+      "port_closed": true
+    }
+  ],
+  "bom_preserved": true
+}

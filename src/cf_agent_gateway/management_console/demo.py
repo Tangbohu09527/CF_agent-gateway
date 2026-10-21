@@ -4,7 +4,7 @@ import json
 import threading
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from sqlalchemy import select
 
@@ -22,6 +22,8 @@ class DemoPeer(ThreadingHTTPServer):
         self.offline = False
         self.app_not_running = False
         self.fail = False
+        self.controls_enabled = False
+        self.messages = {}
         self.contacts = [
             {
                 "username": f"wxid_demo_{i:04d}",
@@ -121,6 +123,11 @@ class DemoPeer(ThreadingHTTPServer):
                     ]
                 elif url.path == "/api/chats":
                     value = peer.chats[offset : offset + limit]
+                elif url.path.startswith("/api/messages/"):
+                    chat = unquote(url.path.removeprefix("/api/messages/"))
+                    value = sorted(
+                        peer.messages.get(chat, []), key=lambda m: int(m["localId"]), reverse=True
+                    )[offset : offset + limit]
                 else:
                     self.send_error(405)
                     return
@@ -133,6 +140,41 @@ class DemoPeer(ThreadingHTTPServer):
 
             def do_POST(self):
                 peer.calls.append({"method": "POST", "path": self.path})
+                if (
+                    peer.controls_enabled
+                    and self.path == "/_synthetic/state"
+                    and self.headers.get("Authorization") == "Bearer " + peer.token
+                ):
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if 0 < size <= 1024:
+                        state = json.loads(self.rfile.read(size))
+                        if set(state) <= {"offline", "app_not_running", "fail"} and all(
+                            type(value) is bool for value in state.values()
+                        ):
+                            for name, value in state.items():
+                                setattr(peer, name, value)
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(b'{"synthetic":true}')
+                            return
+                if (
+                    self.path == "/_synthetic/append"
+                    and self.headers.get("Authorization") == "Bearer " + peer.token
+                ):
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if 0 < size <= 65536:
+                        message = json.loads(self.rfile.read(size))
+                        peer.messages.setdefault(message["chatId"], []).append(message)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(
+                            json.dumps(
+                                {"synthetic": True, "available_at": datetime.now(UTC).isoformat()}
+                            ).encode()
+                        )
+                        return
                 self.send_error(405)
 
         super().__init__(("127.0.0.1", port), Handler)

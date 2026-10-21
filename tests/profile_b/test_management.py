@@ -256,7 +256,7 @@ def management(tmp_path, monkeypatch):
 
 def test_management_authentication_and_audits_do_not_expose_credentials(management):
     h = management
-    assert get_schema_version(h.app.state.database_engine) == "20261021_01"
+    assert get_schema_version(h.app.state.database_engine) == "20261021_02"
     for headers in ({}, {"Authorization": "Bearer incorrect"}, {"X-Role": "admin"}):
         request = h.client.build_request("GET", PREFIX + "/state", headers=headers)
         if "Authorization" not in headers:

@@ -1,0 +1,67 @@
+{
+  "synthetic_data_only": true,
+  "actual_page_gateway_sqlite": true,
+  "live_actual_background_collector": true,
+  "wechat_and_hermes": "synthetic_contract_peers",
+  "live_browser_checks": 31,
+  "node_browser_checks": 24,
+  "node_backend_tests": 21,
+  "real_server_acceptance_included": false,
+  "files": [
+    {
+      "file": "live-result.json",
+      "bytes": 5598,
+      "sha256": "557fa2047c6ea3a2ba233594ebe98b6972241904b698dab994bf1d72a9a4ea0f"
+    },
+    {
+      "file": "live-peer-summary.json",
+      "bytes": 145,
+      "sha256": "e28d38ac905d0cf190968d203e490575ecc392e5fc64337268b8c7d4610d2839"
+    },
+    {
+      "file": "live-history-1440-synthetic.png",
+      "bytes": 114631,
+      "sha256": "5672c41aa334b6b1c49d34a7a7d7c881c7fcd8d86883760db32d3a3c6026beb1"
+    },
+    {
+      "file": "live-system-1440-synthetic.png",
+      "bytes": 90671,
+      "sha256": "734526057e7bbd021b4751c83371a3e317d7c971e995a262f67db27bd27a8412"
+    },
+    {
+      "file": "live-chat-1920-synthetic.png",
+      "bytes": 87179,
+      "sha256": "78a5c2b1660f3b9c5aad6db530179f925e4bb5808202a630c3f295a945a4ee40"
+    },
+    {
+      "file": "nodes-result.json",
+      "bytes": 2596,
+      "sha256": "fd73dc30960179efbde6bf551ef903ad92d09b4b67569d5b24d0025673125f29"
+    },
+    {
+      "file": "nodes-peer-summary.json",
+      "bytes": 127,
+      "sha256": "2fe7dd89db248c9ed207640d9ddb7071c863e1816184a2a5773bd8c2da560ad6"
+    },
+    {
+      "file": "node-wizard-current-1440-synthetic.png",
+      "bytes": 115818,
+      "sha256": "cb620ba397c7f54022012601fda4d5a216d82acbd79e968297c251cf1246436c"
+    },
+    {
+      "file": "node-wizard-1440-synthetic.png",
+      "bytes": 147455,
+      "sha256": "71e94e1897bff6afe44e8173a0ee1faf341a36840eeb65eecf19eefd4c362c73"
+    },
+    {
+      "file": "node-check-1440-synthetic.png",
+      "bytes": 142343,
+      "sha256": "ec43df8f497bde118325be77ef4c4d7f93806db6f42e45ff967e67843481a499"
+    },
+    {
+      "file": "nodes-1920-synthetic.png",
+      "bytes": 94189,
+      "sha256": "9f19c471c1a01bbe3c9a53f4c092afb6d82fcf83bd10af62627d8f9550ad37ee"
+    }
+  ]
+}

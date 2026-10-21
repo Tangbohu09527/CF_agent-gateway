@@ -830,7 +830,7 @@ async def run_linux(args, case, model, certificates, keys):
         with factory() as session:
             assert (
                 session.execute(sql_text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "20261021_01"
+                == "20261021_02"
             )
         original_pdf = None
         with official_host(args, case, model, gateway_origin, certificates, keys) as origin:  # noqa: SIM117
@@ -1196,7 +1196,7 @@ async def run_linux(args, case, model, certificates, keys):
             "hermes_process_restarted_with_same_home": True,
             "gateway_session_factory_recreated": True,
             "gateway_process_restarted": False,
-            "schema_head": "20261021_01",
+            "schema_head": "20261021_02",
             "read_without_return_context": True,
             "schema_sha256": model.planner.schema_hashes,
             "normal_followup_text_same_managed_tip": True,

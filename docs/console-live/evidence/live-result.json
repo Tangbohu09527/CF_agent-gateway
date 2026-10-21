@@ -1,0 +1,212 @@
+{
+  "passed": true,
+  "synthetic_data": true,
+  "actual_page": true,
+  "actual_gateway": true,
+  "actual_collector": true,
+  "checks": [
+    {
+      "name": "Silent authenticated Bot is online without requiring a new message",
+      "passed": true
+    },
+    {
+      "name": "Repeated archive-enable clicks produce one controlled write",
+      "passed": true
+    },
+    {
+      "name": "Ordinary unmentioned message appears without refresh",
+      "passed": true
+    },
+    {
+      "name": "Live message pagination follows authoritative persisted total",
+      "passed": true
+    },
+    {
+      "name": "Same-second distinct messages both appear",
+      "passed": true
+    },
+    {
+      "name": "Self message archives with outgoing direction",
+      "passed": true
+    },
+    {
+      "name": "Repeated physical message is not duplicated",
+      "passed": true
+    },
+    {
+      "name": "Late arrival appears despite an earlier event timestamp",
+      "passed": true
+    },
+    {
+      "name": "Displayed message order remains chronological",
+      "passed": true
+    },
+    {
+      "name": "Other conversation summary updates without changing current chat",
+      "passed": true
+    },
+    {
+      "name": "Reading history preserves position and offers new-message notice",
+      "passed": true
+    },
+    {
+      "name": "History view has no leaked absolute-positioned document height",
+      "passed": true
+    },
+    {
+      "name": "New-message notice loads latest durable history",
+      "passed": true
+    },
+    {
+      "name": "Reconnect resumes durable cursor and fills offline interval",
+      "passed": true
+    },
+    {
+      "name": "Live update preserves current filter",
+      "passed": true
+    },
+    {
+      "name": "Explicit logged-out result shows red",
+      "passed": true
+    },
+    {
+      "name": "Running HTTP service with stopped app is not green",
+      "passed": true
+    },
+    {
+      "name": "Probe error shows gray rather than false offline",
+      "passed": true
+    },
+    {
+      "name": "Cached green expires to gray while browser is disconnected",
+      "passed": true
+    },
+    {
+      "name": "Manual check keeps a single polling chain",
+      "passed": true
+    },
+    {
+      "name": "Switching Bot discards old in-flight result",
+      "passed": true
+    },
+    {
+      "name": "Second source uses separate identity and message history",
+      "passed": true
+    },
+    {
+      "name": "First live message changes empty conversation total from zero to one",
+      "passed": true
+    },
+    {
+      "name": "Newly archived speaker appears in live sender selector",
+      "passed": true
+    },
+    {
+      "name": "Background primary message never enters selected secondary Bot",
+      "passed": true
+    },
+    {
+      "name": "1920 desktop live layout has no severe overflow",
+      "passed": true
+    },
+    {
+      "name": "760px live layout has no document overflow",
+      "passed": true
+    },
+    {
+      "name": "Logout ignores old response and stops further subscriptions",
+      "passed": true
+    },
+    {
+      "name": "Logged-out incremental endpoint rejects access",
+      "passed": true
+    },
+    {
+      "name": "Refresh/login preserves archive and selected source separation",
+      "passed": true
+    },
+    {
+      "name": "No page JavaScript exceptions",
+      "passed": true
+    }
+  ],
+  "latency": [
+    {
+      "label": "合成实时 A：普通未授权、未提及消息",
+      "synthetic_source_available_at": "2026-10-21T09:18:02.272Z",
+      "upstream_readable_at": "2026-10-21T09:18:04.189928+00:00",
+      "archived_at": "2026-10-21T09:18:04.202606+00:00",
+      "displayed_at": "2026-10-21T09:18:05.459Z",
+      "source_to_read_ms": 1917,
+      "read_to_archive_ms": 13,
+      "archive_to_display_ms": 1257,
+      "read_to_display_ms": 1270
+    },
+    {
+      "label": "合成同秒 B",
+      "synthetic_source_available_at": "2026-10-21T09:18:05.676Z",
+      "upstream_readable_at": "2026-10-21T09:18:06.548104+00:00",
+      "archived_at": "2026-10-21T09:18:06.563825+00:00",
+      "displayed_at": "2026-10-21T09:18:07.502Z",
+      "source_to_read_ms": 872,
+      "read_to_archive_ms": 15,
+      "archive_to_display_ms": 939,
+      "read_to_display_ms": 954
+    },
+    {
+      "label": "合成同秒 C",
+      "synthetic_source_available_at": "2026-10-21T09:18:05.678Z",
+      "upstream_readable_at": "2026-10-21T09:18:06.548104+00:00",
+      "archived_at": "2026-10-21T09:18:06.557438+00:00",
+      "displayed_at": "2026-10-21T09:18:07.501Z",
+      "source_to_read_ms": 870,
+      "read_to_archive_ms": 9,
+      "archive_to_display_ms": 944,
+      "read_to_display_ms": 953
+    }
+  ],
+  "pageErrors": [],
+  "live_max_parallel_requests": 2,
+  "writes": [
+    {
+      "path": "/admin/console/login",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-primary/collection/start",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-primary/check",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-primary/check",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-primary/check",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-primary/check",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-primary/check",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/live/demo-secondary/collection/start",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/logout",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/login",
+      "status": 200
+    }
+  ]
+}
