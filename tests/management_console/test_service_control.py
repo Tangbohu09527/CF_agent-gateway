@@ -103,3 +103,33 @@ def test_supervisor_stopped_exit_three_can_start_only_fixed_program(monkeypatch)
     assert commands == [
         ["/usr/bin/docker", "exec", "fixed-id", "/usr/bin/supervisorctl", "start", "wechat"]
     ]
+
+
+def test_login_requires_fresh_observed_upstream_guard_not_operator_flag(h):
+    from datetime import timedelta
+    from fastapi import HTTPException
+    from cf_agent_gateway.management_console.live_models import LiveObservation
+    from cf_agent_gateway.management_console.service import now
+
+    op = operations(h)
+    op.settings["sources"] = {"native": {"login_contract": "expected-account-v1"}}
+    value = {"status": "logged_out", "loggedInUser": h.peer.account}
+    h.config.reader_factory = lambda _: SimpleNamespace(
+        read=lambda *a, **k: value, close=lambda: None
+    )
+    op.live.probe("native", True)
+    assert op.status("native")["capabilities"]["login"] is False
+    with pytest.raises(HTTPException, match="target_login_identity_guard_not_verified"):
+        op.login("native")
+    value["loginCapabilities"] = {
+        "contract": "expected-account-v1",
+        "required": True,
+        "preservesSessionOnMismatch": True,
+    }
+    op.live.probe("native", True)
+    assert op.status("native")["capabilities"]["login"] is True
+    with h.app.state.database_session_factory() as session:
+        row = session.get(LiveObservation, "wechat:native")
+        row.observed_at = now() - timedelta(seconds=21)
+        session.commit()
+    assert op.status("native")["capabilities"]["login"] is False

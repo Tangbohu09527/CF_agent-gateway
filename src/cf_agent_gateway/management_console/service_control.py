@@ -90,6 +90,15 @@ class ServiceOperations:
                 409,
             )
 
+    def login_guard_available(self, source):
+        bot = self.live.status(source)["bot"]
+        return (
+            self.settings.get("sources", {}).get(source, {}).get("login_contract")
+            == "expected-account-v1"
+            and bot.get("login_identity_guard_verified") is True
+            and bot.get("stale") is False
+        )
+
     def status(self, source):
         setting = self.settings.get("sources", {}).get(source, {})
         with self.lock:
@@ -117,9 +126,9 @@ class ServiceOperations:
                         and setting.get("controls_wechat_service")
                         and self.cached.get("app_start_supported")
                     ),
-                    "login": setting.get("login_contract") == "expected-account-v1",
+                    "login": self.login_guard_available(source),
                     "reason": None
-                    if setting.get("login_contract") == "expected-account-v1"
+                    if self.login_guard_available(source)
                     else "target_login_identity_guard_not_verified",
                 },
             }
@@ -153,10 +162,7 @@ class ServiceOperations:
                 account = row.account_id if row else None
             if not account:
                 raise HTTPException(409, "expected_bot_account_required")
-            if (
-                self.settings.get("sources", {}).get(source, {}).get("login_contract")
-                != "expected-account-v1"
-            ):
+            if not self.login_guard_available(source):
                 raise HTTPException(409, "target_login_identity_guard_not_verified")
             existing = self.operations.get(source)
             if (

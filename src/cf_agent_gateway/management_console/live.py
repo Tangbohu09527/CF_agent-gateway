@@ -200,6 +200,13 @@ class LiveRuntime:
             with self.factory() as session:
                 saved = session.get(DirectorySource, source)
                 expected = saved.account_id if saved else None
+            capability = value.get("loginCapabilities", {}) if isinstance(value, dict) else {}
+            guard_verified = (
+                isinstance(capability, dict)
+                and capability.get("contract") == "expected-account-v1"
+                and capability.get("required") is True
+                and capability.get("preservesSessionOnMismatch") is True
+            )
             valid_account = isinstance(account, str) and 0 < len(account) <= 255
             state = (
                 "online"
@@ -220,6 +227,7 @@ class LiveRuntime:
                 "reason": reason,
                 "source": "native_auth_fsm_process_check",
                 "account_matches": valid_account and (not expected or expected == account),
+                "login_identity_guard_verified": guard_verified,
             }
         except SourceError as error:
             result = {
