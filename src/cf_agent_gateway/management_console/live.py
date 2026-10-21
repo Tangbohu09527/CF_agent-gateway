@@ -20,8 +20,12 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from cf_agent_gateway.adapters.wechat.errors import WechatNormalizationError
 from cf_agent_gateway.adapters.wechat.message_event import wechat_message_to_event
-from cf_agent_gateway.adapters.wechat.normalizer import normalize_wechat_message
+from cf_agent_gateway.adapters.wechat.normalizer import (
+    build_wechat_checkpoint_fingerprint,
+    normalize_wechat_message,
+)
 from cf_agent_gateway.admin.auth import enforce_admin_request_body_limit, require_admin_role
 from cf_agent_gateway.database import get_database_session
 from cf_agent_gateway.delivery.models import DeliveryOutboxRecord
@@ -77,6 +81,21 @@ def cursor_value(cursor, source, account):
         return value
     except (ValueError, TypeError, json.JSONDecodeError):
         raise ManagementError("increment_cursor_scope_invalid", 422) from None
+
+
+def invalid_baseline_key(raw, source, account, chat):
+    try:
+        fingerprint = build_wechat_checkpoint_fingerprint(raw)
+    except WechatNormalizationError:
+        return None
+    if not fingerprint:
+        return None
+    return (
+        "invalid-baseline:"
+        + hashlib.sha256(
+            (source + "\0" + account + "\0" + chat + "\0" + fingerprint).encode()
+        ).hexdigest()
+    )
 
 
 class LiveRuntime:
@@ -251,6 +270,8 @@ class LiveRuntime:
             row = session.get(LiveObservation, "wechat:" + source)
             bot = observation(row.value if row else None, row.observed_at if row else None)
             control = session.get(ArchiveControl, source)
+            quality = session.get(LiveObservation, "archive-quality:" + source)
+            quality_value = quality.value if quality else {}
             collection = {
                 "state": "disabled",
                 "enabled": False,
@@ -270,6 +291,8 @@ class LiveRuntime:
                     if stale
                     else "blocked"
                     if control.last_error
+                    else "partial"
+                    if quality_value.get("skipped_invalid_rows")
                     else "running",
                     last_check_at=iso(control.last_check_at),
                     last_success_at=iso(control.last_success_at),
@@ -283,6 +306,7 @@ class LiveRuntime:
                 production_archive="read_only",
                 coverage=f"启用时的可见窗口仅记录基线；此后采集近期非隐藏会话每群/私聊最新{WINDOW_LIMIT}条。停采、上游窗口和新发现旧会话可能有缺口；不回放历史。",
                 owner="single_candidate_process",
+                data_quality=quality_value,
             )
             return {"bot": bot, "collection": collection}
 
@@ -319,22 +343,68 @@ class LiveRuntime:
                             raise SourceError("source_chat_identity_invalid")
                         rows = reader.messages(chat_id, WINDOW_LIMIT)
                         readable = now()
-                        normalized = [
-                            normalize_wechat_message(
-                                row, source_account_id=account, conversation_name=chat.get("name")
-                            )
-                            for row in rows
-                        ]
+                        normalized, invalid_keys, invalid_count = [], [], 0
+                        for row in rows:
+                            try:
+                                normalized.append(
+                                    normalize_wechat_message(
+                                        row,
+                                        source_account_id=account,
+                                        conversation_name=chat.get("name"),
+                                    )
+                                )
+                            except WechatNormalizationError:
+                                # Missing identities remain a visible coverage gap. Never
+                                # guess a sender or let one old row stop every other chat.
+                                invalid_count += 1
+                                key = invalid_baseline_key(row, source, account, chat_id)
+                                if key:
+                                    invalid_keys.append(key)
                         if any(row.conversation_id != chat_id for row in normalized):
                             raise SourceError("source_conversation_mismatch")
-                        windows.append((chat, chat_id, normalized, readable))
+                        windows.append(
+                            (chat, chat_id, normalized, readable, invalid_keys, invalid_count)
+                        )
                     if reader.account() != account:
                         raise SourceError("source_account_changed_during_collect")
                     initial = control.last_success_at is None
-                    for chat, chat_id, rows, readable in windows:
+                    for chat, chat_id, rows, readable, invalid_keys, _ in windows:
+                        if initial:
+                            for key in invalid_keys:
+                                if not session.scalar(
+                                    select(ArchiveObservation.id).where(
+                                        ArchiveObservation.source_id == source,
+                                        ArchiveObservation.account_id == account,
+                                        ArchiveObservation.event_id == key,
+                                    )
+                                ):
+                                    session.add(
+                                        ArchiveObservation(
+                                            source_id=source,
+                                            account_id=account,
+                                            event_id=key,
+                                            conversation_id=chat_id,
+                                            message_id=None,
+                                            upstream_readable_at=readable,
+                                            archived_at=None,
+                                        )
+                                    )
+                            session.commit()
                         self.persist_window(
                             session, control, chat, chat_id, rows, readable, initial
                         )
+                    quality = session.get(LiveObservation, "archive-quality:" + source)
+                    if quality is None:
+                        quality = LiveObservation(key="archive-quality:" + source)
+                        session.add(quality)
+                    invalid_count = sum(window[-1] for window in windows)
+                    quality.value = {
+                        "skipped_invalid_rows": invalid_count,
+                        "affected_conversations": sum(bool(window[-1]) for window in windows),
+                        "known_gap": bool(invalid_count or (quality.value or {}).get("known_gap")),
+                        "reason": "invalid_message_identity_or_schema" if invalid_count else None,
+                    }
+                    quality.observed_at = now()
                     control.last_check_at = control.last_success_at = now()
                     control.last_error = None
                     session.commit()
@@ -363,6 +433,17 @@ class LiveRuntime:
         known_chat = chat_id in (control.baselined_chats or {})
         initial_baseline = initial
         for normalized in rows:
+            failed_baseline = invalid_baseline_key(
+                normalized.raw_payload, source.id, control.account_id, chat_id
+            )
+            if failed_baseline and session.scalar(
+                select(ArchiveObservation.id).where(
+                    ArchiveObservation.source_id == source.id,
+                    ArchiveObservation.account_id == control.account_id,
+                    ArchiveObservation.event_id == failed_baseline,
+                )
+            ):
+                continue
             existing = session.scalar(
                 select(ArchiveObservation).where(
                     ArchiveObservation.source_id == source.id,

@@ -165,3 +165,24 @@ def test_formal_overlap_pagination_deduplicates_whole_partition(h):
     finally:
         for engine in config._archives.values():
             engine.dispose()
+
+
+def test_invalid_old_identity_is_visible_gap_and_does_not_stop_new_archive(h):
+    h.peer.messages["wxid_demo_0000"] = [raw(31, sender="", type=49, isSelf=None)]
+    cursor = begin(h)
+    state = h.get("/live/native")
+    assert state["collection"]["state"] == "partial"
+    assert state["collection"]["data_quality"]["skipped_invalid_rows"] == 1
+    h.peer.messages["wxid_demo_0000"].append(raw(32))
+    h.app.state.console_live.tick("native")
+    delta = h.get("/live/native", after=cursor)
+    assert len(delta["items"]) == 1
+    assert delta["items"][0]["message"]["content"].endswith("32")
+    # If upstream repairs the old malformed baseline, it remains historical,
+    # rather than becoming a new task/message replay after a restart.
+    h.peer.messages["wxid_demo_0000"][0] = raw(31)
+    h.restart()
+    h.app.state.console_live.tick("native")
+    assert not h.get("/live/native", after=delta["cursor"])["items"]
+    with h.app.state.database_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
