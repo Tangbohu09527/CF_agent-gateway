@@ -22,8 +22,6 @@ config/*.local.yaml
 **/__pycache__
 *.db-shm
 *.db-wal
-tests
-docs
 runtime
 **/admin.json
 **/browser-login.json
