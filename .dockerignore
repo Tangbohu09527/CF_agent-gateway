@@ -17,3 +17,13 @@ htmlcov
 .task-artifacts
 runtime.env
 config/*.local.yaml
+
+# Candidate console runtime never enters the build context
+**/__pycache__
+*.db-shm
+*.db-wal
+runtime
+**/admin.json
+**/browser-login.json
+**/sources.json
+**/hermes-connections.json

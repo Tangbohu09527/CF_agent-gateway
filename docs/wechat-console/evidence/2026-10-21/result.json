@@ -1,0 +1,294 @@
+{
+  "passed": true,
+  "synthetic_data": true,
+  "real_page": true,
+  "real_gateway": true,
+  "real_database": true,
+  "hermes_profile_creation": "not_available_in_this_demo; failure verified, no success fabricated",
+  "checks": [
+    {
+      "name": "Invalid password is rejected visibly",
+      "passed": true
+    },
+    {
+      "name": "Cookie login opens synthetic candidate",
+      "passed": true
+    },
+    {
+      "name": "Fixed navigation contains seven areas",
+      "passed": true
+    },
+    {
+      "name": "No message send input or button",
+      "passed": true
+    },
+    {
+      "name": "Contacts use real backend pagination",
+      "passed": true
+    },
+    {
+      "name": "Official contacts filter is connected",
+      "passed": true
+    },
+    {
+      "name": "OpenIM contacts filter is connected",
+      "passed": true
+    },
+    {
+      "name": "Empty source class has explicit empty state",
+      "passed": true
+    },
+    {
+      "name": "Duplicate nicknames preserve distinct remark identities",
+      "passed": true
+    },
+    {
+      "name": "Contact detail is a real drawer",
+      "passed": true
+    },
+    {
+      "name": "Technical diagnosis is collapsed",
+      "passed": true
+    },
+    {
+      "name": "Contact UI creates real employee with two independent permission levels",
+      "passed": true
+    },
+    {
+      "name": "Repeated submit is disabled during request",
+      "passed": true
+    },
+    {
+      "name": "Ungrouped employee creation fails visibly",
+      "passed": true
+    },
+    {
+      "name": "Ungrouped creation does not fabricate a ready binding",
+      "passed": true
+    },
+    {
+      "name": "Template and group are created through real UI/backend",
+      "passed": true
+    },
+    {
+      "name": "Template UI persists a new version",
+      "passed": true
+    },
+    {
+      "name": "Bulk group assignment is real",
+      "passed": true
+    },
+    {
+      "name": "Inline permission switch persists",
+      "passed": true
+    },
+    {
+      "name": "Employee disabled state persists",
+      "passed": true
+    },
+    {
+      "name": "Discovered groups have truthful coverage",
+      "passed": true
+    },
+    {
+      "name": "Group setting is saved through discovered stable identity",
+      "passed": true
+    },
+    {
+      "name": "Unconnected node displays unavailable rather than success",
+      "passed": true
+    },
+    {
+      "name": "Real unavailable Profile operation is exposed as failure",
+      "passed": true
+    },
+    {
+      "name": "1440px contacts have no document overflow",
+      "passed": true
+    },
+    {
+      "name": "Archive page renders real persisted messages",
+      "passed": true
+    },
+    {
+      "name": "Text and quote are escaped",
+      "passed": true
+    },
+    {
+      "name": "Attachment metadata is readable without a fabricated download",
+      "passed": true
+    },
+    {
+      "name": "Message archive has real pagination",
+      "passed": true
+    },
+    {
+      "name": "Beijing date filter crosses September/October correctly",
+      "passed": true
+    },
+    {
+      "name": "Message content filter and reply render",
+      "passed": true
+    },
+    {
+      "name": "No matching filter result is distinct from missing archive",
+      "passed": true
+    },
+    {
+      "name": "Empty date range is distinct from missing archive",
+      "passed": true
+    },
+    {
+      "name": "Unarchived contact is reported explicitly",
+      "passed": true
+    },
+    {
+      "name": "Rejected or missing avatar falls back without broken image",
+      "passed": true
+    },
+    {
+      "name": "1920px chat has no document overflow",
+      "passed": true
+    },
+    {
+      "name": "430px chat has no document overflow",
+      "passed": true
+    },
+    {
+      "name": "Narrow chat returns to conversation list",
+      "passed": true
+    },
+    {
+      "name": "Diagnostics are collapsed by default",
+      "passed": true
+    },
+    {
+      "name": "Cookie session survives refresh",
+      "passed": true
+    },
+    {
+      "name": "Configuration survives page refresh",
+      "passed": true
+    },
+    {
+      "name": "No credentials persist in localStorage/sessionStorage",
+      "passed": true
+    },
+    {
+      "name": "Password is absent from rendered page",
+      "passed": true
+    },
+    {
+      "name": "Network failure has visible truthful state",
+      "passed": true
+    },
+    {
+      "name": "Unauthenticated backend request is rejected",
+      "passed": true
+    },
+    {
+      "name": "Expired session clears management data and returns to login",
+      "passed": true
+    },
+    {
+      "name": "No JavaScript page exceptions",
+      "passed": true
+    },
+    {
+      "name": "No unexpected browser console errors",
+      "passed": true
+    }
+  ],
+  "writes": [
+    {
+      "path": "/admin/console/login",
+      "method": "POST",
+      "status": 401
+    },
+    {
+      "path": "/admin/console/login",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/contacts/8b85d000-ab09-4f20-8645-baa8feaf5baf/employee",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/profiles/ensure",
+      "method": "POST",
+      "status": 409
+    },
+    {
+      "path": "/admin/console/contacts/88beb107-62ad-4dca-a2d6-b6b4079f55d0/employee",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/templates",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/groups",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/templates/33bde4b6-a481-4ec5-815b-1717425132e1",
+      "method": "PUT",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/contacts/bulk",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/employees/629edb28-f57b-44ff-8008-a88777bcb8c0",
+      "method": "PUT",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/employees/629edb28-f57b-44ff-8008-a88777bcb8c0",
+      "method": "PUT",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/employees/629edb28-f57b-44ff-8008-a88777bcb8c0",
+      "method": "PUT",
+      "status": 200
+    },
+    {
+      "path": "/admin/console/rooms/24e6c010-b146-44a8-a959-2e16813a1ba3/settings",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/nodes/demo-node/check",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/profile-b/profiles/ensure",
+      "method": "POST",
+      "status": 409
+    }
+  ],
+  "pageErrors": [],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 409 (Conflict)",
+    "Failed to load resource: the server responded with a status of 409 (Conflict)",
+    "Failed to load resource: net::ERR_INTERNET_DISCONNECTED",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "screenshots": [
+    "contacts-1440-synthetic.png",
+    "chat-1920-synthetic.png",
+    "chat-430-synthetic.png",
+    "system-1440-synthetic.png"
+  ]
+}

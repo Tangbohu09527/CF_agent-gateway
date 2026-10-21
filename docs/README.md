@@ -6,6 +6,7 @@ Runbooks describe reusable procedures and are not proof of acceptance.
 
 ## Start here
 
+- [微信管理台候选](wechat-management-console.md): 通讯录、群、聊天档案、员工授权与独立候选部署；与正式生效边界分开。
 - [Production status](production-status.md): latest observed image, evidence boundaries,
   historical P1 baseline, residual warnings and rollback limitations.
 - [September 17 long-task acceptance](validation/2026-09-17-hermes-long-task-acceptance.md):

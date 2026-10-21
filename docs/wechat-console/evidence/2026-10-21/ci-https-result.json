@@ -1,0 +1,73 @@
+{
+  "synthetic_data": true,
+  "real_docker_compose": true,
+  "candidate_revision": "25e45b0ddfd8be4b0ef64296035d28da65fc8dd3",
+  "hermes": "not started",
+  "passed": true,
+  "checks": [
+    {
+      "name": "TLS verifies the CI CA and 127.0.0.1 SAN",
+      "passed": true
+    },
+    {
+      "name": "Candidate health and actual console HTML are reachable over trusted HTTPS",
+      "passed": true
+    },
+    {
+      "name": "Unauthenticated management request is rejected",
+      "passed": true
+    },
+    {
+      "name": "HTTPS login sets Secure HttpOnly SameSite=Strict session cookie",
+      "passed": true
+    },
+    {
+      "name": "Cookie-authenticated write without CSRF is rejected",
+      "passed": true
+    },
+    {
+      "name": "Cross-origin write is rejected even with a valid CSRF token",
+      "passed": true
+    },
+    {
+      "name": "Same-origin Host with HTTPS port passes Origin and CSRF validation",
+      "passed": true
+    },
+    {
+      "name": "Real container Gateway reads all 247 synthetic native contacts",
+      "passed": true
+    },
+    {
+      "name": "Native camelCase fields normalize into actual cached contact details",
+      "passed": true
+    },
+    {
+      "name": "Permission changes use the real management backend and candidate database",
+      "passed": true
+    },
+    {
+      "name": "Synthetic persisted message archive is actually readable",
+      "passed": true
+    },
+    {
+      "name": "Ungrouped employee does not acquire a derived Profile",
+      "passed": true
+    },
+    {
+      "name": "Restart stopped the first owned candidate cleanly through its supported control file",
+      "passed": true
+    },
+    {
+      "name": "Database-backed login session survives candidate restart",
+      "passed": true
+    },
+    {
+      "name": "Stable contact and employee permission survive restart without duplication",
+      "passed": true
+    },
+    {
+      "name": "Restart retains one employee and the original candidate-only management scope",
+      "passed": true
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-param([string]$Runtime)
+﻿param([string]$Runtime)
 $ErrorActionPreference = 'Stop'
 if (-not $Runtime) { $Runtime = Join-Path ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))) 'runtime/demo' }
 $recordPath = Join-Path $Runtime 'owned-processes.json'

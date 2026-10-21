@@ -1,0 +1,10 @@
+{
+  "synthetic_data": true,
+  "owned_project": "cf-console-https-39540099645-1",
+  "cleanup_passed": true,
+  "compose_stop_returncode": 0,
+  "owned_children_stopped": true,
+  "all_native_requests_read_only": true,
+  "owned_containers_removed": true,
+  "failures": []
+}

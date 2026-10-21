@@ -1,0 +1,59 @@
+name: cf-wechat-console-candidate
+services:
+  console:
+    image: cf-wechat-console-candidate:${CANDIDATE_REVISION:?set exact candidate commit}
+    build:
+      context: ../..
+      dockerfile: deploy/wechat-console/Dockerfile
+      args:
+        CANDIDATE_REVISION: ${CANDIDATE_REVISION:?set exact candidate commit}
+    restart: unless-stopped
+    init: true
+    user: "${CONSOLE_UID:-10001}:${CONSOLE_GID:-10001}"
+    ports:
+      - "${CONSOLE_BIND_IP:-127.0.0.1}:${CONSOLE_PORT:-18770}:8080"
+      - "${CONSOLE_TLS_BIND_IP:-127.0.0.1}:${CONSOLE_TLS_PORT:-18445}:8443"
+    env_file:
+      - ${CONSOLE_SECRET_ENV:?operator-owned candidate env file outside repository}
+    volumes:
+      - ${CONSOLE_RUNTIME:?independent writable candidate runtime}:/runtime
+    networks:
+      - upstream_read
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  proxy:
+    profiles: [https]
+    image: ${CONSOLE_PROXY_IMAGE:-nginx:stable}
+    restart: unless-stopped
+    network_mode: service:console
+    depends_on:
+      console:
+        condition: service_healthy
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${CONSOLE_TLS_DIRECTORY:-/nonexistent/operator-tls}:/etc/nginx/tls:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]
+    healthcheck:
+      test: [CMD, nginx, -t]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+networks:
+  upstream_read:
+    external: true
+    name: ${CONSOLE_NETWORK:?existing approved internal network}

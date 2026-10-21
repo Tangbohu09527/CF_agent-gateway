@@ -1,0 +1,87 @@
+{
+  "strict_https_login": true,
+  "secure_httponly_cookie": true,
+  "sync": {
+    "status": "offline_cached",
+    "bot_status": "app_not_running",
+    "last_sync_at": "2026-10-21T03:40:44.323531+00:00",
+    "counts": {
+      "contact_rows": 448,
+      "recent_chat_rows": 22
+    },
+    "pagination": {
+      "contacts": [
+        {
+          "offset": 0,
+          "returned": 200
+        },
+        {
+          "offset": 200,
+          "returned": 195
+        },
+        {
+          "offset": 400,
+          "returned": 53
+        },
+        {
+          "offset": 600,
+          "returned": 0
+        }
+      ],
+      "chats": [
+        {
+          "offset": 0,
+          "returned": 22
+        },
+        {
+          "offset": 50,
+          "returned": 0
+        }
+      ]
+    },
+    "archive": "configured_read_only",
+    "all_groups_supported": false
+  },
+  "contacts": {
+    "total": 430,
+    "sample_count": 100,
+    "fields": {
+      "username": 100,
+      "account_id": 100,
+      "nick_name": 99,
+      "remark": 0,
+      "alias": 84,
+      "avatar_url": 99
+    },
+    "linked_employees": 0,
+    "stable_identity_unique": true,
+    "next_page_distinct": true
+  },
+  "rooms": {
+    "discovered_total": 11,
+    "sample_has_stable_identity": true,
+    "members_explicitly_unsupported": true
+  },
+  "conversations": {
+    "total": 22,
+    "sample_count": 22
+  },
+  "archive_queries": [
+    {
+      "total": 2220,
+      "status": "ok",
+      "returned": 3,
+      "timestamps_present": true,
+      "sender_identity_present": true
+    }
+  ],
+  "candidate_scope": {
+    "read_only_mode": true,
+    "candidate_only": true,
+    "production_effective": false,
+    "employees_not_auto_created": true,
+    "profiles_not_auto_created": true
+  },
+  "production_container_identities_unchanged": true,
+  "passed": true
+}

@@ -1,0 +1,58 @@
+{
+  "synthetic_data": true,
+  "capture_date": "2026-10-21",
+  "local_browser_framework": "Playwright 1.62.1 with Edge",
+  "ci_browser_framework": "Playwright 1.56.1 with Chromium (configured; execution recorded separately)",
+  "files": [
+    {
+      "name": "contacts-1440-synthetic.png",
+      "sha256": "4e8f82d812495b3fac4ed77a99197e6c82c4f6c2643bc3342155de41c5644c2c",
+      "bytes": 76426
+    },
+    {
+      "name": "contact-detail-1440-synthetic.png",
+      "sha256": "22d8f99191b55fd3251f7a7d05032d7e97e8c626dcefbb1137c36949af740cc9",
+      "bytes": 106099
+    },
+    {
+      "name": "contact-permissions-1440-synthetic.png",
+      "sha256": "6bc3d3ab68e9313f4d7486fcd1cec124435c7067bafe21fd0ce675dba74b565c",
+      "bytes": 87299
+    },
+    {
+      "name": "groups-1440-synthetic.png",
+      "sha256": "dc35dcd2040eb3083e2507190664f664dfea7ce36497ce78429b22639c86526c",
+      "bytes": 119811
+    },
+    {
+      "name": "group-detail-1440-synthetic.png",
+      "sha256": "e3dfd8a3533e9ef6519ea541b9a1c8004186190d6442c06f33d6b89f94e28eb3",
+      "bytes": 133145
+    },
+    {
+      "name": "chat-1920-synthetic.png",
+      "sha256": "24e5d3e8272966e9e032de2ab7fdaa6371861855099bd60d93ce781c110ec734",
+      "bytes": 144850
+    },
+    {
+      "name": "chat-430-synthetic.png",
+      "sha256": "54531444c3379205bba4929cc83a76fecb0e54fa5229f23a3a90f2066af49b5b",
+      "bytes": 53790
+    },
+    {
+      "name": "system-1440-synthetic.png",
+      "sha256": "24e1caacaa65330e70c2836b25099c332c2d23257c41e28b0a063ec0630061b1",
+      "bytes": 81407
+    },
+    {
+      "name": "result.json",
+      "sha256": "5c9311aaf0a4ee59a66a6126f92566f2365d7799929259b90b49e5038cf49100",
+      "bytes": 7270
+    },
+    {
+      "name": "ux-checks.json",
+      "sha256": "11b53d570e99340a152cd57134ef19e4a5b09fb45deccc0b6b30c7c8bdbdd3ee",
+      "bytes": 2379
+    }
+  ]
+}
