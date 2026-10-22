@@ -149,6 +149,8 @@ jobs:
             "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/nodes_browser_runner.py
           CF_CONSOLE_RUNTIME="$RUNNER_TEMP/console-live" \
             "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/live_browser_runner.py
+          CF_CONSOLE_RUNTIME="$RUNNER_TEMP/console-realtime-race" \
+            "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/realtime_race_browser_runner.py
           docker pull python:3.12-slim
           "$RUNNER_TEMP/wechat-console-python/bin/python" tests/management_console/controller_linux_smoke.py
       - name: Preserve allowlisted nodes and live synthetic evidence
@@ -164,6 +166,9 @@ jobs:
             ${{ runner.temp }}/console-nodes/nodes-browser-evidence/node-wizard-current-1440-synthetic.png
             ${{ runner.temp }}/console-nodes/nodes-browser-evidence/node-check-1440-synthetic.png
             ${{ runner.temp }}/console-live/live-browser-evidence/live-result.json
+            ${{ runner.temp }}/console-realtime-race/realtime-race-evidence/realtime-race-result.json
+            ${{ runner.temp }}/console-realtime-race/realtime-race-evidence/peer-summary.json
+            ${{ runner.temp }}/console-realtime-race/realtime-race-evidence/realtime-race-synthetic.png
             ${{ runner.temp }}/console-live/live-browser-evidence/peer-summary.json
             ${{ runner.temp }}/console-live/live-browser-evidence/live-history-1440-synthetic.png
             ${{ runner.temp }}/console-live/live-browser-evidence/live-system-1440-synthetic.png

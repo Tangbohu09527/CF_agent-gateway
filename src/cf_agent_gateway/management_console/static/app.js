@@ -235,7 +235,8 @@ function messageCard(m){
 }
 function messageMatches(m){const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(m.occurred_at));return (!messageQuery.q||m.content?.toLowerCase().includes(messageQuery.q.toLowerCase()))&&(!messageQuery.sender||m.sender_id===messageQuery.sender)&&(!messageQuery.date_from||day>=messageQuery.date_from)&&(!messageQuery.date_to||day<=messageQuery.date_to);}
 async function applyLiveChanges(items){
- if(pageName!=='chats'||!$('.conversation-list'))return;
+ if(pageName!=='chats')return;
+ if(!$('.conversation-list'))return false;
  const originalSource=source,originalPage=pageGeneration,originalChat=activeChat?.id,originalMessages=messageGeneration;
  const result=await consoleApi('conversations?'+query({source,...chatsQuery}));
  if(originalSource!==source||originalPage!==pageGeneration||!$('.conversation-list'))return;
@@ -245,7 +246,10 @@ async function applyLiveChanges(items){
  const list=$('.conversation-list'),scroll=list.scrollTop;
  list.innerHTML=chatItems.map(x=>`<button class="conversation-item${activeChat?.id===x.id?' active':''}" data-conversation="${esc(x.id)}" aria-label="打开 ${esc(x.display_name)} 的归档聊天">${avatar(x,x.kind==='group')}<span class="conversation-copy"><span class="conversation-top"><strong>${esc(x.display_name)}</strong><time>${esc(shortDate(x.last_at))}</time></span><span class="conversation-bottom"><span>${esc(x.last_message||'尚无消息摘要')}</span></span></span></button>`).join('');list.scrollTop=scroll;
  $$('[data-conversation]').forEach(b=>b.onclick=()=>{activeChat=chatItems.find(x=>x.id===b.dataset.conversation);messageQuery={q:'',sender:'',date_from:'',date_to:'',offset:0,limit:30};$$('[data-conversation]').forEach(x=>x.classList.toggle('active',x===b));$('.chat-shell').classList.add('reading-open');renderMessages();});
- const messages=$('#message-list');if(!activeChat||activeChat.id!==originalChat||messageGeneration!==originalMessages||!messages||$('.initial-loading',messages))return;
+ const messages=$('#message-list');if(!activeChat||activeChat.id!==originalChat||messageGeneration!==originalMessages||!messages)return;
+ // A pending snapshot can predate this batch. Keep the durable cursor until
+ // the snapshot finishes, then retry rather than losing the event behind it.
+ if($('.initial-loading',messages))return !items.some(x=>x.conversation_id===activeChat.id);
  if(items.some(x=>x.conversation_id===activeChat.id)){
   const metadata=await consoleApi('conversations/'+encodeURIComponent(activeChat.id)+'/messages?'+query({source,...messageQuery,limit:1,offset:0}));
   if(originalSource!==source||originalPage!==pageGeneration||activeChat?.id!==originalChat||messageGeneration!==originalMessages||!messages.isConnected)return;
