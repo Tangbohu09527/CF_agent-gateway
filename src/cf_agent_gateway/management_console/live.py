@@ -239,6 +239,8 @@ class LiveRuntime:
                 if isinstance(raw, str) and raw in OFFLINE | {"logged_in", "unknown"}
                 else "source_status_unrecognized"
             )
+            if raw == "unknown" and value.get("reason") == "auth_observation_unrecognized":
+                reason = "auth_observation_unrecognized"
             if expected and account and expected != account:
                 state, reason = "unknown", "source_account_mismatch"
             result = {

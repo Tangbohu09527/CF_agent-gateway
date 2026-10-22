@@ -12,6 +12,7 @@ from cf_agent_gateway.management_console.live import observation
 from cf_agent_gateway.management_console.live_models import ArchiveControl, ArchiveObservation
 from cf_agent_gateway.management_console.service import ConsoleService
 from cf_agent_gateway.message.models import Message
+from cf_agent_gateway.message.store import MessageStore
 from cf_agent_gateway.task.model.models import HermesDispatchRecord
 
 
@@ -93,6 +94,47 @@ def test_restart_persists_collection_and_recovers_incremental_cursor(h):
     assert len(h.get("/live/native", after=first["cursor"])["items"]) == 1
 
 
+def test_same_second_same_body_distinct_events_survive_repeated_windows(h):
+    h.peer.messages["wxid_demo_0000"] = [raw(40)]
+    cursor = begin(h)
+    timestamp = datetime.now(UTC).isoformat()
+    h.peer.messages["wxid_demo_0000"].extend(
+        raw(n, content="合成相同正文", timestamp=timestamp) for n in (41, 42)
+    )
+    h.app.state.console_live.tick("native")
+    first = h.get("/live/native", after=cursor)
+    assert len(first["items"]) == 2
+    assert len({item["message"]["event_id"] for item in first["items"]}) == 2
+    h.app.state.console_live.tick("native")
+    assert not h.get("/live/native", after=first["cursor"])["items"]
+
+
+def test_message_commit_before_interrupted_journal_recovers_after_restart(h, monkeypatch):
+    cursor = begin(h)
+    h.peer.messages["wxid_demo_0000"] = [raw(50)]
+    create = MessageStore.create
+
+    def commit_then_interrupt(store, event):
+        create(store, event)
+        raise RuntimeError("synthetic_process_interruption_after_message_commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(MessageStore, "create", commit_then_interrupt)
+        with pytest.raises(RuntimeError, match="synthetic_process_interruption"):
+            h.app.state.console_live.tick("native")
+    with h.app.state.database_session_factory() as session:
+        assert session.scalar(select(Message.id).where(Message.source_server_id == "server-50"))
+    assert not h.get("/live/native", after=cursor)["items"]
+    h.restart()
+    h.app.state.console_live.tick("native")
+    recovered = h.get("/live/native", after=cursor)
+    assert len(recovered["items"]) == 1
+    h.app.state.console_live.tick("native")
+    assert not h.get("/live/native", after=recovered["cursor"])["items"]
+    with h.app.state.database_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(HermesDispatchRecord)) == 0
+
+
 def test_cross_source_cursor_account_change_offline_and_authentication(h):
     cursor = begin(h)
     live = h.app.state.console_live
@@ -124,6 +166,36 @@ def test_status_expires_green_to_unknown_and_silent_bot_not_offline(h):
     assert observation({"state": "offline"}, old)["state"] == "unknown"
     assert h.get("/live/native")["collection"]["state"] == "disabled"
     assert not any(x["method"] != "GET" for x in h.peer.calls)
+
+
+@pytest.mark.parametrize(
+    ("upstream_reason", "expected"),
+    [
+        ("auth_observation_unrecognized", "auth_observation_unrecognized"),
+        ("untrusted source diagnostic", "unknown"),
+    ],
+)
+def test_current_unrecognized_auth_remains_unknown_with_allowlisted_reason(
+    h, monkeypatch, upstream_reason, expected
+):
+    class CurrentObservation:
+        def read(self, path):
+            assert path == "api/status/auth"
+            return {
+                "status": "unknown",
+                "reason": upstream_reason,
+                "identityVerified": False,
+                "loggedInUser": h.peer.account,
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(h.config, "reader_factory", lambda _: CurrentObservation())
+    h.app.state.console_live.probe("native", True)
+    bot = h.get("/live/native")["bot"]
+    assert bot["state"] == "unknown"
+    assert bot["reason"] == expected
 
 
 def test_collection_management_csrf_no_unverified_login_or_fake_controller(h):

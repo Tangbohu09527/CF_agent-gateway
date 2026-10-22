@@ -7,7 +7,7 @@ window.CFConsoleLive = (() => {
  const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const time=v=>v?new Date(v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'尚未检查';
  const words={online:'微信在线',offline:'微信离线',unknown:'微信状态未知',running:'采集运行',partial:'采集运行 · 存在资料缺口',disabled:'采集已停用',blocked:'采集受阻',stale:'采集检查过期',waiting_scan:'等待扫码',phone_confirm:'等待手机确认',connecting:'正在连接登录',verifying:'复核账号与资料',expired:'二维码已过期',failed:'登录失败',not_started:'尚未发起登录',already_online_preserved:'已在线，保留登录',available:'可用',unavailable:'不可用'};
- const reason={app_not_running:'微信进程未运行',logged_out:'尚未登录',session_expired:'登录失效',check_expired:'检查已过期',not_checked:'尚未检查',source_connection_failed:'微信接口连接失败',source_account_mismatch:'账号不符，已阻止接管',management_channel_not_configured:'管理通道未配置',management_channel_unavailable:'管理通道不可达',target_login_identity_guard_not_verified:'目标微信缺少已验证的账号保护，受控扫码尚未接通',wechat_not_verified_online:'微信尚未确认在线',archive_source_check_failed:'消息读取未完成，请检查上游接口',collector_internal_error:'归档检查异常，请查看候选服务状态'};
+ const reason={app_not_running:'微信进程未运行',logged_out:'尚未登录',session_expired:'登录失效',check_expired:'检查已过期',not_checked:'尚未检查',source_connection_failed:'微信接口连接失败',source_account_mismatch:'账号不符，已阻止接管',auth_observation_unrecognized:'当前微信界面未识别，不能确认在线；请检查登录页',management_channel_not_configured:'管理通道未配置',management_channel_unavailable:'管理通道不可达',target_login_identity_guard_not_verified:'目标微信缺少已验证的账号保护，受控扫码尚未接通',wechat_not_verified_online:'微信尚未确认在线',archive_source_check_failed:'消息读取未完成，请检查上游接口',collector_internal_error:'归档检查异常，请查看候选服务状态'};
  const text=v=>reason[v]||words[v]||v||'未提供';
  function stop(){generation++;renderVersion++;clearTimeout(timer);timer=null;context=null;cursor='';pending=0;lastSnapshot=null;flight=null;refreshRequested=false;document.querySelector('#new-message-notice')?.remove();document.querySelector('#controlled-qr')?.replaceChildren();}
  async function start(ctx){stop();context=ctx;const gen=generation;await tick(gen);}
@@ -27,7 +27,7 @@ window.CFConsoleLive = (() => {
     if(!current(ctx,gen,src))return;
     lastSnapshot=value;lamp(value.bot);
     // Commit the durable cursor only after this page accepts its changes.
-    if(value.items.length)await ctx.applyChanges(value.items);
+    if(value.items.length&&await ctx.applyChanges(value.items)===false){delay=500;return;}
     if(!current(ctx,gen,src))return;
     cursor=value.cursor;
     const root=document.querySelector('#live-system');if(root)await renderSystem(root,gen,value);
