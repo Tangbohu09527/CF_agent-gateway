@@ -84,9 +84,24 @@ def test_restart_persists_collection_and_recovers_incremental_cursor(h):
     cursor = begin(h)
     h.peer.messages["wxid_demo_0000"] = [raw(1)]
     h.app.state.console_live.tick("native")
+    first_started = datetime.now(UTC)
     first = h.get("/live/native", after=cursor)
+    first_finished = datetime.now(UTC)
     h.restart()
+    after_started = datetime.now(UTC)
     after = h.get("/live/native", after=cursor)
+    after_finished = datetime.now(UTC)
+    assert len(first["items"]) == len(after["items"]) == 1
+    # Processing evidence is inspected afresh; every persisted field must survive restart.
+    first_observed = datetime.fromisoformat(
+        first["items"][0]["message"]["processing"].pop("observed_at")
+    )
+    after_observed = datetime.fromisoformat(
+        after["items"][0]["message"]["processing"].pop("observed_at")
+    )
+    assert first_started <= first_observed <= first_finished
+    assert after_started <= after_observed <= after_finished
+    assert first_observed <= after_observed
     assert after["items"] == first["items"]
     assert after["collection"]["enabled"]
     h.peer.messages["wxid_demo_0000"].append(raw(2))
