@@ -225,11 +225,18 @@ def test_account_switch_never_reuses_contact_binding(h):
     original = h.contact()
     h.enroll(original)
     h.peer.account = "demo-bot-b"
-    h.sync()
-    assert h.contact()["id"] != original["id"]
-    assert h.contact()["employee"] is None
+    h.post("/sources/native/sync", expected=503)
+    assert h.contact()["id"] == original["id"]
+    h.config.sources["native-b"] = replace(h.config.sources["native"], label="另一个合成账号")
+    with h.app.state.database_session_factory() as session:
+        session.add(DirectorySource(id="native-b", label="另一个合成账号", sync_details={}))
+        session.commit()
+    h.post("/sources/native-b/sync")
+    new = h.get("/contacts", source="native-b", q=original["username"])["items"][0]
+    assert new["id"] != original["id"]
+    assert new["employee"] is None
     response = h.client.get(PREFIX + "/contacts/" + original["id"])
-    assert response.status_code == 409
+    assert response.status_code == 200
 
 
 def test_link_existing_identity_preserves_identity_and_group_selection(h):

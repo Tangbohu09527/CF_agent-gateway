@@ -18,6 +18,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from cf_agent_gateway.adapters.wechat.errors import WechatNormalizationError
@@ -29,6 +30,8 @@ from cf_agent_gateway.adapters.wechat.normalizer import (
 from cf_agent_gateway.admin.auth import enforce_admin_request_body_limit, require_admin_role
 from cf_agent_gateway.database import get_database_session
 from cf_agent_gateway.delivery.models import DeliveryOutboxRecord
+from cf_agent_gateway.management_console.diagnostics import record as record_stage
+from cf_agent_gateway.management_console.diagnostics import safe_reason
 from cf_agent_gateway.management_console.live_models import (
     ArchiveControl,
     ArchiveObservation,
@@ -241,6 +244,8 @@ class LiveRuntime:
             )
             if raw == "unknown" and value.get("reason") == "auth_observation_unrecognized":
                 reason = "auth_observation_unrecognized"
+            if raw == "logged_in" and value.get("identityVerified") is False:
+                state, reason = "unknown", "source_identity_unverified"
             if expected and account and expected != account:
                 state, reason = "unknown", "source_account_mismatch"
             result = {
@@ -264,6 +269,19 @@ class LiveRuntime:
                 row = LiveObservation(key="wechat:" + source)
                 session.add(row)
             row.value, row.observed_at = result, observed
+            record_stage(
+                session,
+                source,
+                "login",
+                "normal"
+                if result["state"] == "online"
+                else "blocked"
+                if result["state"] == "offline"
+                else "unknown",
+                result["reason"]
+                if result["reason"] in {"source_identity_unverified", "source_account_mismatch"}
+                else None,
+            )
             session.commit()
         self.last_auth[source] = time.monotonic()
 
@@ -273,6 +291,7 @@ class LiveRuntime:
             bot = observation(row.value if row else None, row.observed_at if row else None)
             control = session.get(ArchiveControl, source)
             quality = session.get(LiveObservation, "archive-quality:" + source)
+            trace = session.get(LiveObservation, "message-chain:" + source)
             quality_value = quality.value if quality else {}
             collection = {
                 "state": "disabled",
@@ -295,6 +314,7 @@ class LiveRuntime:
                     if control.last_error
                     else "partial"
                     if quality_value.get("skipped_invalid_rows")
+                    or quality_value.get("failed_read_conversations")
                     else "running",
                     last_check_at=iso(control.last_check_at),
                     last_success_at=iso(control.last_success_at),
@@ -310,7 +330,15 @@ class LiveRuntime:
                 owner="single_candidate_process",
                 data_quality=quality_value,
             )
-            return {"bot": bot, "collection": collection}
+            return {
+                "bot": bot,
+                "collection": collection,
+                "diagnostics": {
+                    **(trace.value if trace else {}),
+                    "observed_at": iso(trace.observed_at) if trace else None,
+                    "ttl_seconds": STATUS_TTL,
+                },
+            }
 
     def tick(self, source):
         with self.lock:
@@ -324,26 +352,34 @@ class LiveRuntime:
                         if not self.control:
                             raise ManagementError("archive_owner_not_verified", 409)
                         self.control.ensure_archive_owner(source)
+                        record_stage(session, source, "ownership", "normal")
                     except ManagementError as error:
                         control.last_check_at, control.last_error = now(), error.code
+                        record_stage(session, source, "ownership", "blocked", error.code)
                         session.commit()
                         return
                 if self.status(source)["bot"]["state"] != "online":
                     control.last_check_at, control.last_error = now(), "wechat_not_verified_online"
+                    record_stage(session, source, "login", "blocked", control.last_error)
                     session.commit()
                     return
                 reader = self.config.reader(source)
+                phase = "upstream"
                 try:
                     account = reader.account()
                     if account != control.account_id:
                         raise SourceError("source_account_mismatch")
                     chats, _ = reader.pages("api/chats", 50)
-                    windows = []
+                    windows, read_errors = [], []
                     for chat in chats:
                         chat_id = chat.get("username") or chat.get("id")
                         if not isinstance(chat_id, str) or not chat_id or len(chat_id) > 255:
                             raise SourceError("source_chat_identity_invalid")
-                        rows = reader.messages(chat_id, WINDOW_LIMIT)
+                        try:
+                            rows = reader.messages(chat_id, WINDOW_LIMIT)
+                        except SourceError as error:
+                            read_errors.append(safe_reason(error))
+                            continue
                         readable = now()
                         normalized, invalid_keys, invalid_count = [], [], 0
                         for row in rows:
@@ -369,7 +405,29 @@ class LiveRuntime:
                         )
                     if reader.account() != account:
                         raise SourceError("source_account_changed_during_collect")
+                    if chats and not windows:
+                        raise SourceError("source_messages_all_failed")
+                    record_stage(
+                        session,
+                        source,
+                        "upstream",
+                        "partial" if read_errors else "normal",
+                        read_errors[0] if read_errors else None,
+                        conversations=len(windows),
+                        failed_conversations=len(read_errors),
+                    )
+                    phase = "normalization"
+                    invalid_count = sum(window[-1] for window in windows)
+                    record_stage(
+                        session,
+                        source,
+                        "normalization",
+                        "partial" if invalid_count else "normal",
+                        "invalid_message_identity_or_schema" if invalid_count else None,
+                        invalid_rows=invalid_count,
+                    )
                     initial = control.last_success_at is None
+                    phase = "persistence"
                     for chat, chat_id, rows, readable, invalid_keys, _ in windows:
                         if initial:
                             for key in invalid_keys:
@@ -403,17 +461,27 @@ class LiveRuntime:
                     quality.value = {
                         "skipped_invalid_rows": invalid_count,
                         "affected_conversations": sum(bool(window[-1]) for window in windows),
-                        "known_gap": bool(invalid_count or (quality.value or {}).get("known_gap")),
+                        "failed_read_conversations": len(read_errors),
+                        "known_gap": bool(
+                            invalid_count or read_errors or (quality.value or {}).get("known_gap")
+                        ),
                         "reason": "invalid_message_identity_or_schema" if invalid_count else None,
                     }
                     quality.observed_at = now()
                     control.last_check_at = control.last_success_at = now()
                     control.last_error = None
+                    record_stage(session, source, "persistence", "normal")
                     session.commit()
-                except (SourceError, ValueError, TypeError):
+                except (SourceError, ValueError, TypeError, SQLAlchemyError) as error:
                     session.rollback()
                     control = session.get(ArchiveControl, source)
-                    control.last_check_at, control.last_error = now(), "archive_source_check_failed"
+                    code = (
+                        "candidate_commit_failed"
+                        if isinstance(error, SQLAlchemyError)
+                        else safe_reason(error)
+                    )
+                    control.last_check_at, control.last_error = now(), code
+                    record_stage(session, source, phase, "error", code)
                     session.commit()
                 finally:
                     reader.close()

@@ -171,22 +171,47 @@ def test_worker_revokes_and_waits_for_closed_before_completing(rig, failure, mon
     )
 
 
-def test_lost_closed_ack_uses_finite_host_lease(rig):
+def test_lost_closed_ack_uses_finite_host_lease(rig, monkeypatch):
     class Dispatcher:
         def dispatch_record(self, record):
             return outcome(record)
 
-    worker, claim, binding_id = prepare(rig, Dispatcher(), host_lease_seconds=0.4)
-    with rig.sessions() as session:
-        expires_at = aware(session.get(InboundHostBinding, binding_id).host_lease_until)
-    started = monotonic()
+    # Observe the host barrier before advancing its persisted deadline. Tiny
+    # wall-clock leases can expire during fixture/CI scheduling before the
+    # worker even enters its first dispatch renewal, testing a different fence.
+    worker, claim, binding_id = prepare(rig, Dispatcher(), lease_seconds=30, host_lease_seconds=30)
+    revoked_committed = Event()
+    revoke_dispatch = host_binding.revoke_dispatch
+
+    def observe_revocation(session, dispatch_id, reason, *, claim_token=None):
+        revoke_dispatch(session, dispatch_id, reason, claim_token=claim_token)
+        if dispatch_id == claim.record_id:
+            event.listen(session, "after_commit", lambda _: revoked_committed.set(), once=True)
+
+    monkeypatch.setattr(host_binding, "revoke_dispatch", observe_revocation)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        result = executor.submit(worker.process_claim, claim).result(timeout=3)
+        future = executor.submit(worker.process_claim, claim)
+        try:
+            assert revoked_committed.wait(10), "revocation transaction did not commit"
+            with rig.sessions() as session:
+                binding = session.get(InboundHostBinding, binding_id)
+                assert binding.state == "revoked"
+                assert aware(binding.host_lease_until) > datetime.now(UTC)
+                assert binding.closed_at is None
+                assert session.scalar(select(HermesDispatchResponse)) is None
+            assert not future.done()
+        finally:
+            # Advance only the synthetic host deadline, including on failed
+            # assertions, so executor cleanup never waits for the fixture lease.
+            expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            with rig.sessions() as session:
+                session.get(InboundHostBinding, binding_id).host_lease_until = expires_at
+                session.commit()
+        result = future.result(timeout=max(1.0, worker._lease_seconds) + 5.0)
     assert result.status is HermesDispatchStatus.SUCCESS
-    assert datetime.now(UTC) >= expires_at
-    assert monotonic() - started < 3
     with rig.sessions() as session:
         binding = session.get(InboundHostBinding, binding_id)
+        assert aware(binding.host_lease_until) == expires_at
         assert binding.closed_at is None
         assert binding.grant_ciphertext is None
 
