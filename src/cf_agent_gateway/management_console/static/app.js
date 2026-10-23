@@ -221,17 +221,27 @@ async function renderMessages(){window.CFConsoleLive?.clearNotice();const genera
   const emptyMessages={not_synced:['来源尚未同步','请先同步当前来源，再核对可读取的持久化档案。'],no_archived_records:['尚无已归档会话','此联系人尚无可读取的持久化消息记录。此结论仅适用于已配置档案。'],no_records_in_range:['日期范围内没有已归档消息','请调整北京日期范围。历史停采及未归档消息不会在此补造。'],no_filter_results:['没有匹配的已归档消息','请调整内容或发起人筛选；此结果不代表会话没有其他消息。'],archive_not_configured:['尚未配置可读档案','当前来源未配置可读取的持久化档案，尚不能判断是否有历史消息。']};
   const emptyText=emptyMessages[result.status]||['此范围没有已归档消息','可调整关键词、发起人或日期范围。历史停采及未归档消息不会在此补造。'];
   $('#message-list').innerHTML=html||empty(emptyText[0],emptyText[1],'chat');
+  markDisplayedMessages($('#message-list'));
   $('#message-pagination').innerHTML=pagination(result,'message-page');bindPager('message-page',messageQuery,renderMessages);
   $('#message-list').scrollTop=$('#message-list').scrollHeight;
  }catch(error){if(generation!==messageGeneration||!$('#message-list'))return;$('.message-coverage').textContent='档案读取失败';$('#message-list').innerHTML=empty('消息未能加载',error.message,'info');$('#message-pagination').replaceChildren();}
 }
 function fileSize(n){return n<1024?n+' B':n<1024*1024?(n/1024).toFixed(1)+' KB':(n/1024/1024).toFixed(1)+' MB';}
+function messageProcessing(m){
+ const trace=m.processing;if(!trace)return '';
+ const stages={occurred:'消息发生',upstream:'首次观察上游可读',archive:'已提交归档',increment:'持久增量',admission:'AI准入',authorization:'当时权限判定',routing:'分组 / Profile / 节点路由',hermes:'Hermes接受与执行',file_tools:'文件 / 工具操作',result:'结果保存',delivery:'微信投递'};
+ const states={recorded:'有记录',disabled:'停用 · 仅归档',unverified:'未接入 / 未核验',allowed:'允许',denied:'拒绝',unresolved:'待核验',pending:'等待处理',completed:'已完成',queued:'排队中',running:'执行中',success:'已完成',failed:'异常',uncertain:'结果不确定',dead:'已终止',generated:'已生成',delivering:'投递中',delivered:'已送达'};
+ const reasons={allowed:'已允许',self_message:'自发消息不触发AI',system_message:'系统消息不触发AI',sender_unresolved:'身份未解析',access_denied:'权限判定拒绝',route_unavailable:'路由不可用',legacy_unresolved:'历史判定未核验',identity_unresolved:'身份未解析',identity_disabled:'身份已停用',user_not_allowed:'员工未获准',bot_not_mentioned:'未提及Bot',risk_not_allowed:'风险级别未获准',permission_scope_empty:'权限范围为空',skill_not_allowed:'能力未获准'};
+ const rows=(trace.stages||[]).map(s=>`<dt>${esc(stages[s.stage]||'未接入环节')}</dt><dd>${esc(states[s.state]||'未知')}${s.at?' · '+esc(s.at):''}${s.reason?' · '+esc(reasons[s.reason]||'已记录判定，原因未接入'):''}${s.sequence!==undefined&&s.sequence!==null?' · 增量序号 '+esc(s.sequence):''}</dd>`).join('');
+ return `<details class="details message-processing"><summary>处理详情</summary><p class="help-text">${trace.evidence==='candidate_archive_only'?'此消息来自候选仅归档链；不进入AI任务。':'依据现有只读档案；缺少记录不代表成功或当前权限被撤销。'} 检查 ${esc(trace.observed_at||'未核验')}。${trace.evidence==='unavailable'?'处理证据暂不可读，消息档案仍保留。':''}</p><dl class="detail-grid">${rows}<dt>当前浏览器已接受显示</dt><dd data-display-time>等待当前页面接受</dd></dl>${trace.references?diagnostic('关联编号（可展开复制）',trace.references):''}</details>`;
+}
+function markDisplayedMessages(root){if(!root)return;$$('[data-message-id]',root).forEach(node=>{node.dataset.displayedAt ||= new Date().toISOString();const label=$('[data-display-time]',node);if(label)label.textContent=node.dataset.displayedAt+' · 仅此页面';});}
 function messageCard(m){
  const outgoing=['assistant','outbound','outgoing','self'].includes(m.direction);
  const quote=typeof m.reply==='string'?m.reply:(m.reply?.content||m.reply?.text||m.reply?.display_content||'引用消息内容未提供');
  const reply=m.reply?`<div class="quote">${esc(quote)}</div>`:'';
  const attachments=(m.attachments||[]).map(a=>`<div class="attachment"><span class="attachment-icon">${icon('file')}</span><div><div class="attachment-name">${esc(a.filename||'未命名附件')}</div><p>${a.file_size?esc(fileSize(a.file_size))+' · ':''}${esc(status(a.status))} · 原件未加载</p></div></div>`).join('');
- return `<article class="message${outgoing?' outgoing':''}" data-message-id="${esc(m.id)}" data-event-id="${esc(m.event_id||m.id)}" data-at="${esc(m.occurred_at)}"><span class="sr-only">${esc(fmt(m.occurred_at,true))}</span>${avatar({...m,display_name:m.sender_name,id:m.sender_id})}<div class="message-copy"><div class="message-meta"><span>${esc(m.sender_name||m.sender_id||'来源未提供')}</span><time>${esc(fmt(m.occurred_at))}</time></div><div class="bubble">${reply}${m.content?`<div class="message-text">${esc(m.content)}</div>`:''}${attachments}${!m.content&&!attachments?`<span class="muted">[${esc(m.message_type||'非文本消息')} · 媒体未加载]</span>`:''}</div>${m.delivery_status?`<div class="message-status">${esc(status(m.delivery_status))}</div>`:''}${m.message_type!=='text'&&!attachments?`<div class="message-status">${esc(m.media_status||'媒体原件未加载')}</div>`:''}</div></article>`;
+ return `<article class="message${outgoing?' outgoing':''}" data-message-id="${esc(m.id)}" data-event-id="${esc(m.event_id||m.id)}" data-at="${esc(m.occurred_at)}"><span class="sr-only">${esc(fmt(m.occurred_at,true))}</span>${avatar({...m,display_name:m.sender_name,id:m.sender_id})}<div class="message-copy"><div class="message-meta"><span>${esc(m.sender_name||m.sender_id||'来源未提供')}</span><time>${esc(fmt(m.occurred_at))}</time></div><div class="bubble">${reply}${m.content?`<div class="message-text">${esc(m.content)}</div>`:''}${attachments}${!m.content&&!attachments?`<span class="muted">[${esc(m.message_type||'非文本消息')} · 媒体未加载]</span>`:''}</div>${m.delivery_status?`<div class="message-status">${esc(status(m.delivery_status))}</div>`:''}${m.message_type!=='text'&&!attachments?`<div class="message-status">${esc(m.media_status||'媒体原件未加载')}</div>`:''}${messageProcessing(m)}</div></article>`;
 }
 function messageMatches(m){const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(m.occurred_at));return (!messageQuery.q||m.content?.toLowerCase().includes(messageQuery.q.toLowerCase()))&&(!messageQuery.sender||m.sender_id===messageQuery.sender)&&(!messageQuery.date_from||day>=messageQuery.date_from)&&(!messageQuery.date_to||day<=messageQuery.date_to);}
 async function applyLiveChanges(items){
@@ -263,6 +273,7 @@ async function applyLiveChanges(items){
  if(messageQuery.offset>0||!atBottom||$$('[data-message-id]',messages).length>180){window.CFConsoleLive.notice(fresh.length);return;}
  $('.empty-state',messages)?.remove();
  for(const item of fresh){const template=document.createElement('template');template.innerHTML=messageCard(item.message);const node=template.content.firstElementChild;const next=$$('[data-message-id]',messages).find(e=>Date.parse(e.dataset.at)>Date.parse(item.message.occurred_at));if(next)messages.insertBefore(node,next);else messages.append(node);node.dataset.displayedAt=new Date().toISOString();node.dataset.archivedAt=item.archived_at;node.dataset.upstreamReadableAt=item.upstream_readable_at;}
+ markDisplayedMessages(messages);
  $$('.day-divider',messages).forEach(e=>e.remove());let current='';$$('[data-message-id]',messages).forEach(e=>{const day=fmt(e.dataset.at,true);if(day!==current){const divider=document.createElement('div');divider.className='day-divider';divider.textContent=day;messages.insertBefore(divider,e);current=day;}});
  messages.scrollTop=messages.scrollHeight;
 }

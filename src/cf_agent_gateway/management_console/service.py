@@ -767,6 +767,8 @@ class ConsoleService:
 
     def message_view(self, archive, entry, kind, identity):
         if kind == "message":
+            from cf_agent_gateway.management_console.message_trace import message_trace
+
             message = archive.get(Message, int(identity))
             sender = self.find_entry(entry.source_id, entry.account_id, message.sender_id)
             attachments = [
@@ -778,6 +780,16 @@ class ConsoleService:
                 }
                 for a in message.attachments
             ]
+            try:
+                with archive.begin_nested():
+                    processing = message_trace(self, archive, entry, message)
+            except SQLAlchemyError:
+                processing = {
+                    "observed_at": iso(now()),
+                    "evidence": "unavailable",
+                    "stages": [],
+                    "reason": "message_processing_evidence_unavailable",
+                }
             return {
                 "id": "m:" + identity,
                 "event_id": message.event_id,
@@ -794,6 +806,7 @@ class ConsoleService:
                 "reply": message.reply_context,
                 "attachments": attachments,
                 "media_status": "原件未加载；阅读不自动下载",
+                "processing": processing,
             }
         response = archive.get(ResponseRecord, identity)
         delivery = archive.scalar(

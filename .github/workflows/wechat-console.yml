@@ -171,6 +171,7 @@ jobs:
             ${{ runner.temp }}/console-realtime-race/realtime-race-evidence/realtime-race-synthetic.png
             ${{ runner.temp }}/console-live/live-browser-evidence/peer-summary.json
             ${{ runner.temp }}/console-live/live-browser-evidence/live-history-1440-synthetic.png
+            ${{ runner.temp }}/console-live/live-browser-evidence/message-processing-1440-synthetic.png
             ${{ runner.temp }}/console-live/live-browser-evidence/live-system-1440-synthetic.png
             ${{ runner.temp }}/console-live/live-browser-evidence/live-chat-1920-synthetic.png
           if-no-files-found: warn
