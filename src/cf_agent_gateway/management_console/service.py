@@ -98,6 +98,8 @@ class ConsoleService:
         reader = self.config.reader(key)
         try:
             account, contacts, chats, proof = reader.snapshot()
+            if source.account_id and source.account_id != account:
+                raise SourceError("source_account_mismatch")
             source.account_id = account
             for raw in contacts:
                 self.upsert(source, raw, "contacts")

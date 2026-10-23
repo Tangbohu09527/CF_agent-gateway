@@ -75,6 +75,8 @@ class NativeReader:
         if not isinstance(value, dict):
             raise SourceError("bot_offline")
         self.bot_status = value.get("status")
+        if value.get("identityVerified") is False and self.bot_status == "logged_in":
+            raise SourceError("source_identity_unverified")
         if self.bot_status != "logged_in" and not (
             allow_stored and self.bot_status == "app_not_running"
         ):
