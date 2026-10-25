@@ -406,6 +406,8 @@ class LiveRuntime:
                     if reader.account() != account:
                         raise SourceError("source_account_changed_during_collect")
                     if chats and not windows:
+                        if "source_message_database_unreadable" in read_errors:
+                            raise SourceError("source_message_database_unreadable")
                         raise SourceError("source_messages_all_failed")
                     record_stage(
                         session,

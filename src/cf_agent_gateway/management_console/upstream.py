@@ -62,6 +62,16 @@ class NativeReader:
                 "api/messages/" + quote(chat_id, safe=""), params={"limit": limit, "offset": 0}
             )
             if response.status_code != 200:
+                if response.status_code == 409:
+                    try:
+                        error = response.json()
+                    except ValueError:
+                        error = None
+                    if (
+                        isinstance(error, dict)
+                        and error.get("error") == "active_message_database_unreadable"
+                    ):
+                        raise SourceError("source_message_database_unreadable")
                 raise SourceError("source_messages_read_failed")
             value = response.json()
             if not isinstance(value, list) or len(value) > limit:
