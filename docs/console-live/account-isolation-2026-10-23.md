@@ -1,5 +1,7 @@
 # 活动账号与消息诊断：2026-10-23
 
+后续失败与当前部署见[2026-10-25第一阶段记录](new-bot-stage1-2026-10-25.md)：真实新增因消息库不可读仍未通过，已修正错误被当作成功空窗；本文历史观察不变。
+
 用户明确选择了新的 Bot 账号后，保留当前客户端登录。旧来源、旧聊天档案、员工权限和群配置继续保留；新账号登记为独立来源，不根据昵称、群名或列表顺序合并身份。本文不记录真实身份、群名、正文、登录二维码、密钥或私有配置。
 
 代码交付：[Gateway Draft PR29](https://github.com/Tangbohu09527/CF_agent-gateway/pull/29)，base 为 [PR28](https://github.com/Tangbohu09527/CF_agent-gateway/pull/28) 的 `codex/fix-console-realtime-archive`；活动账号读取依赖 [WeChat Draft PR15](https://github.com/Tangbohu09527/CF_agent-wechat/pull/15)。均未合并。

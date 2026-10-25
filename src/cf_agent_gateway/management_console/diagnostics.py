@@ -16,6 +16,7 @@ REASONS = frozenset(
         "source_messages_connection_failed",
         "source_messages_read_failed",
         "source_messages_contract_invalid",
+        "source_message_database_unreadable",
         "source_messages_all_failed",
         "source_connection_failed",
         "source_http_error",
