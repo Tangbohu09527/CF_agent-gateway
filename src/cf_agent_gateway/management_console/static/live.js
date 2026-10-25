@@ -1,7 +1,7 @@
 'use strict';
 window.CFConsoleLive = (() => {
  let context=null, timer=null, generation=0, cursor='', pending=0, lastSnapshot=null;
- let flight=null, refreshRequested=false, renderVersion=0, receivedAt=null, acceptedAt=null;
+ let flight=null, refreshRequested=false, renderVersion=0, receivedAt=null, acceptedAt=null, pollFailure='';
  const activeActions=new Set();
  const current=(ctx,gen,src)=>context===ctx&&generation===gen&&(!src||ctx.getSource()===src);
  const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -14,10 +14,32 @@ window.CFConsoleLive = (() => {
  const stages={login:'微信进程与真实登录',ownership:'采集所有权',upstream:'上游消息读取',normalization:'规范化与身份',persistence:'候选数据库提交'};
  const stageWords={normal:'正常',partial:'部分受阻',blocked:'受阻',error:'异常',disabled:'停用',unknown:'未知'};
  function chainHTML(trace){const rows=Object.entries(stages).map(([key,label])=>{const value=trace?.stages?.[key]||{},expired=!value.observed_at||Date.now()>Date.parse(value.observed_at)+(trace?.ttl_seconds||20)*1000;return `<div class="status-row"><div><h3>${html(label)} · ${html(expired?'未知 / 检查过期':stageWords[value.state]||'未知')}</h3><p>${html(text(value.reason))} · 观察 ${html(time(value.observed_at))} · 最近正常 ${html(time(value.last_success_at))}${value.failed_conversations?' · 读取失败会话 '+html(value.failed_conversations):''}${value.invalid_rows?' · 身份不完整 '+html(value.invalid_rows):''}</p></div></div>`;}).join('');const incidents=(trace?.incidents||[]).map(x=>`<p>${html(stages[x.stage]||x.stage)} · ${html(text(x.reason))} · ${x.recovered_at?'历史已恢复':'最近观察异常'} · ${html(x.count)} 次 · 首次 ${html(time(x.first_at))} · 最近 ${html(time(x.last_at))}${x.recovered_at?' · 恢复 '+html(time(x.recovered_at)):''}</p>`).join('')||'<p>尚无已记录的故障；这不代表缺失的历史消息已恢复。</p>';return `<div class="surface section-gap"><div class="surface-title"><h2>消息链路</h2><button id="copy-chain-diagnostic">复制诊断摘要</button></div><p>检查到期显示未知；最近检查成功与收到新消息分别记录。此处不启动服务，也不触发 AI。</p>${rows}<div class="status-row"><div><h3>当前浏览器增量</h3><p>本页最近接受响应 ${html(time(acceptedAt))} · 最近收到响应 ${html(time(receivedAt))}。仅代表当前页面；后端返回不等于其他终端已显示。</p></div></div><details><summary>近期故障记录</summary>${incidents}</details></div>`;}
- function stop(){generation++;renderVersion++;clearTimeout(timer);timer=null;context=null;cursor='';pending=0;lastSnapshot=null;flight=null;refreshRequested=false;receivedAt=null;acceptedAt=null;document.querySelector('#new-message-notice')?.remove();document.querySelector('#controlled-qr')?.replaceChildren();}
+ function stop(){generation++;renderVersion++;clearTimeout(timer);timer=null;context=null;cursor='';pending=0;lastSnapshot=null;flight=null;refreshRequested=false;receivedAt=null;acceptedAt=null;pollFailure='';document.querySelector('#new-message-notice')?.remove();document.querySelector('#controlled-qr')?.replaceChildren();renderChatStatus();}
  async function start(ctx){stop();context=ctx;const gen=generation;await tick(gen);}
  function reset(){if(context){const ctx=context;return start(ctx);}}
  function lamp(bot){const element=document.querySelector('#bot-live');if(!element)return;const expires=Date.parse(bot?.expires_at),stale=!Number.isFinite(expires)||Date.now()>expires,state=stale||!['online','offline','unknown'].includes(bot?.state)?'unknown':bot.state;element.dataset.state=state;element.querySelector('span').textContent=words[state]||words.unknown;element.title=`${text(stale?'check_expired':bot.reason)}；检查：${time(bot?.observed_at)}；来源：真实认证/进程观察（演示模式为协议替身）`;}
+ function renderChatStatus(root=document.querySelector('#chat-sync-status')){
+  if(!root)return;
+  if(!root.querySelector('[data-sync-title]')){
+   root.innerHTML='<div class="chat-sync-heading"><strong data-sync-title aria-live="polite"></strong><span>当前展示已归档记录</span><button type="button" class="text-button" data-sync-diagnostics>查看诊断</button></div><p data-sync-reason></p><dl class="chat-sync-times"><div><dt>最后检查</dt><dd><time data-sync-time="check"></time></dd></div><div><dt>最近成功检查</dt><dd><time data-sync-time="success"></time></dd></div><div><dt>此来源最后实际归档</dt><dd><time data-sync-time="archive"></time></dd></div></dl>';
+  }
+  const collect=lastSnapshot?.collection,checked=Date.parse(collect?.last_check_at);
+  const ttl=Number(lastSnapshot?.diagnostics?.ttl_seconds)||20;
+  const expired=!Number.isFinite(checked)||Date.now()>checked+ttl*1000;
+  const state=!pollFailure&&!expired&&['running','partial','blocked','disabled'].includes(collect?.state)?collect.state:'unknown';
+  const titles={running:'采集检查正常',partial:'消息同步部分受阻',blocked:'消息同步受阻',disabled:'消息同步已停用',unknown:'消息同步状态未知'};
+  const explanations={running:'检查成功不代表有新消息；以实际归档时间为准。',partial:'部分会话或记录尚未归档，请查看诊断。',blocked:'采集尚未完成，请查看诊断。',disabled:'仅归档采集已停用。',unknown:!collect?'尚未取得当前来源的采集检查。':expired?'采集检查已过期，等待新的有效检查。':'无法确认当前采集状态，请查看诊断。'};
+  const message=pollFailure||(['blocked','partial'].includes(state)&&collect?.last_error?text(collect.last_error):explanations[state]);
+  root.dataset.state=state;
+  const title=root.querySelector('[data-sync-title]');if(title.textContent!==titles[state])title.textContent=titles[state];
+  root.querySelector('[data-sync-reason]').textContent=message;
+  for(const [key,value] of [['check',collect?.last_check_at],['success',collect?.last_success_at],['archive',collect?.last_message_at]]){
+   const element=root.querySelector('[data-sync-time='+key+']'),valid=value&&Number.isFinite(Date.parse(value));
+   element.textContent=valid?time(value):key==='archive'?'未取得实际归档时间':'尚无记录';
+   if(valid)element.setAttribute('datetime',value);else element.removeAttribute('datetime');
+  }
+  root.querySelector('[data-sync-diagnostics]').onclick=()=>context?.showDiagnostics?.();
+ }
  function schedule(gen,delay){if(!context||gen!==generation)return;clearTimeout(timer);timer=setTimeout(()=>{timer=null;void tick(gen);},delay);}
  async function tick(gen){
   const ctx=context;if(!ctx||gen!==generation)return;
@@ -26,12 +48,12 @@ window.CFConsoleLive = (() => {
   const src=ctx.getSource();if(!src){schedule(gen,2000);return;}
   const operation={gen,promise:null};flight=operation;
   operation.promise=(async()=>{
-   let delay=2000;
+   let delay=2000,responseReceived=false;
    try{
     const value=await ctx.api('live/'+encodeURIComponent(src)+'?'+new URLSearchParams({after:cursor,limit:100}));
     if(!current(ctx,gen,src))return;
     receivedAt=new Date().toISOString();
-    lastSnapshot=value;lamp(value.bot);
+    responseReceived=true;pollFailure='';lastSnapshot=value;lamp(value.bot);renderChatStatus();
     // Commit the durable cursor only after this page accepts its changes.
     if(value.items.length&&await ctx.applyChanges(value.items)===false){delay=500;return;}
     if(!current(ctx,gen,src))return;
@@ -41,7 +63,9 @@ window.CFConsoleLive = (() => {
     delay=value.has_more?50:2000;
    }catch(error){
     if(!current(ctx,gen,src))return;
+    pollFailure=responseReceived?'增量更新未完成，正在等待重试；已归档记录保留。':'增量连接失败，正在等待重连；已归档记录保留。';
     lamp(lastSnapshot?.bot);
+    renderChatStatus();
     const connection=document.querySelector('#live-connection');if(connection)connection.textContent='增量连接失败，正在等待重连；已显示记录保留。';
     delay=4000;
    }finally{
@@ -51,7 +75,7 @@ window.CFConsoleLive = (() => {
   })();
   return operation.promise;
  }
- function staleTick(){if(context)lamp(lastSnapshot?.bot);}
+ function staleTick(){if(context){lamp(lastSnapshot?.bot);renderChatStatus();}}
  setInterval(staleTick,1000);
  function notice(count){pending+=count;let button=document.querySelector('#new-message-notice');if(!button){const list=document.querySelector('#message-list');if(!list)return;button=document.createElement('button');button.id='new-message-notice';button.className='new-message-notice';list.after(button);}button.textContent=`有 ${pending} 条新消息 · 查看最新`;const ctx=context,gen=generation;button.setAttribute('aria-live','polite');button.onclick=async()=>{if(!current(ctx,gen))return;clearNotice();await ctx.latest();};}
  function clearNotice(){pending=0;document.querySelector('#new-message-notice')?.remove();}
@@ -75,5 +99,5 @@ window.CFConsoleLive = (() => {
  root.querySelectorAll('[data-live-action]').forEach(button=>{button.onclick=()=>{const kind=button.dataset.liveAction;const path=kind==='check'?`live/${src}/check`:kind==='collect'?`live/${src}/collection/${collect.enabled?'stop':'start'}`:`services/${src}/${kind==='service'?'start-service':kind==='app'?'start-app':'login'}`;action(button,path);};const kind=button.dataset.liveAction,path=kind==='check'?'live/'+src+'/check':kind==='collect'?'live/'+src+'/collection/'+(collect.enabled?'stop':'start'):'services/'+src+'/'+(kind==='service'?'start-service':kind==='app'?'start-app':'login');if(activeActions.has(src+':'+path)){button.disabled=true;button.setAttribute('aria-busy','true');}});
  if(login.qr_available){try{const qr=await ctx.api('services/'+src+'/login/qr');if(!current(ctx,gen,src)||!root.isConnected||version!==renderVersion)return;const image=document.createElement('img');image.alt='当前Bot登录二维码，仅在此管理页面显示';image.className='controlled-qr';if(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(qr.data_url)){image.src=qr.data_url;root.querySelector('#controlled-qr').replaceChildren(image);}}catch{if(current(ctx,gen,src)&&root.isConnected&&version===renderVersion)root.querySelector('#controlled-qr').textContent='二维码已不可用，请重新检查。';}}
  }
- return {start,stop,reset,notice,clearNotice,renderSystem};
+ return {start,stop,reset,notice,clearNotice,renderSystem,renderChatStatus};
 })();
