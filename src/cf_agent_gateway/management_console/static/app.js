@@ -119,7 +119,7 @@ async function refreshState() {
  $('#sync-label').textContent=current?`${status(current.status)} · ${fmt(current.last_sync_at)}`:'没有已登记来源';
  $('#source-sync').disabled=!current||!current.capabilities?.sync;
 }
-async function showApp(){await refreshState();$('#login-screen').hidden=true;$('#app').hidden=false;$('#login-form').reset();await window.CFConsoleLive?.start({api:consoleApi,getSource:()=>source,applyChanges:applyLiveChanges,latest:async()=>{messageQuery.offset=0;await renderMessages();},toast:showToast});await navigate(pageName);}
+async function showApp(){await refreshState();$('#login-screen').hidden=true;$('#app').hidden=false;$('#login-form').reset();await window.CFConsoleLive?.start({api:consoleApi,getSource:()=>source,applyChanges:applyLiveChanges,latest:async()=>{messageQuery.offset=0;await renderMessages();},showDiagnostics:()=>navigate('system'),toast:showToast});await navigate(pageName);}
 $('#login-form').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,button=$('button',form);button.disabled=true;$('#login-error').hidden=true;
  try{const v=formValues(form);const r=await consoleApi('login','POST',v);csrf=r.csrf_token;await showApp();}
  catch(error){$('#login-error').textContent=error.message;$('#login-error').hidden=false;}
@@ -208,6 +208,8 @@ async function renderChats(generation){
 let messageGeneration=0;
 async function renderMessages(){window.CFConsoleLive?.clearNotice();const generation=++messageGeneration,chat=activeChat;if(!chat||!$('#reading-panel'))return;
  $('#reading-panel').innerHTML=`<header class="reading-header"><button class="icon-button mobile-back" id="back-to-chats" aria-label="返回会话列表">${icon('arrow')}</button><div class="reading-title">${avatar(chat,chat.kind==='group')}<div><h2>${esc(chat.display_name)}</h2><p>${chat.kind==='group'?'群聊档案':'私聊档案'} · ${chat.unread_count===null||chat.unread_count===undefined?'未读数：来源未提供':`微信快照未读 ${chat.unread_count} 条`}</p></div></div>${badge('只读归档','good')}</header><form class="message-filter" id="message-filter"><label>消息内容<input name="q" placeholder="搜索消息" value="${esc(messageQuery.q)}"></label><label>已归档发言者<select name="sender" aria-label="已归档发言者" disabled><option value="">正在读取发言者…</option></select></label><label class="date-field">开始日期（北京）<input type="date" name="date_from" value="${esc(messageQuery.date_from)}"></label><label class="date-field">结束日期（北京）<input type="date" name="date_to" value="${esc(messageQuery.date_to)}"></label><button type="submit">筛选</button><button type="button" id="reset-message-filter">重置</button></form><p class="message-coverage">正在读取持久化消息…</p><div class="messages" id="message-list">${loading()}</div><div id="message-pagination"></div><footer class="readonly-footer">只读档案 · 不发送消息，不清微信未读，不自动下载媒体原件</footer>`;
+ $('.reading-header').insertAdjacentHTML('afterend','<section id="chat-sync-status" class="chat-sync-status" aria-label="当前来源消息同步状态"></section>');
+ window.CFConsoleLive?.renderChatStatus();
  $('#back-to-chats').onclick=()=>$('.chat-shell').classList.remove('reading-open');
  $('#message-filter').onsubmit=e=>{e.preventDefault();const v=formValues(e.currentTarget);if(v.date_from&&v.date_to&&v.date_from>v.date_to){showToast('开始日期不能晚于结束日期。',true);return;}Object.assign(messageQuery,v,{offset:0});renderMessages();};
  $('#reset-message-filter').onclick=()=>{messageQuery={q:'',sender:'',date_from:'',date_to:'',offset:0,limit:30};renderMessages();};
